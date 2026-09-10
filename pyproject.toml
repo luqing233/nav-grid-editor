@@ -1,0 +1,17 @@
+[project]
+name = "nav-grid-editor"
+version = "0.2.0"
+requires-python = ">=3.11"
+# numpy: 网格以稠密 uint8 npz 落盘（np.savez_compressed）
+# pillow: WebP 瓦片转 PNG + 拼接总图落盘
+# playwright: 抓取游戏地图瓦片（还需执行 `playwright install chromium`）
+# websockets: 3001 端口坐标中继（兼容 wsserver/main.py 客户端，可选）
+dependencies = [
+    "numpy>=2.0",
+    "pillow>=10.0",
+    "playwright>=1.40",
+    "websockets>=12.0",
+]
+
+[project.scripts]
+nav-grid-editor = "main:main"

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "nav-grid-editor",
+      "runtimeExecutable": "E:/LuQing/python/nav-grid-editor/.venv/Scripts/python.exe",
+      "runtimeArgs": ["main.py"],
+      "port": 8765
+    }
+  ]
+}
