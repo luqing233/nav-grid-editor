@@ -328,6 +328,9 @@
       <button id="btnCompose" title="把当前地图/zoom 的已有瓦片逐张贴上总图">合成总图</button>
       <button id="btnSim" title="不落盘的模拟抓取，用来演示实时贴图">模拟抓取</button>
       <div class="tb-sep"></div>
+      <button id="btnMarksPublic" title="抓取官方地图标记（免鉴权）：采集物、怪种等，写到 assets/items/map/">抓取公开标记</button>
+      <button id="btnMarksAuth" title="抓取认证标记：含玩家自建的滑索/暗管/供电桩等，写到 assets/items/map_auth/">抓取认证标记</button>
+      <div class="tb-sep"></div>
       <button id="btnFit" title="缩放并居中显示整张总图（也可双击画布）">适应窗口</button>
       <button id="btnReset" title="清除当前地图画布">清空画布</button>
       <button id="btnDownload" title="下载当前地图总图 PNG">下载总图</button>
@@ -383,6 +386,15 @@
           <span>当前画布: <b id="cPasted" class="num">0</b></span>
         </div>
         <div id="progressLine"></div>
+      </div>
+      <h3>地图标记</h3>
+      <div class="panel">
+        <div class="tb-act-hint" style="margin-bottom:6px">
+          抓取官方地图标记。认证口径才有玩家自建的滑索/暗管/供电桩——
+          它需要的凭证只从本机文件读，网页不接触。
+        </div>
+        <div id="marksCred"></div>
+        <div id="marksStatus">未抓取</div>
       </div>
     </section>
 
@@ -461,6 +473,7 @@ const state = {
   views: new Map(),
   activeKey: null,
   compose: null, // {map, zoom, total, done}
+  marks: null,   // 地图标记抓取状态（/api/marks/status）
 };
 
 const $ = id => document.getElementById(id);
@@ -1893,6 +1906,56 @@ function syncButtons() {
   $("fetchState").textContent = state.busyFetch ? "抓取中" : "未抓取";
 }
 
+// ---------------- 地图标记抓取 ----------------
+// 与命令行 scripts/fetch_endfield_marks*.py 共用同一份逻辑（nav_grid_editor.marks），
+// 这里只是换个触发方式，产出与统计口径一致。
+async function loadMarksStatus() {
+  try {
+    state.marks = await (await fetch("/api/marks/status")).json();
+  } catch (e) { /* 拿不到就保持原样，不打断页面 */ }
+  renderMarksPanel();
+}
+
+function renderMarksPanel() {
+  const m = state.marks;
+  if (!m) return;
+  $("marksCred").innerHTML = m.credential_ready
+    ? '凭证: <b>已就位</b> <span class="t-time">' + m.credential_file + "</span>"
+    : '凭证: <b class="t-warn">未找到</b> —— 认证口径需要把 hg/check 的 data.content '
+      + "粘到 <span class=\"t-time\">" + m.credential_file + "</span>（该文件已 gitignore）";
+
+  const s = m.stats;
+  let line;
+  if (m.running) line = "抓取中…（进度见日志）";
+  else if (m.error) line = '<b class="t-err">上次失败: ' + m.error + "</b>";
+  else if (s) {
+    line = (s.kind === "auth" ? "上次（认证）: " : "上次（公开）: ")
+         + s.maps + " 图 / " + s.items + " 物品名 / " + s.points + " 点位";
+    if (s.structure_points) line += " · 玩家自建结构 " + s.structure_points + " 个";
+    line += '<br><span class="t-time">' + s.out_dir + "</span>";
+  } else line = "未抓取";
+  $("marksStatus").innerHTML = line;
+
+  $("btnMarksPublic").disabled = !!m.running;
+  $("btnMarksAuth").disabled = !!m.running;
+}
+
+async function startMarks(kind) {
+  try {
+    const res = await (await fetch("/api/marks/fetch", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind }),
+    })).json();
+    if (!res.ok) { addLog("标记抓取启动失败: " + res.error, "t-err"); return; }
+    addLog("开始抓取地图标记（" + (kind === "auth" ? "认证" : "公开") + "口径）", "t-ok");
+    state.marks = Object.assign({}, state.marks,
+      { running: true, kind, stats: null, error: null });
+  } catch (e) {
+    addLog("标记抓取请求失败: " + e.message, "t-err");
+  }
+  renderMarksPanel();
+}
+
 function setBusyFetch(b) {
   state.busyFetch = b;
   syncButtons();
@@ -1939,7 +2002,7 @@ function connect() {
   };
 }
 
-function handleEvent(evt) {
+async function handleEvent(evt) {
   switch (evt.type) {
     case "hello":
       state.service = evt.service;
@@ -2032,6 +2095,16 @@ function handleEvent(evt) {
     case "simulate_done":
       addLog("模拟抓取完成: " + evt.total + " 张", "t-ok");
       break;
+    case "marks_start":
+      state.marks = Object.assign({}, state.marks || {},
+        { running: true, kind: evt.kind, stats: null, error: null });
+      renderMarksPanel();
+      break;
+    case "marks_done":
+      // 事件里只有 stats/error，凭证状态等字段要回 /api/marks/status 拿
+      if (evt.error) addLog("标记抓取失败: " + evt.error, "t-err");
+      await loadMarksStatus();
+      break;
     case "log":
       addLog(evt.text, evt.text.indexOf("失败") >= 0 || evt.text.indexOf("异常") >= 0 ? "t-err" : "");
       break;
@@ -2120,6 +2193,8 @@ async function openSelectedMap() {
 }
 
 $("btnCompose").onclick = startCompose;
+$("btnMarksPublic").onclick = () => startMarks("public");
+$("btnMarksAuth").onclick = () => startMarks("auth");
 $("btnFetch").onclick = async () => {
   try {
     const resp = await fetch("/api/fetch/start", {
@@ -2312,6 +2387,7 @@ window.addEventListener("resize", () => { clampPan(); applyView(); });
 window.addEventListener("load", () => {
   syncModeChrome();      // 初始状态：浏览模式，只显示它的动作组与侧栏面板
   syncButtons();
+  loadMarksStatus();
   loadTileMaps();
   connect();
 });

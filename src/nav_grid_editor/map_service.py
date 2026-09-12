@@ -37,6 +37,8 @@ from pathlib import Path
 
 import numpy as np  # 2D 网格的稠密 npz 读写必需（非可选依赖）
 
+from . import marks as marks_fetch
+
 # =========================================================
 # 可选依赖
 # =========================================================
@@ -616,6 +618,9 @@ class MapService:
         self._simulate: dict | None = None
         self._simulation_cancel = threading.Event()
         self._sim_tiles: dict[tuple[int, int], bytes] = {}  # 模拟瓦片（内存）
+        # 地图标记抓取（公开/认证口径）：{"kind","running","stats","error"}
+        self._marks: dict | None = None
+        self._marks_thread: threading.Thread | None = None
 
     # ---------- 状态快照 ----------
     def status(self) -> dict:
@@ -634,6 +639,7 @@ class MapService:
             },
             "compose": dict(self._compose) if self._compose else None,
             "simulate": dict(self._simulate) if self._simulate else None,
+            "marks": dict(self._marks) if self._marks else None,
         }
 
     # ---------- 事件 ----------
@@ -1151,6 +1157,82 @@ class MapService:
                 self._simulate["running"] = False
             self.bus.emit(type="simulate_done", map=SIM_MAP, zoom=SIM_ZOOM, total=n)
             self.bus.emit(type="log", text=f"模拟抓取结束，共 {n} 张瓦片（未写盘）")
+
+    # =========================================================
+    # 地图标记抓取（公开口径 / 认证口径）
+    # =========================================================
+    # 与命令行 scripts/fetch_endfield_marks*.py 共用 nav_grid_editor.marks，
+    # 网页只是换个触发方式，产出与统计口径完全一致。
+
+    def marks_status(self) -> dict:
+        """给前端的状态快照（含凭证文件是否就位，便于提示）。"""
+        p = marks_fetch.hg_content_path()
+        return {
+            "running": bool(self._marks and self._marks.get("running")),
+            "has_thread": self._marks_thread is not None and self._marks_thread.is_alive(),
+            "kind": self._marks.get("kind") if self._marks else None,
+            "stats": self._marks.get("stats") if self._marks else None,
+            "error": self._marks.get("error") if self._marks else None,
+            "credential_file": str(p),
+            "credential_ready": bool(marks_fetch.read_hg_content()),
+            "public_dir": str(marks_fetch.marks_dir(default_assets_dir(self.data_root))),
+            "auth_dir": str(marks_fetch.marks_auth_dir(default_assets_dir(self.data_root))),
+        }
+
+    def start_marks(self, kind: str) -> dict:
+        """kind: "public"（免鉴权）或 "auth"（用本地凭证文件，含玩家自建结构）。"""
+        if kind not in ("public", "auth"):
+            return {"ok": False, "error": f"未知口径: {kind!r}（应为 public 或 auth）"}
+        with self._lock:
+            if self._marks_thread and self._marks_thread.is_alive():
+                return {"ok": False, "error": "标记抓取已在运行中"}
+            if kind == "auth" and not marks_fetch.read_hg_content():
+                p = marks_fetch.hg_content_path()
+                return {"ok": False,
+                        "error": f"找不到凭证：请把 hg/check 响应的 data.content 粘到 {p} "
+                                 "（该文件已 gitignore）"}
+            self._marks = {"kind": kind, "running": True, "stats": None, "error": None}
+            self._marks_thread = threading.Thread(
+                target=self._marks_run, args=(kind,), name=f"marks-{kind}", daemon=True)
+            self._marks_thread.start()
+        self.bus.emit(type="marks_start", kind=kind)
+        self.bus.emit(type="log",
+                      text="开始抓取地图标记（" + ("认证口径，含玩家自建结构" if kind == "auth" else "公开口径")
+                           + "）")
+        return {"ok": True, "kind": kind}
+
+    def _marks_run(self, kind: str):
+        def log(msg: str):
+            _log(f"[marks] {msg}")
+            self.bus.emit(type="log", text=msg)
+
+        assets = default_assets_dir(self.data_root)
+        try:
+            if kind == "public":
+                stats = marks_fetch.fetch_public(marks_fetch.marks_dir(assets), log=log)
+                warnings = []
+            else:
+                content = marks_fetch.read_hg_content()
+                if not content:
+                    raise RuntimeError("凭证文件为空或读不到")
+                stats = marks_fetch.fetch_auth(marks_fetch.marks_auth_dir(assets),
+                                               content, log=log)
+                warnings = marks_fetch.validate(
+                    stats,
+                    marks_fetch.load_json(marks_fetch.marks_auth_dir(assets) / "summary.json") or {},
+                    None,
+                )
+            self._marks = {"kind": kind, "running": False, "stats": stats,
+                           "error": None, "warnings": warnings}
+            self.bus.emit(type="marks_done", kind=kind, stats=stats, warnings=warnings)
+            self.bus.emit(type="log", text=f"标记抓取完成：{stats.get('maps')} 张图 / "
+                                           f"{stats.get('items')} 个物品名 / "
+                                           f"{stats.get('points')} 个点位")
+        except Exception as e:  # noqa: BLE001 — 线程里必须兜住，否则前端只看到"运行中"
+            _log(f"标记抓取失败: {e}")
+            self._marks = {"kind": kind, "running": False, "stats": None, "error": str(e)}
+            self.bus.emit(type="marks_done", kind=kind, stats=None, error=str(e))
+            self.bus.emit(type="log", text=f"标记抓取失败: {e}")
 
     # =========================================================
     # 坐标中继（wsserver/main.py 功能的网页化）

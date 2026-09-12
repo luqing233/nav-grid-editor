@@ -205,6 +205,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(svc.status()["fetch"])
             return
 
+        if path == "/api/marks/status":
+            self._send_json(svc.marks_status())
+            return
+
         if path == "/api/events":
             svc.emit_sse(self)
             return
@@ -301,6 +305,14 @@ class Handler(BaseHTTPRequestHandler):
                 str(req.get("map", "")), str(req.get("zoom", "")),
                 save=bool(req.get("save", False)),
             ))
+            return
+
+        if path == "/api/marks/fetch":
+            req, err = self._read_json()
+            if err:
+                self._send_json({"ok": False, "error": err}, 400)
+                return
+            self._send_json(svc.start_marks(str(req.get("kind", "public"))))
             return
 
         if path == "/api/simulate/start":
