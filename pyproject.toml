@@ -19,6 +19,12 @@ dependencies = [
     "websockets>=12.0",
 ]
 
+# 认证抓取地图标记（scripts/fetch_endfield_marks_auth.py）+ 自铸数美设备ID 用。
+# 不装也能用另外三条铸造回退链（HTTP 重放 / Node+官方SDK / 临时浏览器），
+# 只有"合成指纹"那条纯 Python 路径需要 cryptography。
+[project.optional-dependencies]
+auth = ["cryptography>=42"]
+
 [project.scripts]
 nav-grid-editor = "nav_grid_editor.cli:main"
 
@@ -28,6 +34,7 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# 前端页面随包分发（server.py 用 Path(__file__).parent / "web" 定位）
+# 前端页面随包分发（server.py 用 Path(__file__).parent / "web" 定位）；
+# smsdk_runner.mjs 由 map_device_id.py 用 Path(__file__).with_name 定位
 [tool.setuptools.package-data]
-nav_grid_editor = ["web/*.html"]
+nav_grid_editor = ["web/*.html", "smsdk_runner.mjs"]

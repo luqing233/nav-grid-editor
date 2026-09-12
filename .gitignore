@@ -22,6 +22,10 @@ browser_profile/
 *.overview.png
 *.overview.webp
 
+# 数美设备ID(dId)与注册载荷缓存 / 官方 SMSdk 脚本缓存。
+# 设备指纹与账号无关但属于本机标识，不进版本库（删掉会自动重新铸造）。
+configs/
+
 # 注意：tiles/ 与 grids2d/ 是采集与编辑产物（体积大但属于数据，不是缓存），
 # 默认不忽略。若要纳入版本库请自行确认体量，若不想提交请取消下面两行的注释。
 # tiles/
