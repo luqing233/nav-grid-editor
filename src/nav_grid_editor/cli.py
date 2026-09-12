@@ -30,9 +30,13 @@
 - POST /api/simulate/start|stop           模拟抓取（不落盘，演示实时贴图）
 - POST /api/coords                        坐标中继（可选 ws://127.0.0.1:3001 同功能）
 
-数据目录默认取**当前工作目录**：``tiles/``、``grids2d/``、``browser_profile/``
-都在你运行命令的那个目录下。可用 ``--data-root`` / ``NAV_DATA_ROOT`` 换根目录，
-或用 ``--tiles-root`` / ``--profile-dir`` / ``--grid2d-dir`` 单独覆盖。
+数据根目录默认取**当前工作目录**。采集/编辑产物统一收在它下面的 ``assets/``：
+``assets/tiles/``（瓦片与合成总图）、``assets/grids2d/``（2D 网格）、
+``assets/items/``（地图标记数据）。``browser_profile/``（登录态）与
+``configs/``（设备ID）是凭证类目录，刻意留在 ``assets/`` 外面。
+
+可用 ``--data-root`` / ``NAV_DATA_ROOT`` 换根目录，或用 ``--tiles-root`` /
+``--profile-dir`` / ``--grid2d-dir`` 单独覆盖。
 """
 
 from __future__ import annotations
@@ -109,13 +113,13 @@ def main(argv: list[str] | None = None) -> int:
         description="地图瓦片采集/合成 + 标定 + 2D 网格编辑 统一服务")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--data-root", default="",
-                    help="数据根目录（tiles/ grids2d/ browser_profile/ 的父目录，"
+                    help="数据根目录（assets/ browser_profile/ configs/ 的父目录，"
                          "默认当前工作目录）")
-    ap.add_argument("--tiles-root", default="", help="瓦片根目录（默认 <data-root>/tiles）")
+    ap.add_argument("--tiles-root", default="", help="瓦片根目录（默认 <data-root>/assets/tiles）")
     ap.add_argument("--profile-dir", default="",
                     help="浏览器登录配置目录（默认 <data-root>/browser_profile）")
     ap.add_argument("--grid2d-dir", default="",
-                    help="2D 网格输出目录（默认 <data-root>/grids2d，"
+                    help="2D 网格输出目录（默认 <data-root>/assets/grids2d，"
                          "可用环境变量 NAV_GRID2D_DIR）")
     args = ap.parse_args(argv)
 

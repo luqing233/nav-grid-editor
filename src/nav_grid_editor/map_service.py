@@ -91,18 +91,22 @@ GRID_MEMBERS = ("cells", "meta")
 GRID_STATES = frozenset((CELL_UNKNOWN, CELL_FREE, CELL_BLOCKED))
 
 # 独立工程：所有数据都放在本项目目录内，不依赖外部路径。
-# 全部数据都在 nav-grid-editor 内：
-#   tiles/                     瓦片数据（latest / run_* 会话 / maps 总图）
-#   browser_profile/           Playwright 持久化登录配置
+#
+# 采集/编辑**产物**统一收在 assets/ 下，根目录只留源码与"凭证类"目录：
+#   assets/tiles/              瓦片数据（latest / run_* 会话 / maps 总图）
+#   assets/grids2d/            2D 导航网格 npz
+#   assets/items/map*/         地图标记数据
+#   browser_profile/           Playwright 持久化登录配置（是登录态，不是产物）
+#   configs/                   数美 dId 缓存（是设备标识，不是产物）
+# browser_profile/ 与 configs/ 刻意留在 assets/ 外面：assets 语义上是"要分发的
+# 资产"，而这两者绝不能随包发出去。
 
-# 数据目录（tiles/ grids2d/ browser_profile/ 的父目录）
 def default_data_root() -> Path:
     """数据根目录。
 
-    默认取**当前工作目录**：tiles/ grids2d/ 这些是项目数据，跟着"你在哪运行"
-    走，而不是跟着代码包走。以前默认取 ``__file__`` 所在目录，代码搬进 src/
-    之后会指到包内部，所以统一改成 cwd + 显式覆盖
-    （``--data-root`` / ``NAV_DATA_ROOT``）。
+    默认取**当前工作目录**：产物跟着"你在哪运行"走，而不是跟着代码包走。
+    以前默认取 ``__file__`` 所在目录，代码搬进 src/ 之后会指到包内部，
+    所以统一改成 cwd + 显式覆盖（``--data-root`` / ``NAV_DATA_ROOT``）。
     """
     env = os.environ.get("NAV_DATA_ROOT", "")
     if env:
@@ -110,15 +114,24 @@ def default_data_root() -> Path:
     return Path.cwd()
 
 
+# 产物根目录：所有采集/编辑产物都收在这里（可用 NAV_ASSETS_DIR 覆盖）
+def default_assets_dir(root: Path | None = None) -> Path:
+    env = os.environ.get("NAV_ASSETS_DIR", "")
+    if env:
+        return Path(env)
+    return (Path(root) if root else default_data_root()) / "assets"
+
+
 # 瓦片根目录（可用环境变量 NAV_TILES_ROOT 覆盖）
 def default_tiles_root(root: Path | None = None) -> Path:
     env = os.environ.get("NAV_TILES_ROOT", "")
     if env:
         return Path(env)
-    return (Path(root) if root else default_data_root()) / "tiles"
+    return default_assets_dir(root) / "tiles"
 
 
-# 持久化浏览器配置（登录态）目录（可用环境变量 NAV_PROFILE_DIR 覆盖）
+# 持久化浏览器配置（登录态）目录（可用环境变量 NAV_PROFILE_DIR 覆盖）。
+# 刻意**不**放进 assets/：它是登录凭证，不是分发的资产。
 def default_profile_dir(root: Path | None = None) -> Path:
     env = os.environ.get("NAV_PROFILE_DIR", "")
     if env:
@@ -584,7 +597,7 @@ class MapService:
                  profile_dir: Path | None = None,
                  grid2d_dir: Path | None = None,
                  data_root: Path | None = None):
-        #: 数据根目录：tiles/ grids2d/ browser_profile/ 的父目录
+        #: 数据根目录：browser_profile/ configs/ 以及 assets/ 的父目录
         self.data_root = Path(data_root) if data_root else default_data_root()
         self.bus = EventBus()
         self.store = TileStore(tiles_root or default_tiles_root(self.data_root))
@@ -593,7 +606,7 @@ class MapService:
         env_dir = os.environ.get("NAV_GRID2D_DIR", "")
         self.grid2d_dir = (grid2d_dir
                            or (Path(env_dir) if env_dir else None)
-                           or self.data_root / "grids2d")
+                           or default_assets_dir(self.data_root) / "grids2d")
         self._lock = threading.Lock()
         self._fetch: FetchState | None = None
         self._fetch_thread: threading.Thread | None = None
