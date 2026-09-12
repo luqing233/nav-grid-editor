@@ -20,12 +20,14 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import re
 import shutil
 import struct
 import sys
+import tempfile
 import threading
 import time
 import zlib
@@ -119,11 +121,38 @@ RUN_PREFIX = "run"
 DEBUG = bool(os.environ.get("NAV_DEBUG", ""))
 
 # 瓦片 URL 格式: /tile(map02_1 之类)/<map>/<zoom>/<x>_<y>.png
+# 组 1 必须用与别处一致的白名单：以前是 [^/]+，能匹配 `C:` 这种盘符，而
+# map_name 会被拼进文件系统路径（session_dir / "C:/4/0_0.png" 在 Windows 上
+# 会被 pathlib 当成绝对路径、丢掉基目录），等于把写入点交给远端页面摆布。
 tile_pattern = re.compile(
-    r"/tile(?:_[^/]+)?/([^/]+)/(\d+)/(-?\d+)_(-?\d+)\.png"
+    r"/tile(?:_[^/]+)?/([A-Za-z0-9_\-]+)/(\d+)/(-?\d+)_(-?\d+)\.png"
 )
 # 瓦片文件名: x_y.png
 TILE_FILE_PATTERN = re.compile(r"^(-?\d+)_(-?\d+)\.png$")
+
+#: 地图名同时用作目录名/文件名，统一在这里把关
+MAP_NAME_RE = re.compile(r"[A-Za-z0-9_\-]+")
+#: Windows 保留设备名：`NUL` 之类的名字能过白名单，但 mkdir 会直接失败
+#: （exist_ok 只吞 FileExistsError，吞不掉 WinError 3）
+_WIN_RESERVED = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)]
+)
+
+
+def valid_map_name(map_name: object) -> bool:
+    """地图名白名单：既挡路径分隔符/相对路径，也挡 Windows 保留设备名。"""
+    s = str(map_name or "")
+    if not MAP_NAME_RE.fullmatch(s):
+        return False
+    return s.upper() not in _WIN_RESERVED
+
+
+def valid_map_zoom(map_name: object, zoom: object) -> bool:
+    """地图名 + zoom 一起校验（二者都会进文件系统路径）。"""
+    return valid_map_name(map_name) and str(zoom or "").isdigit()
+
 
 # 模拟抓取参数
 SIM_MAP = "sim"
@@ -153,6 +182,72 @@ def solid_png(w: int, h: int, rgb: tuple) -> bytes:
 
 def _log(msg: str):
     print(f"[map] {msg}", flush=True)
+
+
+def _unique_tmp(path: Path) -> Path:
+    """在 path 同目录下开一个**唯一**的临时文件名，供"写完再原子替换"用。
+
+    以前各处都用固定名 ``<name>.tmp``：两个并发请求（双击保存、两个标签页
+    看同一张图）会抢同一个临时文件——先完成的那个 os.replace 之后临时文件
+    就没了，另一个的 os.replace 直接 FileNotFoundError；更糟的时序是自检
+    读到对方写了一半的内容，把一个残缺文件替换成正式产物。
+    同一个目录是必须的，跨盘/跨分区 os.replace 不是原子的。
+    """
+    fd, name = tempfile.mkstemp(dir=str(path.parent),
+                                prefix=path.name + ".", suffix=".tmp")
+    os.close(fd)
+    return Path(name)
+
+
+def _as_int(v) -> int:
+    """尽量把请求体里的值转成 int，转不动就当 0。
+
+    image_size 直接来自 JSON，可能是 "abc" / "12.5" / NaN / Infinity / 对象；
+    int() 对它们分别抛 ValueError / OverflowError / TypeError，而这里没有异常
+    边界，漏出去就是一个没有 JSON 响应的断连。
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return int(f) if math.isfinite(f) else 0
+
+
+_write_locks: dict[str, threading.Lock] = {}
+_write_locks_guard = threading.Lock()
+
+
+def _path_lock(path: Path) -> threading.Lock:
+    """按目标路径取一把进程内的锁，让同一个文件的写入串行化。
+
+    只有唯一临时名还不够：Windows 上两个线程同时 os.replace 到同一个目标时，
+    其中一个会拿到 WinError 5「拒绝访问」（目标正被另一个替换操作占用）。
+    实测 12 个并发保存会有 5 个失败，加锁后全部成功。
+    """
+    key = os.path.normcase(os.path.abspath(str(path)))
+    with _write_locks_guard:
+        lock = _write_locks.get(key)
+        if lock is None:
+            lock = _write_locks[key] = threading.Lock()
+        return lock
+
+
+def _replace_with_retry(tmp: Path, dest: Path, attempts: int = 12) -> None:
+    """os.replace(tmp, dest)，遇到"被占用"就退避重试。
+
+    写者之间的竞争由 :func:`_path_lock` 解决；读者（并发的 get_grid2d /
+    下载总图 / 缩略图生成）打开着 dest 时仍会让替换失败——Windows 要求替换
+    目标有独占的删除权限，而 Python 的 open()/np.load() 不共享删除。这属于
+    瞬时冲突，退避重试即可（累计等待上限约 2 秒）。
+    """
+    for i in range(attempts):
+        try:
+            os.replace(tmp, dest)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(min(0.05 * (i + 1), 0.2))
 
 
 # =========================================================
@@ -220,6 +315,10 @@ class TileStore:
 
     def _compose_candidates(self, map_name: str, zoom: str) -> list[Path]:
         """按优先级返回可能存有该地图/zoom 瓦片的目录"""
+        # 兜底：这两个值会被拼进文件系统路径，非法值直接当作"没有瓦片"，
+        # 免得任何调用方漏校验就变成路径穿越
+        if not valid_map_zoom(map_name, zoom):
+            return []
         cands: list[Path] = []
         # 1. 抓取中的会话（最新写入优先）
         if self.active_session_dir:
@@ -366,7 +465,17 @@ def merge_tiles(tiles_root: Path, run_prefix: str = RUN_PREFIX) -> dict:
                 stats["updated"] += 1
             else:
                 stats["new"] += 1
-            shutil.copy2(f, dest)
+            # 先拷到临时文件再原子替换：合并跑在抓取线程上，而 HTTP 线程同时在
+            # 读 tiles/latest（/tiles/ 路由、合成）——直接 copy2 会让读者读到
+            # 写了一半的 PNG，解码失败后被当成"这张瓦片缺失"
+            tmp = _unique_tmp(dest)
+            with _path_lock(dest):
+                try:
+                    shutil.copy2(f, tmp)
+                    _replace_with_retry(tmp, dest)
+                except Exception:
+                    tmp.unlink(missing_ok=True)
+                    raise
             stats["copied"] += 1
     return stats
 
@@ -382,11 +491,24 @@ class FetchState:
         self.downloaded: set[str] = set()
         self.known: set[str] = set()  # 已下载过的瓦片 key（map/zoom/x_y），跨会话去重
         self.counts = {"new": 0, "updated": 0, "unchanged": 0, "error": 0, "skipped": 0}
-        self.manifest = {"new": [], "updated": [], "errors": []}
+        #: errors 用 {key: text} 而不是列表：同一张瓦片可能先写失败、重试后成功，
+        #: 靠 key（瓦片 rel 或 URL）把旧的那条顶掉，manifest 里才不会同一张瓦片
+        #: 既算"失败"又算"新增"
+        self.manifest = {"new": [], "updated": [], "errors": {}}
         self.started = datetime.now()
 
+    def add_error(self, key: str, text: str):
+        self.manifest["errors"][key] = text
+
+    def clear_error(self, key: str):
+        self.manifest["errors"].pop(key, None)
+
     def save_manifest(self):
-        if not (self.counts["new"] or self.counts["updated"]):
+        # 有错误也要写：全盘失败（磁盘满/只读卷）时 new/updated 都是 0，
+        # 以前会直接 return，于是刚记下来的"哪张瓦片为什么失败"全丢掉——
+        # 恰恰是最需要这份记录的场合
+        if not (self.counts["new"] or self.counts["updated"]
+                or self.manifest["errors"]):
             return
         summary = {
             "session": self.session_dir.name,
@@ -397,12 +519,17 @@ class FetchState:
             "counts": self.counts,
             "new": sorted(self.manifest["new"]),
             "updated": sorted(self.manifest["updated"]),
-            "errors": self.manifest["errors"],
+            "errors": list(self.manifest["errors"].values()),
         }
-        self.session_dir.mkdir(parents=True, exist_ok=True)
-        (self.session_dir / "manifest.json").write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        # 写清单本身失败（卷只读/磁盘满）不能把 _finalize_fetch 带崩：
+        # 那样后面的合并到 latest 就整段跳过了
+        try:
+            self.session_dir.mkdir(parents=True, exist_ok=True)
+            (self.session_dir / "manifest.json").write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError as e:
+            _log(f"抓取清单写入失败 {self.session_dir}: {e}")
 
 
 # =========================================================
@@ -482,9 +609,9 @@ class MapService:
 
     # ---------- 瓦片字节 ----------
     def serve_tile(self, map_name: str, zoom: str, x: int, y: int) -> bytes | None:
-        if not re.fullmatch(r"[A-Za-z0-9_\-]+", map_name):
+        if not valid_map_zoom(map_name, zoom):
             return None
-        if not zoom.isdigit() or not (-1_000_000 <= x <= 1_000_000) \
+        if not (-1_000_000 <= x <= 1_000_000) \
                 or not (-1_000_000 <= y <= 1_000_000):
             return None
         if map_name == SIM_MAP:  # 模拟瓦片直接走内存
@@ -569,12 +696,12 @@ class MapService:
                         data = response.body()
                     except Exception as e:
                         state.counts["error"] += 1
-                        state.manifest["errors"].append(str(e))
+                        state.add_error(url, f"{url}: {e}")
                         return
                     self._save_tile(state, url, content_type, data)
                 except Exception as e:
                     state.counts["error"] += 1
-                    state.manifest["errors"].append(str(e))
+                    state.add_error(url, f"{url}: {e}")
                     _log(f"[错误] {e}")
 
             def make_route_handler(context):
@@ -586,6 +713,11 @@ class MapService:
                             route.continue_()
                             return
                         map_name, zoom, xs, ys = m.groups()
+                        if not valid_map_zoom(map_name, zoom):
+                            # map_name 会被拼进文件系统路径（tile_bytes / session_dir），
+                            # 非白名单值一律不碰本地缓存也不落盘，交回网络
+                            route.continue_()
+                            return
                         key = f"{map_name}/{zoom}/{xs}/{ys}"
                         if key in known:
                             # 已下载过的瓦片：用本地缓存直接应答，不再请求网络
@@ -607,6 +739,9 @@ class MapService:
                                       body=body)
                     except Exception as e:
                         state.counts["error"] += 1
+                        # 与 handle_response 一致：错误要落到 manifest，否则只看到
+                        # 一个总数，用户无从知道是哪张瓦片、为什么失败
+                        state.add_error(url, f"{url}: {e}")
                         _log(f"[route错误] {url} | {e}")
                         try:
                             route.continue_()
@@ -638,7 +773,7 @@ class MapService:
                 context.close()
         except Exception as e:
             state.counts["error"] += 1
-            state.manifest["errors"].append(str(e))
+            state.add_error("会话", str(e))
             _log(f"抓取异常: {e}")
             self.bus.emit(type="log", text=f"抓取异常: {e}")
         finally:
@@ -663,7 +798,18 @@ class MapService:
             state.counts["skipped"] += 1
             return
         map_name, zoom, xs, ys = m.groups()
-        x, y = int(xs), int(ys)
+        if not valid_map_zoom(map_name, zoom):
+            # map_name 会拼进文件系统路径，非白名单值不落盘（正则已收紧，这里兜底）
+            state.counts["skipped"] += 1
+            return
+        try:
+            x, y = int(xs), int(ys)
+        except ValueError:  # 超长数字串（Python 3.12 对 int(str) 有 4300 位上限）
+            state.counts["skipped"] += 1
+            return
+        if not (-1_000_000 <= x <= 1_000_000 and -1_000_000 <= y <= 1_000_000):
+            state.counts["skipped"] += 1
+            return
         key = f"{map_name}/{zoom}/{x}_{y}"
 
         # 已经下载过的瓦片：不再重复下载/写盘，只统计并推送（前端已有则自动跳过）
@@ -678,8 +824,9 @@ class MapService:
         # WebP → PNG
         if is_webp:
             if Image is None:
+                # 不 discard：没装 Pillow 是确定性失败，重试只会把错误数刷上去
                 state.counts["error"] += 1
-                state.manifest["errors"].append(f"缺少 Pillow，无法转换 WebP: {rel}")
+                state.add_error(rel, f"缺少 Pillow，无法转换 WebP: {rel}")
                 return
             try:
                 img = Image.open(BytesIO(data))
@@ -688,33 +835,64 @@ class MapService:
                 img.save(buf, "PNG")
                 data = buf.getvalue()
             except Exception as e:
+                # discard：拿到的是坏 WebP，重新取一次可能就好了；不 discard 的话
+                # 这张瓦片本次会话内再也不会被处理
+                state.downloaded.discard(url)
                 state.counts["error"] += 1
-                state.manifest["errors"].append(f"WebP 转换失败 {rel}: {e}")
+                state.add_error(rel, f"WebP 转换失败 {rel}: {e}")
                 return
 
-        # 与上一次会话对比分类
-        if state.previous is not None:
-            prev_file = state.previous / rel
-            if prev_file.exists():
-                if prev_file.read_bytes() == data:
-                    kind = "unchanged"
+        # 与上一次会话对比分类：先只算 kind，写盘成功后才记进 manifest，
+        # 否则写盘失败时 manifest 会记着一条其实没落盘的瓦片
+        try:
+            if state.previous is not None:
+                prev_file = state.previous / rel
+                if prev_file.exists():
+                    kind = "unchanged" if prev_file.read_bytes() == data else "updated"
                 else:
-                    kind = "updated"
-                    state.manifest["updated"].append(rel)
+                    kind = "new"
             else:
                 kind = "new"
-                state.manifest["new"].append(rel)
-        else:
-            kind = "new"
-            state.manifest["new"].append(rel)
+        except OSError as e:
+            state.downloaded.discard(url)
+            state.counts["error"] += 1
+            state.add_error(rel, f"读取上次会话瓦片失败 {rel}: {e}")
+            return
 
         dest = state.session_dir / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            # 会话目录是 _compose_candidates 的**第一**候选，也就是读者最先看到
+            # 的那份（合成和 /tiles/ 取图都先查它）。直接 write_bytes 会让并发的
+            # 读者拿到写了一半的 PNG——解码失败后被当成"这张瓦片缺失"，总图上
+            # 从此留一个黑洞。落盘同样走"临时文件 + 原子替换"。
+            tmp = _unique_tmp(dest)
+            try:
+                tmp.write_bytes(data)
+                _replace_with_retry(tmp, dest)
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
+        except OSError as e:
+            # 写盘失败（磁盘满 / 文件被占用）不能算"已下载"：留着标记的话这张
+            # 瓦片本次会话内再也不会重试，合成出来是个洞，且 manifest 里查不到
+            state.downloaded.discard(url)
+            state.counts["error"] += 1
+            state.add_error(rel, f"写入失败 {rel}: {e}")
+            _log(f"[错误] 写入瓦片失败 {dest}: {e}")
+            return
+
+        if kind == "updated":
+            state.manifest["updated"].append(rel)
+        elif kind == "new":
+            state.manifest["new"].append(rel)
+        # 重试成功的瓦片要把先前那条失败记录顶掉，否则 manifest 里同一张
+        # 瓦片既在 errors 里又在 new/updated 里
+        state.clear_error(rel)
         state.counts[kind] += 1
         state.known.add(key)  # 本次已抓到，后续重复请求不再处理
 
-        self.bus.emit(type="tile", map=map_name, zoom=zoom, x=int(x), y=int(y),
+        self.bus.emit(type="tile", map=map_name, zoom=zoom, x=x, y=y,
                       kind=kind, seq=sum(state.counts.values()))
 
     def _finalize_fetch(self, state: FetchState):
@@ -743,7 +921,7 @@ class MapService:
     # =========================================================
 
     def start_compose(self, map_name: str, zoom: str, save: bool = False) -> dict:
-        if not re.fullmatch(r"[A-Za-z0-9_\-]+", map_name) or not zoom.isdigit():
+        if not valid_map_zoom(map_name, zoom):
             return {"ok": False, "error": "非法地图名/zoom"}
         d = self.store.resolve_dir(map_name, zoom)
         if not d:
@@ -771,12 +949,23 @@ class MapService:
         # 在 finally 里引用未绑定的名字会抛 NameError，把真实错误盖掉）
         file_rel = None
         try:
-            canvas = Image.new("RGB", (1, 1), (0, 0, 0)) if (save and Image) else None
             xs = [t[0] for t in tiles]
             ys = [t[1] for t in tiles]
             min_x, max_x, min_y, max_y = min(xs), max(xs), min(ys), max(ys)
             self.bus.emit(type="compose_bounds", map=map_name, zoom=zoom,
                           minX=min_x, maxX=max_x, minY=min_y, maxY=max_y)
+
+            # 画布按边界一次建好，不能等"第一张瓦片"再建：第一张读取失败会走
+            # `except OSError: continue`，那个 resize 分支永远到不了，画布就停在
+            # 1x1；后续瓦片 paste 到 1x1 上被静默裁掉，最后照样保存，把已经合成
+            # 好的总图覆盖成一张 1x1 黑图。这是静默丢数据，比合成失败严重得多。
+            canvas = None
+            if save and Image:
+                canvas = Image.new(
+                    "RGB",
+                    ((max_x - min_x + 1) * TILE_SIZE, (max_y - min_y + 1) * TILE_SIZE),
+                    (0, 0, 0))
+            pasted = 0
 
             for i, (x, y, path) in enumerate(tiles, 1):
                 try:
@@ -787,12 +976,9 @@ class MapService:
                 if canvas is not None:
                     try:
                         tile_img = Image.open(BytesIO(data)).convert("RGB")
-                        if i == 1:  # 按边界建画布（注意 y 轴与瓦片一致，不翻转）
-                            w = (max_x - min_x + 1) * TILE_SIZE
-                            h = (max_y - min_y + 1) * TILE_SIZE
-                            canvas = Image.new("RGB", (w, h), (0, 0, 0))
                         canvas.paste(tile_img, ((x - min_x) * TILE_SIZE,
                                                 (y - min_y) * TILE_SIZE))
+                        pasted += 1
                     except Exception as e:
                         self.bus.emit(type="log", text=f"贴图失败 {path.name}: {e}")
                 self.bus.emit(type="tile", map=map_name, zoom=zoom, x=x, y=y,
@@ -803,15 +989,29 @@ class MapService:
                     self.bus.emit(type="compose_progress", map=map_name, zoom=zoom,
                                   done=i, total=len(tiles))
 
-            if canvas is not None:
+            if canvas is not None and pasted:
                 # 按地图/zoom 分类存放，同名覆盖，只保留一份
                 out = (self.store.tiles_root / "maps" / map_name / zoom
                        / f"{map_name}_{zoom}.png")
                 out.parent.mkdir(parents=True, exist_ok=True)
-                canvas.save(out)
+                # 先写临时文件再原子替换：并发的"下载总图"和缩略图生成不会
+                # 读到写了一半的 PNG
+                tmp = _unique_tmp(out)
+                with _path_lock(out):
+                    try:
+                        # 必须显式给格式：临时名以 .tmp 结尾，Pillow 无法从扩展名推断
+                        canvas.save(tmp, "PNG")
+                        _replace_with_retry(tmp, out)
+                    except Exception:
+                        tmp.unlink(missing_ok=True)
+                        raise
                 file_rel = f"{map_name}/{zoom}/{out.name}"
                 self.bus.emit(type="log",
                               text=f"已保存拼接总图: tiles/maps/{file_rel}（覆盖旧版，只保留一份）")
+            elif canvas is not None:
+                self.bus.emit(type="log",
+                              text=f"一张瓦片都没贴成功（共 {len(tiles)} 张读取/解码失败），"
+                                   "跳过保存，未覆盖已有总图")
             elif save:
                 self.bus.emit(type="log",
                               text="未保存总图文件：缺少 Pillow（浏览器端实时拼接不受影响）")
@@ -898,7 +1098,7 @@ class MapService:
     # ---------- 已保存总图信息（供前端下拉选择时瞬时显示整图） ----------
     def saved_map_info(self, map_name: str, zoom: str) -> dict | None:
         """返回已保存总图的相对路径与瓦片边界/数量；没有则返回 None"""
-        if not re.fullmatch(r"[A-Za-z0-9_\-]+", map_name) or not zoom.isdigit():
+        if not valid_map_zoom(map_name, zoom):
             return None
         p = self.store.tiles_root / "maps" / map_name / zoom / f"{map_name}_{zoom}.png"
         if not p.is_file():
@@ -920,7 +1120,7 @@ class MapService:
 
     def overview_path(self, map_name: str, zoom: str) -> Path | None:
         """缩略总图的缓存文件路径；没有总图时返回 None。"""
-        if not re.fullmatch(r"[A-Za-z0-9_\-]+", map_name) or not zoom.isdigit():
+        if not valid_map_zoom(map_name, zoom):
             return None
         src = self.store.tiles_root / "maps" / map_name / zoom / f"{map_name}_{zoom}.png"
         if not src.is_file():
@@ -950,9 +1150,16 @@ class MapService:
             if img.mode != "RGB":
                 img = img.convert("RGB")
             img.thumbnail((max_px, max_px), Image.Resampling.BILINEAR)
-            tmp = out.with_name(out.name + ".tmp")
-            img.save(tmp, "PNG", optimize=True)
-            os.replace(tmp, out)
+            # 临时名唯一：两个标签页同时要同一张缩略图时，固定名会让后完成的
+            # 那个 os.replace 到已经被对方挪走的文件上
+            tmp = _unique_tmp(out)
+            with _path_lock(out):
+                try:
+                    img.save(tmp, "PNG", optimize=True)
+                    _replace_with_retry(tmp, out)
+                except Exception:
+                    tmp.unlink(missing_ok=True)
+                    raise
             _log(f"缩略总图已生成 {out.name} ({img.width}x{img.height})")
             return out
         except Exception as e:
@@ -967,7 +1174,7 @@ class MapService:
     def calib_file(self, map_name: str, zoom: str) -> Path | None:
         """标定文件位置：新结构 maps/<地图>/<zoom>/<地图>_<zoom>_mapping.json，
         兼容旧平铺 maps/<地图>_<zoom>_mapping.json"""
-        if not re.fullmatch(r"[A-Za-z0-9_\-]+", map_name) or not zoom.isdigit():
+        if not valid_map_zoom(map_name, zoom):
             return None
         nested = self.store.tiles_root / "maps" / map_name / zoom / f"{map_name}_{zoom}_mapping.json"
         if nested.is_file():
@@ -995,18 +1202,39 @@ class MapService:
         points: [{"pixel": [px, py], "world": [x, z], "enabled": bool}]
         返回完整 mapping 数据（已写盘）。
         """
-        if not re.fullmatch(r"[A-Za-z0-9_\-]+", map_name) or not zoom.isdigit():
+        if not valid_map_zoom(map_name, zoom):
             return {"ok": False, "error": "非法地图名/zoom"}
+        if not isinstance(points, list):
+            return {"ok": False, "error": "points 必须是数组"}
         if not points or len(points) < 3:
             return {"ok": False, "error": "至少需要 3 个启用中的控制点"}
         pixel, world, metas = [], [], []
         for p in points:
-            px, py = p.get("pixel", [None, None])
-            wx, wz = p.get("world", [None, None])
-            if None in (px, py, wx, wz):
-                continue
-            pixel.append([float(px), float(py)])
-            world.append([float(wx), float(wz)])
+            # 每个点都可能是任意 JSON：不是对象、坐标不是两个数字都要在这里
+            # 变成明确的错误返回。漏出去的话 AttributeError/ValueError 会直接
+            # 冒到 do_POST——那边没有兜底，浏览器只会看到连接被断开。
+            if not isinstance(p, dict):
+                return {"ok": False,
+                        "error": "控制点必须是对象 {pixel:[px,py], world:[x,z]}"}
+            try:
+                px, py = p.get("pixel", [None, None])
+                wx, wz = p.get("world", [None, None])
+                if None in (px, py, wx, wz):
+                    continue
+                px, py = float(px), float(py)
+                wx, wz = float(wx), float(wz)
+            except (TypeError, ValueError, OverflowError):
+                return {"ok": False, "error": "控制点的 pixel/world 必须是两个数字"}
+            # 非有限坐标会算出一个 NaN 矩阵写进 mapping.json，而 json.loads 照单
+            # 全收，之后每次像素↔世界换算都静默变成 nan（与网格路径同一个坑）
+            if not all(math.isfinite(v) for v in (px, py, wx, wz)):
+                return {"ok": False, "error": "控制点坐标必须是有限数"}
+            # 还要限量级：RANSAC 的距离和逐点误差都要平方，1e200 平方就溢出成
+            # OverflowError，而那是从拟合内部抛出来的，位置比 ValueError 更隐蔽
+            if max(abs(px), abs(py), abs(wx), abs(wz)) > 1e12:
+                return {"ok": False, "error": "控制点坐标超出合理范围"}
+            pixel.append([px, py])
+            world.append([wx, wz])
             metas.append(bool(p.get("enabled", True)))
         if sum(metas) < 3:
             return {"ok": False, "error": "至少需要 3 个启用中的控制点"}
@@ -1016,9 +1244,11 @@ class MapService:
         use_world = [world[i] for i in range(len(world)) if metas[i]]
         try:
             matrix, inlier_flags = _fit_affine_ransac(use_pixel, use_world, threshold)
-        except ValueError as e:
+            # 求逆也要留在 try 里：控制点共线或世界坐标重复时仿射退化，
+            # _invert_affine 抛的 ValueError 漏出去就是一个没有 JSON 的 500
+            inverse_matrix = _invert_affine(matrix)
+        except (ValueError, OverflowError) as e:
             return {"ok": False, "error": f"拟合失败: {e}"}
-        inverse_matrix = _invert_affine(matrix)
 
         # 逐点误差（用最终矩阵对全部点算）
         errs = []
@@ -1031,22 +1261,28 @@ class MapService:
         control_points = []
         j = 0
         for i in range(len(pixel)):
-            enabled = False
+            inlier = None
             if metas[i]:
-                enabled = bool(inlier_flags[j])
+                inlier = bool(inlier_flags[j])
                 j += 1
             control_points.append({
                 "pixel": [pixel[i][0], pixel[i][1]],
                 "world": [world[i][0], world[i][1]],
-                "enabled": enabled,
+                # enabled 保留**用户勾选**，inlier 单独存拟合结果。以前两者共用
+                # enabled 一个字段，重新加载后复选框会变成上一次的 RANSAC 观点，
+                # 用户的选择被静默改写，下次拟合用的点集和界面上看到的不是一套。
+                "enabled": metas[i],
+                "inlier": inlier,
                 "error": round(errs[i], 4),
             })
 
+        if not isinstance(image_size, dict):
+            image_size = {}
         mapping = {
             "map_name": f"{map_name}_{zoom}.png",
             "image_size": {
-                "width": int(image_size.get("width", 0)),
-                "height": int(image_size.get("height", 0)),
+                "width": _as_int(image_size.get("width", 0)),
+                "height": _as_int(image_size.get("height", 0)),
             },
             "matrix": matrix,
             "inverse_matrix": inverse_matrix,
@@ -1057,8 +1293,18 @@ class MapService:
         out = (self.store.tiles_root / "maps" / map_name / zoom
                / f"{map_name}_{zoom}_mapping.json")
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(mapping, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
+        # 先写临时文件再原子替换：并发的 get_calib 读 text 不会读到写了一半的
+        # JSON（读一半会 json 解析失败 -> 编辑器误判成"未标定"）
+        tmp = _unique_tmp(out)
+        with _path_lock(out):
+            try:
+                tmp.write_text(json.dumps(mapping, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+                _replace_with_retry(tmp, out)
+            except Exception as e:
+                tmp.unlink(missing_ok=True)
+                _log(f"标定文件写入失败 {out}: {e}")
+                return {"ok": False, "error": f"标定文件写入失败: {e}"}
         mapping["ok"] = True
         mapping["saved"] = str(out.relative_to(self.store.tiles_root))
         return mapping
@@ -1100,7 +1346,7 @@ class MapService:
         """
         # 与 save_grid2d 同样的入参校验：grid2d_path 是拼字符串建路径，
         # map_name 里带 / 或 .. 就能读到 grids2d/ 之外的同格式文件。
-        if not re.fullmatch(r"[A-Za-z0-9_\-]+", map_name) or not zoom.isdigit():
+        if not valid_map_zoom(map_name, zoom):
             return {"data": None, "source": None, "error": "非法地图名/zoom"}
         p = self.grid2d_path(map_name, zoom)
         if not p.is_file():
@@ -1149,7 +1395,7 @@ class MapService:
                "cells": [[ix,iz]...], "blocked": [...]}
         origin[1]（y）只作格式占位，固定写 0：2D 网格不带高度。
         """
-        if not re.fullmatch(r"[A-Za-z0-9_\-]+", map_name) or not zoom.isdigit():
+        if not valid_map_zoom(map_name, zoom):
             return {"ok": False, "error": "非法地图名/zoom"}
         try:
             ov = data["origin"]
@@ -1160,10 +1406,16 @@ class MapService:
             else:
                 raise ValueError("origin 必须是 [x, y, z] 或 [x, z]")
             cell_size = float(data["cell_size"])
-            if not (cell_size > 0):
-                raise ValueError("cell_size 必须大于 0")
-        except (KeyError, TypeError, ValueError, IndexError):
-            return {"ok": False, "error": "origin/cell_size 缺失或非法"}
+            # isfinite 一并挡掉 NaN/inf：`float('inf') > 0` 是 True，只比大小拦不住。
+            # 放过去的话 json.dumps 会写出非标准的 Infinity/NaN 字面量，读方
+            # json.loads 也接受，于是规划器拿到 extent=(nan,nan,nan,nan) 却算
+            # "读入成功"——正是 README 承诺不会发生的那种静默错位。
+            if not math.isfinite(cell_size) or cell_size <= 0:
+                raise ValueError("cell_size 必须是有限正数")
+            if not all(math.isfinite(v) for v in origin):
+                raise ValueError("origin 必须都是有限数")
+        except (KeyError, TypeError, ValueError, IndexError, OverflowError):
+            return {"ok": False, "error": "origin/cell_size 缺失或非法（必须是有限数）"}
 
         # 原数组范围（下标空间与 cells/blocked 相同：下标 0 ⇔ origin 那格的最小角）
         raw_shape = data.get("shape")
@@ -1246,21 +1498,25 @@ class MapService:
         out = self.grid2d_path(map_name, zoom)
         existed = out.is_file()
         out.parent.mkdir(parents=True, exist_ok=True)
-        # 先写临时文件再原子替换：服务是多线程的，两次保存撞上会写出半个 npz
-        tmp = out.with_name(out.name + ".tmp")
-        with open(tmp, "wb") as fh:
-            # meta 用 numpy 字符串数组存（0 维），读方才能不开 allow_pickle
-            np.savez_compressed(fh, cells=grid,
-                                meta=np.array(json.dumps(meta, ensure_ascii=False)))
-        # 导出自检：用与 ok-end-field 读方同级的检查读回临时文件，通过才替换。
-        # 宁可保存失败也不能覆盖成读不回来的文件。
-        try:
-            _load_grid_npz(tmp)
-        except Exception as e:
-            tmp.unlink(missing_ok=True)
-            _log(f"2D 网格导出自检失败 {out}: {e}")
-            return {"ok": False, "error": f"导出自检失败（未覆盖原文件）: {e}"}
-        os.replace(tmp, out)
+        # 先写临时文件再原子替换：服务是多线程的，两次保存撞上会写出半个 npz。
+        # 临时名必须每次唯一（见 _unique_tmp）：固定叫 <name>.tmp 时两个并发保存
+        # 会抢同一个文件，先完成的一方 os.replace 之后另一方就 FileNotFoundError；
+        # 更糟的时序是自检读到对方写了一半的内容，把残缺文件替换成正式产物。
+        tmp = _unique_tmp(out)
+        with _path_lock(out):
+            try:
+                with open(tmp, "wb") as fh:
+                    # meta 用 numpy 字符串数组存（0 维），读方才能不开 allow_pickle
+                    np.savez_compressed(fh, cells=grid,
+                                        meta=np.array(json.dumps(meta, ensure_ascii=False)))
+                # 导出自检：用与 ok-end-field 读方同级的检查读回临时文件，通过才替换。
+                # 宁可保存失败也不能覆盖成读不回来的文件。
+                _load_grid_npz(tmp)
+                _replace_with_retry(tmp, out)
+            except Exception as e:
+                tmp.unlink(missing_ok=True)
+                _log(f"2D 网格导出失败 {out}: {e}")
+                return {"ok": False, "error": f"导出失败（未覆盖原文件）: {e}"}
         return {"ok": True, "saved": out.name, "path": str(out),
                 "dir": str(out.parent), "overwrote": existed,
                 "shape": [height, width],
@@ -1275,6 +1531,22 @@ class MapService:
 
 def _load_grid_npz(path: Path) -> tuple[np.ndarray, dict, list[str]]:
     """严格读取 ``*.grid.npz``，返回 ``(cells, meta, warnings)``。
+
+    并发的保存正在 os.replace 这个文件时，Windows 会短暂拒绝打开（替换要求
+    目标独占）。这不是数据损坏——替换是原子的，读到的要么是旧版本要么是新
+    版本，不会是写了一半的——所以退避重试即可。
+    """
+    for attempt in range(6):
+        try:
+            return _load_grid_npz_once(path)
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
+def _load_grid_npz_once(path: Path) -> tuple[np.ndarray, dict, list[str]]:
+    """真正做校验的读方（重试逻辑见 :func:`_load_grid_npz`）。
 
     检查项与 ok-end-field 的 ``src/nav/grid_io.py`` +
     ``scripts/nav/verify_grid.py`` 对齐：读方会拒的文件，编辑器也必须拒。
@@ -1316,13 +1588,17 @@ def _load_grid_npz(path: Path) -> tuple[np.ndarray, dict, list[str]]:
         cell_size = float(meta.get("cell_size"))
     except (TypeError, ValueError):
         raise ValueError(f"cell_size 必须是数字，实际 {meta.get('cell_size')!r}") from None
-    if not cell_size > 0:
-        raise ValueError(f"cell_size 必须大于 0，实际 {cell_size}")
+    if not math.isfinite(cell_size) or cell_size <= 0:
+        raise ValueError(f"cell_size 必须是有限正数，实际 {cell_size}")
 
     origin = meta.get("origin")
     if not (isinstance(origin, (list, tuple)) and len(origin) == 3
             and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in origin)):
         raise ValueError(f"origin 应是 3 个数字，实际 {origin!r}")
+    # 别的工具写出的 NaN/inf origin 也要拒：json.loads 接受非标准字面量，
+    # 放行的话整张网格的世界坐标会全变成 nan
+    if not all(math.isfinite(float(v)) for v in origin):
+        raise ValueError(f"origin 必须都是有限数，实际 {origin!r}")
 
     warnings: list[str] = []
     if str(meta.get("axis_convention") or "") != GRID_AXIS_CONVENTION:

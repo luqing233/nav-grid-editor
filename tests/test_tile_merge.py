@@ -13,7 +13,19 @@ from pathlib import Path
 from unittest import mock
 
 from nav_grid_editor import map_service
-from nav_grid_editor.map_service import MapService, TileStore
+from nav_grid_editor.map_service import (
+    FetchState,
+    MapService,
+    TileStore,
+    tile_pattern,
+    valid_map_name,
+    valid_map_zoom,
+)
+
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover
+    Image = None
 
 
 def _tile(root: Path, rel_dir: str, x: int, y: int, tag: bytes) -> Path:
@@ -126,6 +138,169 @@ class ComposeRunRobustnessTest(unittest.TestCase):
         self.assertEqual(len(done), 1, f"compose_done 没发出来，事件: {events}")
         self.assertIsNone(done[0]["file"])
         self.assertFalse(self.svc._compose["running"])
+
+
+@unittest.skipIf(Image is None, "需要 Pillow")
+class ComposeSaveSafetyTest(unittest.TestCase):
+    """合成保存的边界：失败时绝不能覆盖已经合成好的总图。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.svc = MapService(
+            data_root=self.root, tiles_root=self.root / "tiles",
+            profile_dir=self.root / "profile", grid2d_dir=self.root / "grids")
+        self.td = self.root / "tiles" / "latest" / "m" / "4"
+        self.td.mkdir(parents=True, exist_ok=True)
+        self.out = self.root / "tiles" / "maps" / "m" / "4" / "m_4.png"
+        self.out.parent.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _tile(self, x, y, color):
+        Image.new("RGB", (256, 256), color).save(self.td / f"{x}_{y}.png")
+
+    def _compose(self):
+        tiles = list(self.svc.store.iter_tiles("m", "4"))
+        self.svc._compose = {"map": "m", "zoom": "4", "total": len(tiles),
+                             "done": 0, "running": True}
+        self.svc._compose_run("m", "4", tiles, save=True)
+
+    def test_successful_compose_pastes_tiles_into_bounds(self):
+        """正常路径的贴图几何：两张瓦片要落在各自的格子里（左红右绿）。"""
+        self._tile(0, 0, (200, 30, 30))
+        self._tile(1, 0, (30, 200, 30))
+        self._compose()
+        with Image.open(self.out) as im:
+            self.assertEqual(im.size, (512, 256))
+            self.assertEqual(im.getpixel((5, 5)), (200, 30, 30))
+            self.assertEqual(im.getpixel((261, 5)), (30, 200, 30))
+        self.assertFalse(list(self.out.parent.glob("*.tmp")), "临时文件没清干净")
+
+    def test_first_tile_failure_does_not_write_1x1_image(self):
+        """第一张瓦片读取失败时，绝不能把画布停在 1x1 黑图再保存出去。
+
+        画布以前只在 `if i == 1` 分支里按边界重建：第一张失败就永远走不到那个
+        分支，后续瓦片 paste 到 1x1 上被静默裁掉，最后 canvas.save() 拿一张
+        1x1 黑图覆盖掉已经合成好的总图。这里固定住"尺寸不能退化成 1x1"。
+
+        注意：此时其余瓦片仍会被贴上去并覆盖旧总图——那是合成本来的语义
+        （和"第 N 张失败"一致），不是这个 bug。真正"原样保留"的场景见下面
+        全部瓦片都读不到的那个用例。
+        """
+        self._tile(0, 0, (200, 30, 30))
+        self._tile(1, 0, (30, 200, 30))
+        Image.new("RGB", (512, 256), (255, 255, 0)).save(self.out)
+
+        tiles = list(self.svc.store.iter_tiles("m", "4"))
+        tiles[0][2].unlink()          # 排序后的第一张 -> 读取失败
+        self.svc._compose = {"map": "m", "zoom": "4", "total": len(tiles),
+                             "done": 0, "running": True}
+        self.svc._compose_run("m", "4", tiles, save=True)
+
+        with Image.open(self.out) as im:
+            self.assertEqual(im.size, (512, 256), "画布退化成了 1x1")
+        self.assertFalse(list(self.out.parent.glob("*.tmp")), "临时文件没清干净")
+
+    def test_all_tiles_failing_leaves_existing_composite_untouched(self):
+        """一张都没贴成功时不能保存：宁可留着旧总图，也不要写一张空图覆盖它。
+
+        这是"已有总图不被破坏"这条不变量的真正的用例——以前没人覆盖过
+        `pasted == 0` 这个分支。
+        """
+        self._tile(0, 0, (200, 30, 30))
+        self._tile(1, 0, (30, 200, 30))
+        Image.new("RGB", (512, 256), (255, 255, 0)).save(self.out)
+        sentinel = self.out.read_bytes()
+
+        tiles = list(self.svc.store.iter_tiles("m", "4"))
+        for _x, _y, p in tiles:
+            p.unlink()                # 全部读不到 -> pasted == 0
+        self.svc._compose = {"map": "m", "zoom": "4", "total": len(tiles),
+                             "done": 0, "running": True}
+        self.svc._compose_run("m", "4", tiles, save=True)
+
+        self.assertEqual(self.out.read_bytes(), sentinel, "旧总图被覆盖了")
+        self.assertFalse(list(self.out.parent.glob("*.tmp")), "临时文件没清干净")
+
+
+class TileNameValidationTest(unittest.TestCase):
+    """瓦片 URL 里的地图名会拼进文件系统路径，必须在源头挡住。"""
+
+    def test_tile_url_rejects_map_name_with_drive_letter(self):
+        """group 1 以前是 [^/]+，能匹配 `C:`；而 session_dir / "C:/4/0_0.png"
+        在 Windows 上会被 pathlib 当成绝对路径、丢掉基目录，等于把写入点
+        交给远端页面摆布。"""
+        self.assertIsNone(tile_pattern.search("https://x/tile/C:/4/0_0.png"))
+        self.assertIsNotNone(tile_pattern.search("https://x/tile/map01/4/0_0.png"))
+
+    def test_rejects_traversal_and_windows_device_names(self):
+        for bad in ("../x", "a/b", "", "C:", "NUL", "con", "COM1", "LPT9"):
+            with self.subTest(map_name=bad):
+                self.assertFalse(valid_map_name(bad))
+        for good in ("map01", "base01", "indie_dg007", "map-2", "COM0"):
+            with self.subTest(map_name=good):
+                self.assertTrue(valid_map_name(good))
+
+    def test_zoom_must_be_digits(self):
+        self.assertTrue(valid_map_zoom("map01", "4"))
+        for bad in ("../4", "", "4x", "4/5"):
+            with self.subTest(zoom=bad):
+                self.assertFalse(valid_map_zoom("map01", bad))
+
+    def test_tile_store_ignores_invalid_names(self):
+        """TileStore 兜底：非法名一律当作"没有瓦片"，不漏给文件系统。"""
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            store = TileStore(Path(tmp.name))
+            self.assertEqual(store._compose_candidates("../x", "4"), [])
+            self.assertIsNone(store.tile_bytes("C:", "4", 0, 0))
+            self.assertEqual(list(store.iter_tiles("NUL", "4")), [])
+        finally:
+            tmp.cleanup()
+
+
+class FetchManifestTest(unittest.TestCase):
+    """抓取清单：错误必须留下来，而且同一张瓦片只能有一个最终结论。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.state = FetchState(self.root / "run_x", None)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _manifest(self):
+        return json.loads((self.root / "run_x" / "manifest.json").read_text(encoding="utf-8"))
+
+    def test_errors_are_persisted_even_with_no_new_or_updated_tiles(self):
+        """全盘写失败时 new/updated 都是 0，以前会直接 return，刚记下来的
+        "哪张瓦片为什么失败"全丢掉——恰恰是最需要这份记录的时候。"""
+        self.state.counts["error"] += 1
+        self.state.add_error("m/4/0_0.png", "写入失败 m/4/0_0.png: 磁盘满")
+        self.state.save_manifest()
+        self.assertEqual(self._manifest()["errors"],
+                         ["写入失败 m/4/0_0.png: 磁盘满"])
+
+    def test_nothing_at_all_still_writes_no_manifest(self):
+        """没成功、也没出错（比如全是 unchanged）就不该产生清单文件。"""
+        self.state.counts["unchanged"] += 5
+        self.state.save_manifest()
+        self.assertFalse((self.root / "run_x" / "manifest.json").exists())
+
+    def test_successful_retry_supersedes_the_earlier_error(self):
+        """先写失败、重试成功后，同一张瓦片不能既是 errors 又是 new。"""
+        self.state.counts["error"] += 1
+        self.state.add_error("m/4/0_0.png", "写入失败 m/4/0_0.png: 被占用")
+        self.state.clear_error("m/4/0_0.png")
+        self.state.manifest["new"].append("m/4/0_0.png")
+        self.state.counts["new"] += 1
+        self.state.save_manifest()
+        m = self._manifest()
+        self.assertEqual(m["errors"], [])
+        self.assertEqual(m["new"], ["m/4/0_0.png"])
 
 
 if __name__ == "__main__":

@@ -430,7 +430,7 @@ let dragState = null;
 const DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
 const TILE_CACHE_MAX = 512;      // 解码后的瓦片位图上限（256² RGBA 约 0.26MB/张）
 const MAX_TILES_PER_FRAME = 600; // 视野内瓦片过多时只画缩略图，不逐张请求
-const tileCache = new Map();     // "map/zoom/x_y" -> ImageBitmap | "loading" | "missing"
+const tileCache = new Map();     // "map/zoom/x_y" -> ImageBitmap | "loading" | {missing,t}
 let renderQueued = false;
 
 function requestRender() {
@@ -481,9 +481,24 @@ function cachePut(key, val) {
   }
 }
 
+// 只有解码好的位图能画
+function isBitmap(v) {
+  return !!v && v !== "loading" && !v.missing;
+}
+
+// 404 不能永久缓存：瓦片很可能只是这一轮还没抓到（抓取会话只存增量）。
+// 永久记住"缺失"会让那个洞一直空着——之后抓到了、tile 事件也到了，画布
+// 却再也不去取。冷却期过了就允许重试。
+const MISSING_TTL = 5000;  // 毫秒
+function missingFresh(v) {
+  return !!(v && v.missing) && (Date.now() - v.t) < MISSING_TTL;
+}
+
 function requestTileBitmap(map, zoom, x, y) {
   const key = map + "/" + zoom + "/" + x + "_" + y;
-  if (tileCache.has(key)) return;
+  const cur = tileCache.get(key);
+  // 已有位图 / 正在下载 / 缺失且还在冷却期内 -> 不重复发请求
+  if (isBitmap(cur) || cur === "loading" || missingFresh(cur)) return;
   cachePut(key, "loading");
   fetch("/tiles/" + map + "/" + zoom + "/" + x + "_" + y + ".png")
     .then(r => r.ok ? r.blob() : Promise.reject(new Error("HTTP " + r.status)))
@@ -492,7 +507,7 @@ function requestTileBitmap(map, zoom, x, y) {
       cachePut(key, bmp);
       if (state.activeKey === viewKey(map, zoom)) requestRender();
     })
-    .catch(() => { cachePut(key, "missing"); });
+    .catch(() => { cachePut(key, { missing: true, t: Date.now() }); });
 }
 
 async function loadOverview(map, zoom) {
@@ -542,12 +557,12 @@ function render() {
       const [map, zoom] = state.activeKey.split("@");
       for (let y = y0; y <= y1; y++) {
         for (let x = x0; x <= x1; x++) {
-          const bmp = cacheGet(map + "/" + zoom + "/" + x + "_" + y);
-          if (bmp) {
-            if (bmp !== "loading" && bmp !== "missing") {
-              g.drawImage(bmp, (x - v.minX) * TILE, (y - v.minY) * TILE, TILE, TILE);
-            }
-          } else {
+          const key = map + "/" + zoom + "/" + x + "_" + y;
+          const bmp = cacheGet(key);
+          if (isBitmap(bmp)) {
+            g.drawImage(bmp, (x - v.minX) * TILE, (y - v.minY) * TILE, TILE, TILE);
+          } else if (bmp !== "loading" && !missingFresh(bmp)) {
+            // 没有位图、不在下载中、缺失标记也过期了 -> （重新）请求
             requestTileBitmap(map, zoom, x, y);
           }
         }
@@ -787,7 +802,11 @@ async function saveCalib() {
     if (!res.ok) { addLog("标定失败: " + res.error, "t-err"); return; }
     calib.mapping = res;
     res.control_points.forEach((cp, i) => {
-      if (calib.points[i]) { calib.points[i].error = cp.error; calib.points[i].inlier = cp.enabled; }
+      // 只取拟合结论，别动用户勾选的 enabled：服务端现在把两者分开返回
+      if (calib.points[i]) {
+        calib.points[i].error = cp.error;
+        calib.points[i].inlier = cp.inlier != null ? cp.inlier : cp.enabled;
+      }
     });
     renderCalibList(); renderCalibMarks();
     $("calibStatus").innerHTML =
@@ -801,7 +820,8 @@ async function saveCalib() {
 // 切换视图/地图时加载该地图已有标定
 async function loadMappingForCurrent() {
   const [map, zoom] = (state.activeKey || "").split("@");
-  calib.points = []; calib.mapping = null; calib.key = state.activeKey;
+  const wantKey = state.activeKey;  // 请求期间用户可能又切走了
+  calib.points = []; calib.mapping = null; calib.key = wantKey;
   closeCalibDialog();
   if (!map || !zoom) {
     $("calibStatus").textContent = "未标定（开标定模式后点击地图添加控制点）";
@@ -811,11 +831,20 @@ async function loadMappingForCurrent() {
   try {
     const resp = await fetch("/api/calib?map=" + encodeURIComponent(map) + "&zoom=" + encodeURIComponent(zoom));
     const res = await resp.json();
+    // 响应可能已经过期：快速来回切地图（或抓取过程中自动切图）时，A 的响应
+    // 会晚于 B 到达。这时候 calib.key 已经是 B 而 mapping 是 A，所有
+    // `calib.key !== state.activeKey` 的守卫都会通过，于是用错图的仿射矩阵去
+    // 换算——涂的格子、路径和玩家标记全部落到错误的世界坐标。
+    if (wantKey !== state.activeKey) return;
     if (res.ok && res.matrix) {
       calib.mapping = res;
       calib.points = (res.control_points || []).map(cp => ({
-        pixel: cp.pixel, world: cp.world, enabled: !!cp.enabled,
-        error: cp.error != null ? cp.error : null, inlier: cp.enabled,
+        pixel: cp.pixel, world: cp.world,
+        // enabled = 用户勾选（复选框），inlier = 上次拟合是否判为内点（离群标记）。
+        // 旧文件只有 enabled，退回用兼容读法。
+        enabled: cp.enabled !== false,
+        inlier: cp.inlier != null ? cp.inlier : cp.enabled,
+        error: cp.error != null ? cp.error : null,
       }));
       $("calibStatus").innerHTML = "已加载标定（平均误差 <b>" + res.average_error + "</b>，最大 " + res.max_error + "）";
       addLog("已加载标定: " + map + "/" + zoom, "t-ok");
@@ -823,6 +852,7 @@ async function loadMappingForCurrent() {
       $("calibStatus").textContent = "未标定（开标定模式后点击地图添加控制点）";
     }
   } catch (e) {
+    if (wantKey !== state.activeKey) return;
     $("calibStatus").textContent = "标定加载失败";
   }
   renderCalibList(); renderCalibMarks();
@@ -993,6 +1023,11 @@ function drawAllCells() {
   const e = ed();
   if (!e || !calib.mapping) return;   // 未标定就没有像素↔格子换算，直接不画
   e.bbox = computeBBox(e);
+  // 这里重算完 bbox 要顺手刷一下统计面板：涂/擦格子是"先 updateEditStats 再
+  // requestRender"，而擦除时 bbox 故意不缩（增量缩边界是 O(n)，每格都缩会变成
+  // O(n²)），所以那一刻面板读到的还是旧的边界盒；等这一帧重算完才能显示对。
+  // 少了这一句，擦除后「范围/未知」会一直停在旧值，直到下一次别的动作偶然刷新。
+  updateEditStats();
   const bb = savedBounds(e);
   if (!bb) return;
   // 保存范围整块铺一层淡色（单次 fillRect，不逐格循环 —— 范围可能很大）
@@ -1401,6 +1436,10 @@ async function saveGrid2D() {
       e.blocked = rebase(e.blocked);
       e.selection = new Set();
       e.selRect = null;
+      // bbox 是按下标缓存的边界盒，下标已经整体回移了，必须作废重算：
+      // 留着旧的会让 savedBounds()（优先用 e.bbox）返回一个横跨新旧基准的
+      // 巨大范围，面板上的"范围 WxH / 未知 N"和连通性检查全都不对
+      e.bbox = null;
     }
     if (res.origin) e.origin = [res.origin[0], res.origin[2]];
     if (res.shape) e.shape = [res.shape[0], res.shape[1]];
@@ -1602,11 +1641,19 @@ function updateCounts() {
   $("cError").textContent = state.counts.error;
 }
 
+// 抓取与合成是两件独立的事，按钮状态必须从两个标志分别推出来。
+// 以前合成结束时无条件 setBusyFetch(false)，会把仍在运行的抓取状态一起清掉：
+// 「停止抓取」被禁用、「开始抓取」被启用，而服务端只会回「抓取已在运行中」，
+// 用户再也停不下那个抓取。
+function syncButtons() {
+  $("btnFetch").disabled = state.busyFetch;
+  $("btnFetchStop").disabled = !state.busyFetch;
+  $("btnSim").disabled = state.busyFetch || !!state.compose;
+}
+
 function setBusyFetch(b) {
   state.busyFetch = b;
-  $("btnFetch").disabled = b;
-  $("btnFetchStop").disabled = !b;
-  $("btnSim").disabled = b || (state.compose && state.compose.done < state.compose.total);
+  syncButtons();
 }
 
 // ---------------- 合成流程 ----------------
@@ -1617,6 +1664,7 @@ async function startCompose() {
   updateCounts();
   clearView(map, zoom);
   state.compose = { map, zoom, total: 0, done: 0 };
+  syncButtons();
   $("progressLine").textContent = "合成 " + map + "/" + zoom + "…";
   try {
     const resp = await fetch("/api/compose", {
@@ -1625,10 +1673,16 @@ async function startCompose() {
       body: JSON.stringify({ map, zoom, save: true }),
     });
     const res = await resp.json();
-    if (!res.ok) { addLog("合成启动失败: " + res.error, "t-err"); state.compose = null; return; }
+    if (!res.ok) { addLog("合成启动失败: " + res.error, "t-err"); state.compose = null; syncButtons(); return; }
     state.compose.total = res.total;
     addLog("开始合成 " + map + "/" + zoom + "，共 " + res.total + " 张瓦片", "t-ok");
-  } catch (e) { addLog("合成请求失败: " + e.message, "t-err"); }
+  } catch (e) {
+    // 请求本身失败时不会有 compose_done，不清掉 state.compose 的话
+    // 「模拟抓取」会被永久禁用
+    state.compose = null;
+    syncButtons();
+    addLog("合成请求失败: " + e.message, "t-err");
+  }
 }
 
 // ---------------- SSE ----------------
@@ -1654,6 +1708,14 @@ function handleEvent(evt) {
         "　Pillow: " + (evt.service.pillow ? "✓" : "✗ 未安装") +
         (evt.service.fetch.running ? "<br>抓取运行中: " + evt.service.fetch.session : "");
       if (evt.service.fetch.running) setBusyFetch(true);
+      // 刷新页面时把服务端的实时计数带回来：否则抓取还在跑，而「新增/更新/
+      // 未变化」已经静默归零，和标题上的「抓取运行中」自相矛盾
+      if (evt.service.fetch && evt.service.fetch.counts) {
+        state.counts = Object.assign(
+          { new: 0, updated: 0, unchanged: 0, skipped: 0, error: 0 },
+          evt.service.fetch.counts);
+        updateCounts();
+      }
       break;
     case "tile": {
       if (state.follow) setActive(viewKey(evt.map, evt.zoom));
@@ -1691,7 +1753,7 @@ function handleEvent(evt) {
         ? "合成完成: " + evt.total + " 张（已保存 tiles/maps/" + evt.file + "）"
         : "合成完成: " + evt.total + " 张";
       if (state.compose) state.compose = null;
-      setBusyFetch(false);
+      syncButtons();  // 只收合成的忙状态，别动正在跑的抓取
       addLog(evt.file
         ? "合成完成，已保存 tiles/maps/" + evt.file + "（覆盖旧版）"
         : "合成完成（未保存文件）", "t-ok");
@@ -1704,6 +1766,14 @@ function handleEvent(evt) {
       break;
     case "fetch_done":
       setBusyFetch(false);
+      // 服务端的 counts 才是权威：前端只在 tile 事件里逐张累加 new/updated/
+      // unchanged，跳过和错误两个数永远是 0，用户看不到有瓦片被跳过或报错
+      if (evt.counts) {
+        state.counts = Object.assign(
+          { new: 0, updated: 0, unchanged: 0, skipped: 0, error: 0 },
+          evt.counts);
+        updateCounts();
+      }
       addLog("抓取结束: " + evt.session + "，合计 " + evt.total + " 张", "t-ok");
       break;
     case "simulate_done":

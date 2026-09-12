@@ -64,6 +64,21 @@ class Handler(BaseHTTPRequestHandler):
             status,
         )
 
+    def _read_json(self) -> tuple[dict, str | None]:
+        """解析 JSON 请求体，返回 ``(对象, 错误信息)``。
+
+        必须确认结果是 dict 才能用：body 是合法 JSON 的 ``[]`` / ``3`` / ``"x"`` /
+        ``null`` 时，直接 ``req.get(...)`` 会抛 AttributeError，连接被断开且没有任何
+        JSON 响应，前端只看到请求失败、日志里多一段堆栈。
+        """
+        try:
+            req = json.loads(self._read_body().decode("utf-8") or "{}")
+        except Exception as e:
+            return {}, f"请求体解析失败: {e}"
+        if not isinstance(req, dict):
+            return {}, "请求体必须是 JSON 对象"
+        return req, None
+
     # ---------------- GET ----------------
     def do_GET(self):
         path = self._path()
@@ -140,7 +155,10 @@ class Handler(BaseHTTPRequestHandler):
             parts = path[len("/tiles/"):].split("/")
             m = None
             if len(parts) == 3:
-                m = re.fullmatch(r"(-?\d+)_(-?\d+)\.png", parts[2])
+                # 限长 7 位：坐标本来就被 serve_tile 限制在 ±1_000_000，而不限长
+                # 的话一个几千位的数字串会让 int() 抛 ValueError（Python 3.12
+                # 对 int(str) 有 4300 位上限），把 GET 处理器打断成堆栈
+                m = re.fullmatch(r"(-?\d{1,7})_(-?\d{1,7})\.png", parts[2])
             if not m:
                 self._send_bytes(b"Not Found", "text/plain; charset=utf-8", 404)
                 return
@@ -177,14 +195,32 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------- POST ----------------
     def do_POST(self):
+        """所有 POST 的统一异常边界。
+
+        前端一律 `await resp.json()`；服务层任何漏出来的异常（畸形请求触发的
+        ValueError/OverflowError/TypeError 等）如果直接冒到 socketserver，只会
+        断开连接、前端拿到一个没有原因的失败，日志里只有一段堆栈。这里统一
+        翻成一条 JSON 错误。各分支都是"发一次 JSON 就 return"，异常发生时还没
+        有任何字节写出去，所以补发响应是安全的。
+        """
+        try:
+            self._do_post()
+        except Exception as e:
+            sys.stderr.write(f"[nav-grid-editor] POST {self._path()} 异常: {e!r}\n")
+            try:
+                self._send_json({"ok": False, "error": f"服务端异常: {e}"}, 500)
+            except Exception:
+                pass
+
+    def _do_post(self):
         path = self._path()
         svc = service
 
         if path == "/api/fetch/start":
-            try:
-                req = json.loads(self._read_body().decode("utf-8") or "{}")
-            except Exception:
-                req = {}
+            req, err = self._read_json()
+            if err:
+                self._send_json({"ok": False, "error": err}, 400)
+                return
             self._send_json(svc.start_fetch(headless=bool(req.get("headless", False))))
             return
 
@@ -193,10 +229,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/compose":
-            try:
-                req = json.loads(self._read_body().decode("utf-8") or "{}")
-            except Exception as e:
-                self._send_json({"ok": False, "error": f"请求体解析失败: {e}"}, 400)
+            req, err = self._read_json()
+            if err:
+                self._send_json({"ok": False, "error": err}, 400)
                 return
             self._send_json(svc.start_compose(
                 str(req.get("map", "")), str(req.get("zoom", "")),
@@ -217,10 +252,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/calib":
-            try:
-                req = json.loads(self._read_body().decode("utf-8") or "{}")
-            except Exception as e:
-                self._send_json({"ok": False, "error": f"请求体解析失败: {e}"}, 400)
+            req, err = self._read_json()
+            if err:
+                self._send_json({"ok": False, "error": err}, 400)
                 return
             if "threshold" in req:
                 try:
@@ -235,10 +269,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/grid2d":
-            try:
-                req = json.loads(self._read_body().decode("utf-8") or "{}")
-            except Exception as e:
-                self._send_json({"ok": False, "error": f"请求体解析失败: {e}"}, 400)
+            req, err = self._read_json()
+            if err:
+                self._send_json({"ok": False, "error": err}, 400)
                 return
             self._send_json(svc.save_grid2d(
                 str(req.get("map", "")), str(req.get("zoom", "")),

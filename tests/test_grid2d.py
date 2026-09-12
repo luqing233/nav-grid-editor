@@ -20,6 +20,7 @@ from nav_grid_editor.map_service import (
     GRID_MAGIC,
     GRID_SCHEMA_VERSION,
     MapService,
+    _load_grid_npz,
 )
 
 
@@ -135,6 +136,18 @@ class Grid2DReadValidationTest(unittest.TestCase):
         self.assertIsNotNone(res["data"])
         self.assertTrue(any("axis_convention" in w for w in res["warnings"]))
 
+    def test_rejects_non_finite_meta_from_other_tools(self):
+        """别的工具写出的 NaN/inf 也要拒：json.loads 接受非标准字面量，
+        放行的话整张网格的世界坐标会全变成 nan，而读方还认为"读入成功"。"""
+        for meta in (_meta(cell_size=float("inf")),
+                     _meta(origin=[float("nan"), 0.0, 20.0])):
+            with self.subTest(meta=meta[:60]):
+                self._write("bad_4.grid.npz", np.array([[1, 0]], dtype=np.uint8),
+                            meta=meta)
+                res = self.svc.get_grid2d("bad", "4")
+                self.assertIsNone(res["data"])
+                self.assertTrue(res.get("error"))
+
     def test_read_rejects_path_traversal(self):
         """读路径也必须校验地图名：grid2d_path 是拼字符串，`../x` 能读到目录外。
 
@@ -155,6 +168,64 @@ class Grid2DReadValidationTest(unittest.TestCase):
         res = self.svc.get_grid2d("m", "../4")
         self.assertIsNone(res["data"])
         self.assertIn("非法", res.get("error", ""))
+
+
+class Grid2DNameAndNumberValidationTest(unittest.TestCase):
+    """地图名/数值校验：地图名会变成目录名，数值会直接写进 meta。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self._tmp.name)
+        self.svc = MapService(grid2d_dir=self.d, tiles_root=self.d / "tiles")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _save(self, map_name="m", **data):
+        payload = {"origin": [10, 0, 20], "cell_size": 1, "cells": [[1, 1]],
+                   "blocked": []}
+        payload.update(data)
+        return self.svc.save_grid2d(map_name, "4", payload)
+
+    def test_rejects_non_finite_cell_size(self):
+        """`float('inf') > 0` 是 True，只比大小拦不住 inf。"""
+        for cs in (float("inf"), float("-inf"), float("nan")):
+            with self.subTest(cell_size=cs):
+                self.assertFalse(self._save(cell_size=cs)["ok"])
+
+    def test_rejects_non_finite_origin(self):
+        self.assertFalse(self._save(origin=[float("nan"), 0, 20])["ok"])
+        self.assertFalse(self._save(origin=[10, 0, float("inf")])["ok"])
+
+    def test_rejects_windows_reserved_device_names(self):
+        """NUL 之类能过字符白名单，但 mkdir 会直接失败（exist_ok 吞不掉 WinError 3）。"""
+        for name in ("NUL", "CON", "com1", "LPT9"):
+            with self.subTest(map_name=name):
+                res = self._save(map_name=name)
+                self.assertFalse(res["ok"])
+                self.assertIn("非法", res["error"])
+
+    def test_concurrent_saves_all_succeed_with_valid_file(self):
+        """并发保存不能互相踩：以前共用 <name>.tmp，会 FileNotFoundError 或
+        把别人写了一半的内容自检通过后替换成正式产物。"""
+        import threading
+        results = []
+
+        def save(i):
+            results.append(self._save(cells=[[j, i] for j in range(50)]))
+
+        threads = [threading.Thread(target=save, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(results), 8)
+        self.assertTrue(all(r["ok"] for r in results),
+                        [r for r in results if not r["ok"]])
+        arr, _meta, _w = _load_grid_npz(self.svc.grid2d_path("m", "4"))
+        self.assertEqual(arr.dtype, np.uint8)
+        self.assertFalse(list(self.d.glob("*.tmp")), "临时文件没清干净")
 
 
 if __name__ == "__main__":
