@@ -18,8 +18,9 @@ dist/
 # Playwright 持久化登录配置：含 Cookie / 登录态，务必不要提交
 browser_profile/
 
-# 缩略总图缓存（由 /api/overview 按需生成，删掉会自动重建）
+# 缩略总图缓存（由 /api/overview 按需生成，删掉会自动重建；现在是 WebP）
 *.overview.png
+*.overview.webp
 
 # 注意：tiles/ 与 grids2d/ 是采集与编辑产物（体积大但属于数据，不是缓存），
 # 默认不忽略。若要纳入版本库请自行确认体量，若不想提交请取消下面两行的注释。

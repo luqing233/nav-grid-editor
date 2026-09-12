@@ -203,6 +203,33 @@ class ComposeSaveSafetyTest(unittest.TestCase):
             self.assertEqual(im.size, (512, 256), "画布退化成了 1x1")
         self.assertFalse(list(self.out.parent.glob("*.tmp")), "临时文件没清干净")
 
+    def test_compose_also_writes_the_overview(self):
+        """合成总图时要顺手把缩略图也生成掉。
+
+        这是"打开地图快"的关键：合成时整张 canvas 已经在内存里，缩略图只是多花
+        零点几秒编码；否则首次打开要去解码那张几十 MB 的 PNG（map02@4 实测 4.6 秒）。
+        """
+        self._tile(0, 0, (200, 30, 30))
+        self._tile(1, 0, (30, 200, 30))
+        self._compose()
+        ov = self.svc.overview_path("m", "4")
+        self.assertIsNotNone(ov)
+        self.assertTrue(ov.is_file(), "合成之后缩略图没生成")
+        self.assertEqual(ov.suffix, ".webp" if map_service.WEBP_OK else ".png")
+        with Image.open(ov) as im:
+            self.assertEqual(im.size, (512, 256))
+
+    def test_overview_is_much_smaller_than_the_composite(self):
+        """缩略图要真的"缩"——WebP 下同一张图比 PNG 小一个数量级。"""
+        for x in range(4):
+            self._tile(x, 0, (x * 60, 120, 200 - x * 40))
+        self._compose()
+        src = self.out.stat().st_size
+        ov = self.svc.overview_path("m", "4").stat().st_size
+        self.assertLess(ov, src, "缩略图不比总图小")
+        self.assertLessEqual(len(list(self.out.parent.glob("*.overview.*"))), 1,
+                             "同时存在多份缩略图")
+
     def test_all_tiles_failing_leaves_existing_composite_untouched(self):
         """一张都没贴成功时不能保存：宁可留着旧总图，也不要写一张空图覆盖它。
 

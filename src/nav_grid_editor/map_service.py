@@ -43,8 +43,18 @@ import numpy as np  # 2D 网格的稠密 npz 读写必需（非可选依赖）
 
 try:
     from PIL import Image  # type: ignore
+    # 合成总图能到 10752x15872（1.7 亿像素），超过 Pillow 默认的 8900 万像素
+    # "解压炸弹"阈值。这里不是不可信输入（都是本机自己拼出来的图），显式放宽，
+    # 否则每次生成缩略图都会打一条 DecompressionBombWarning。
+    Image.MAX_IMAGE_PIXELS = None
+    try:
+        from PIL import features as _pil_features
+        WEBP_OK = bool(_pil_features.check("webp"))
+    except Exception:  # pragma: no cover
+        WEBP_OK = False
 except Exception:  # pragma: no cover
     Image = None
+    WEBP_OK = False
 
 PLAYWRIGHT_OK = False
 try:
@@ -248,6 +258,39 @@ def _replace_with_retry(tmp: Path, dest: Path, attempts: int = 12) -> None:
             if i == attempts - 1:
                 raise
             time.sleep(min(0.05 * (i + 1), 0.2))
+
+
+#: 缩略总图的长边上限与 WebP 质量
+OVERVIEW_MAX_PX = 2048
+OVERVIEW_QUALITY = 82
+#: 没有 WebP 支持时退回 PNG（文件名后缀要跟着变，路由按后缀给 Content-Type）
+OVERVIEW_SUFFIX = ".overview.webp" if WEBP_OK else ".overview.png"
+
+
+def _save_overview(img, out: Path) -> tuple[int, int]:
+    """把 img 缩成缩略图写到 out，返回缩略图尺寸。
+
+    **就地缩小 img**：`thumbnail()` 是原地修改的，调用方在这之后不能再拿原图
+    当完整尺寸用。两个调用点（`_compose_run` 存完总图后、`ensure_overview`）
+    都满足这个前提——复制一张 8192x7680 的 RGB 图要多花约 190MB 内存，不值。
+
+    编码用 WebP：同一张 2048 长边的缩略图，PNG 是 2.3MB、WebP q82 只有 195KB
+    （小 12 倍），编码还更快；浏览器要解码的像素数一样，但下载量和传输开销都
+    降下来了。注意别加 `optimize=True`——实测多花 5 倍编码时间只换来 4% 体积。
+    """
+    img.thumbnail((OVERVIEW_MAX_PX, OVERVIEW_MAX_PX), Image.Resampling.BILINEAR)
+    tmp = _unique_tmp(out)
+    with _path_lock(out):
+        try:
+            if WEBP_OK:
+                img.save(tmp, "WEBP", quality=OVERVIEW_QUALITY, method=4)
+            else:  # pragma: no cover
+                img.save(tmp, "PNG")
+            _replace_with_retry(tmp, out)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+    return img.size
 
 
 # =========================================================
@@ -586,7 +629,10 @@ class MapService:
         handler.send_response(200)
         handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
         handler.send_header("Cache-Control", "no-store")
-        handler.send_header("Connection", "keep-alive")
+        # SSE 是无限流，没有 Content-Length。HTTP/1.1 的 keep-alive 下这属于
+        # 非法响应（连接无法界定消息边界），所以显式声明 close：正文以连接关闭
+        # 结束。EventSource 自己会重连，功能不受影响。
+        handler.send_header("Connection", "close")
         handler.send_header("X-Accel-Buffering", "no")
         handler.end_headers()
         q = self.bus.subscribe()
@@ -1008,6 +1054,20 @@ class MapService:
                 file_rel = f"{map_name}/{zoom}/{out.name}"
                 self.bus.emit(type="log",
                               text=f"已保存拼接总图: tiles/maps/{file_rel}（覆盖旧版，只保留一份）")
+                # 顺手把缩略图也生成掉：此时整张 canvas 已经在内存里，只多花零点几秒
+                # 编码，而"打开地图"那条路就再也不用去解码这张几十 MB 的 PNG 了
+                # （实测 map02@4 冷生成要 4.6 秒，其中 3.9 秒是解码）。
+                # canvas 到这里已经保存完毕、后面不再使用，所以可以就地缩小。
+                try:
+                    ov = self.overview_path(map_name, zoom)
+                    if ov is not None:
+                        ow, oh = _save_overview(canvas, ov)
+                        self.bus.emit(type="log",
+                                      text=f"已生成缩略图 {ov.name} ({ow}x{oh})")
+                except Exception as e:
+                    # 缩略图失败不影响"总图已经存好"这件事，只记一行日志
+                    _log(f"缩略图生成失败 {map_name}/{zoom}: {e}")
+                    self.bus.emit(type="log", text=f"缩略图生成失败: {e}")
             elif canvas is not None:
                 self.bus.emit(type="log",
                               text=f"一张瓦片都没贴成功（共 {len(tiles)} 张读取/解码失败），"
@@ -1125,42 +1185,35 @@ class MapService:
         src = self.store.tiles_root / "maps" / map_name / zoom / f"{map_name}_{zoom}.png"
         if not src.is_file():
             return None
-        return src.with_name(f"{map_name}_{zoom}.overview.png")
+        return src.with_name(f"{map_name}_{zoom}{OVERVIEW_SUFFIX}")
 
-    def ensure_overview(self, map_name: str, zoom: str, max_px: int = 2048) -> Path | None:
-        """生成/复用缩略总图（长边 <= max_px），返回缓存文件路径。
+    def ensure_overview(self, map_name: str, zoom: str) -> Path | None:
+        """生成/复用缩略总图，返回缓存文件路径。
 
         前端以前是直接把总图整张下下来再画到同尺寸画布上：map02@4 的文件
         78.9 MB，解码后是 10752x15872 的位图，约 685 MB。这是"打开地图就卡"
-        的主因。缩略图按 2048 长边生成后只有几百 KB，解码后几 MB，缩着看
-        完全够用；放大到瓦片级时前端另外按需取瓦片。
+        的主因。缩略图按 2048 长边生成后只有一两百 KB，缩着看完全够用；
+        放大到瓦片级时前端另外按需取瓦片。
 
-        生成一次后按 mtime 复用；总图重新合成后才需要再生成。
+        **正常情况下这个函数不用干活**：`_compose_run` 存总图时顺手就把缩略图
+        生成了（那时整张 canvas 已经在内存里，只多花零点几秒）。这里只是兜底：
+        直接删掉缩略图、或总图是别处产生的，才需要重新解码那张几十 MB 的 PNG
+        ——实测 map02@4 冷生成要 4.6 秒。
         """
         out = self.overview_path(map_name, zoom)
-        if out is None:
-            return None
-        if Image is None:
+        if out is None or Image is None:
             return None
         src = self.store.tiles_root / "maps" / map_name / zoom / f"{map_name}_{zoom}.png"
         try:
             if out.is_file() and out.stat().st_mtime >= src.stat().st_mtime:
                 return out
+            t0 = time.perf_counter()
             img = Image.open(src)
             if img.mode != "RGB":
                 img = img.convert("RGB")
-            img.thumbnail((max_px, max_px), Image.Resampling.BILINEAR)
-            # 临时名唯一：两个标签页同时要同一张缩略图时，固定名会让后完成的
-            # 那个 os.replace 到已经被对方挪走的文件上
-            tmp = _unique_tmp(out)
-            with _path_lock(out):
-                try:
-                    img.save(tmp, "PNG", optimize=True)
-                    _replace_with_retry(tmp, out)
-                except Exception:
-                    tmp.unlink(missing_ok=True)
-                    raise
-            _log(f"缩略总图已生成 {out.name} ({img.width}x{img.height})")
+            size = _save_overview(img, out)
+            _log(f"缩略总图已生成 {out.name} ({size[0]}x{size[1]})"
+                 f" 用时 {time.perf_counter() - t0:.1f}s")
             return out
         except Exception as e:
             _log(f"缩略总图生成失败 {src}: {e}")

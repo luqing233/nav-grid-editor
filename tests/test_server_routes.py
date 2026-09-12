@@ -8,6 +8,7 @@
 
 import json
 import tempfile
+import time
 import threading
 import unittest
 import urllib.error
@@ -91,6 +92,71 @@ class PostBoundaryTest(unittest.TestCase):
                      "cells": [[1, 1]], "blocked": []}})
         self.assertEqual(status, 200)
         self.assertTrue(res["ok"], res)
+
+
+class ConditionalGetTest(unittest.TestCase):
+    """条件请求（ETag / 304）。
+
+    这是"浏览地图时不反复重下"的关键：瓦片以前是 max-age=30 且没有 ETag，
+    等于每 30 秒把视野里那几百张全部重下一遍。现在带 ETag，过期后重验只回
+    304（不重传正文）。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        d = Path(self._tmp.name)
+        self.tiles = d / "tiles"
+        (self.tiles / "latest" / "m" / "4").mkdir(parents=True)
+        (self.tiles / "latest" / "m" / "4" / "0_0.png").write_bytes(b"tile-bytes")
+        (self.tiles / "maps" / "m" / "4").mkdir(parents=True)
+        (self.tiles / "maps" / "m" / "4" / "m_4.png").write_bytes(b"composite")
+        self.svc = MapService(data_root=d, tiles_root=self.tiles,
+                              profile_dir=d / "p", grid2d_dir=d / "grids")
+        server.service = self.svc
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self._tmp.cleanup()
+
+    def _get(self, path, extra=None):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}",
+                                     headers=extra or {})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, r.read(), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), dict(e.headers)
+
+    def _check_revalidation(self, path):
+        st, body, hdr = self._get(path)
+        self.assertEqual(st, 200, path)
+        self.assertTrue(body)
+        etag = hdr.get("ETag")
+        self.assertTrue(etag, f"{path} 没有 ETag")
+        self.assertIn("max-age", hdr.get("Cache-Control", ""))
+        st2, body2, _ = self._get(path, {"If-None-Match": etag})
+        self.assertEqual(st2, 304, f"{path} 命中了 ETag 却回 {st2}")
+        self.assertEqual(body2, b"", "304 不能带正文")
+
+    def test_tile_revalidates_with_etag(self):
+        self._check_revalidation("/tiles/m/4/0_0.png")
+
+    def test_composite_revalidates_with_etag(self):
+        self._check_revalidation("/maps/m/4/m_4.png")
+
+    def test_etag_changes_when_content_changes(self):
+        """ETag 必须跟着内容走：瓦片重抓后内容变了，不能还回 304。"""
+        _, _, h1 = self._get("/tiles/m/4/0_0.png")
+        p = self.tiles / "latest" / "m" / "4" / "0_0.png"
+        time.sleep(0.01)
+        p.write_bytes(b"different-bytes")
+        st, body, h2 = self._get("/tiles/m/4/0_0.png", {"If-None-Match": h1["ETag"]})
+        self.assertEqual(st, 200, "内容变了却回了 304")
+        self.assertEqual(body, b"different-bytes")
 
 
 if __name__ == "__main__":
