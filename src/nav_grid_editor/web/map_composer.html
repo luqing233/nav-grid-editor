@@ -1973,8 +1973,10 @@ async function startMarks(kind) {
 // 标记是世界坐标 (x,y,z)，要靠标定矩阵换算成像素；没标定的图没法画。
 // 跟瓦片一样"只画可见范围 + 设缩放下限"——map01@4 有 2414 个点，不设限会糊满屏。
 const markIcons = new Map();      // 图标文件名 -> Image | "loading" | "missing"
+const markBadges = new Map();     // 图标文件名 -> 合成好的徽章画布
 const MARK_MIN_SCALE = 0.12;      // 低于此缩放不画（与瓦片的 600 张阈值同量级）
-const MARK_ICON_PX = 22;          // 图标在屏幕上的目标尺寸（像素）
+const MARK_BADGE_PX = 40;         // 徽章直径（**屏幕像素**，与缩放无关）
+const MARK_POINTER_PX = 8;        // 底部小三角高度（屏幕像素）
 const MARK_LAYER_OFF = new Set(["威胁"]);   // 默认关掉的大类（数量大且与导航无关）
 
 function showMarks() { return !!(state.marksOn && state.markers && state.markers.points.length); }
@@ -1998,6 +2000,33 @@ function markIcon(file) {
   img.onerror = () => { markIcons.set(file, "missing"); };
   img.src = "/api/marks/icon?f=" + encodeURIComponent(file);
   return "loading";
+}
+
+// 徽章 = 深色圆底 + 白色图标，按**设备像素**预先合成一张离屏画布（每张图只合一次）。
+// 合成时按 DPR 出图、绘制时再缩到"屏幕恒定大小"，所以放大缩小都不会糊也不会变大小。
+function markBadge(file) {
+  const cached = markBadges.get(file);
+  if (cached !== undefined) return cached;
+  const img = markIcon(file);
+  if (!(img instanceof Image)) return null;      // 还在下载或失败了
+  const px = Math.max(8, Math.round(MARK_BADGE_PX * DPR));
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = px;
+  const c = cv.getContext("2d");
+  const r = px / 2;
+  // 底色用**径向渐变**（左上偏亮、右下偏暗）而不是平涂——参考图里那种圆底。
+  // 半透明（能隐约透出底图）但整体偏实，且**不描边**：白色描边会把图标框住。
+  const grad = c.createRadialGradient(px * 0.36, px * 0.30, px * 0.05, r, r, r);
+  grad.addColorStop(0, "rgba(62,62,76,0.82)");
+  grad.addColorStop(1, "rgba(12,12,18,0.82)");
+  c.beginPath();
+  c.arc(r, r, r, 0, Math.PI * 2);
+  c.fillStyle = grad;
+  c.fill();
+  const inner = px * 0.72;                       // 图标占圆的比例（原来 0.58 偏小）
+  c.drawImage(img, (px - inner) / 2, (px - inner) / 2, inner, inner);
+  markBadges.set(file, cv);
+  return cv;
 }
 
 async function loadMarkers() {
@@ -2051,23 +2080,38 @@ function drawMarkers(g) {
   const inv = (calib.mapping && calib.key === state.activeKey)
     ? calib.mapping.inverse_matrix : null;
   if (!inv) return;                          // 没标定就拿不到 世界→像素
-  const size = MARK_ICON_PX / s;             // 换成 holder 单位，屏幕上才恒定大小
-  const half = size / 2;
+
+  // 1/scale 把"屏幕像素"折算成 holder 单位：画布整体被缩放 s，holder 尺寸 × s
+  // 才是屏幕尺寸。这样无论缩放多少，徽章在屏幕上都一样大。
+  const k = 1 / s;
+  const d = MARK_BADGE_PX * k;               // 圆直径
+  const ph = MARK_POINTER_PX * k;            // 三角高
+  const pw = ph * 0.85;
+  const padTop = d + ph;                     // 剔除时留出整个徽章的高度（往上长）
 
   for (const [tid, wx, _wy, wz] of m.points) {
     const info = m.templates[tid];
     if (!info || !layerOn(info.m)) continue;
     const px = inv[0][0] * wx + inv[0][1] * wz + inv[0][2];
     const py = inv[1][0] * wx + inv[1][1] * wz + inv[1][2];
-    if (px < vis.x - half || px > vis.x + vis.w + half) continue;
-    if (py < vis.y - half || py > vis.y + vis.h + half) continue;
-    const bmp = info.icon ? markIcon(info.icon) : "missing";
-    if (bmp && bmp !== "loading" && bmp !== "missing") {
-      g.drawImage(bmp, px - half, py - half, size, size);
-    } else {
-      // 没图标（或还没加载完）就画个小圆点，至少知道这里有东西
+    if (px < vis.x - d || px > vis.x + vis.w + d) continue;
+    if (py < vis.y - padTop || py > vis.y + vis.h + d) continue;
+
+    const badge = info.icon ? markBadge(info.icon) : null;
+    if (badge) {
+      // 底部小三角的**尖端正好落在锚点**上，圆徽章坐在它上面
       g.beginPath();
-      g.arc(px, py, size * 0.16, 0, Math.PI * 2);
+      g.moveTo(px - pw, py - ph);
+      g.lineTo(px + pw, py - ph);
+      g.lineTo(px, py);
+      g.closePath();
+      g.fillStyle = "#ffcc33";
+      g.fill();
+      g.drawImage(badge, px - d / 2, py - ph - d, d, d);
+    } else {
+      // 没有图标（或还没下载完）就画个小圆点，锚点仍是那个位置
+      g.beginPath();
+      g.arc(px, py - 4 * k, Math.max(1.5, 4 * k), 0, Math.PI * 2);
       g.fillStyle = "rgba(255,209,102,0.85)";
       g.fill();
     }

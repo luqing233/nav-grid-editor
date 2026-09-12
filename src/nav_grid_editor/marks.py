@@ -251,6 +251,27 @@ def _freeze(groups: dict) -> dict:
     }
 
 
+def merge_icon_sources(catalog_struct: dict, entries: list) -> list:
+    """合并两个图标来源，返回 ``[(tid, 物品名, url)]``。
+
+    实测**必须两个都用**：
+    - catalog 的子类 pic 覆盖全部 204 个 templateId（168 个子类 100% 带图）
+    - markTemplates 的 pic 更精确，但**只有在地图上有公开点位的模板才有**——
+      滑索/暗管/供电设备这些玩家自建结构不在匿名 markTemplates 里，只靠它会有
+      28 个模板拿不到图标（表现就是地图上只剩一个小黄点）
+    - 名字优先用 markTemplates 的（更具体：「供电终端」而不是子类「供电设备」），
+      没有才退回子类名
+    """
+    src: dict = {}
+    for tid, info in (catalog_struct or {}).items():
+        if info.get("pic"):
+            src[tid] = (info.get("name") or "", info["pic"])
+    for tid, name, url in entries:
+        base = src.get(tid, ("", ""))
+        src[tid] = (name or base[0], url or base[1])
+    return [(tid, n, u) for tid, (n, u) in src.items() if n and u]
+
+
 def _freeze_points(points: dict) -> dict:
     """{mapId: [{t,x,y,z}]} 按坐标排序（同 _freeze，保证输出确定）。"""
     return {m: sorted(v, key=lambda p: (p["x"], p["y"], p["z"]))
@@ -343,7 +364,8 @@ def fetch_public(out_dir: Path, log: Log = _noop) -> dict:
     _write_json(out_dir / "points.json", _freeze_points(points))
 
     log("下载图标…")
-    tid_file = download_icons(icon_entries, icons_dir(out_dir.parent.parent), log)
+    tid_file = download_icons(merge_icon_sources(struct, icon_entries),
+                              icons_dir(out_dir.parent.parent), log)
     for tid, item in struct.items():
         item["icon"] = tid_file.get(tid, "")
     _write_json(out_dir / "template_catalog.json", struct)
@@ -573,6 +595,7 @@ def fetch_auth(out_dir: Path, content: str, log: Log = _noop,
     structures: dict = defaultdict(lambda: defaultdict(dict))
     points: dict = defaultdict(list)
     icon_entries: list = []
+    tid_name: dict = {}
     names: set = set()
     dupes = saved_marks = requests_made = 0
 
@@ -587,6 +610,8 @@ def fetch_auth(out_dir: Path, content: str, log: Log = _noop,
             for t in data.get("markTemplates") or []:
                 pic = (t.get("pic") or "").strip()
                 nm = (t.get("name") or "").strip()
+                if nm:
+                    tid_name.setdefault(t["id"], nm)
                 if pic and nm:
                     icon_entries.append((t["id"], nm, pic))
 
@@ -635,9 +660,10 @@ def fetch_auth(out_dir: Path, content: str, log: Log = _noop,
     _write_json(out_dir / "points.json", _freeze_points(points))
 
     log("下载图标…")
-    tid_file = download_icons(icon_entries, icons_dir(out_dir.parent.parent), log)
-    # 认证口径也出一份 catalog：前端画图标要知道每个 templateId 的类别与图标文件名
     auth_catalog = _parse_catalog(catalog)
+    tid_file = download_icons(merge_icon_sources(auth_catalog, icon_entries),
+                              icons_dir(out_dir.parent.parent), log)
+    # 认证口径也出一份 catalog：前端画图标要知道每个 templateId 的类别与图标文件名
     for tid, item in auth_catalog.items():
         if tid in tid_name:
             item["name"] = tid_name[tid]
@@ -716,13 +742,18 @@ def load_map_markers(assets_root: Path, map_id: str) -> dict:
         catalog = load_json(d / "template_catalog.json")
         if isinstance(catalog, dict):
             for tid, info in catalog.items():
-                templates.setdefault(tid, {
+                # **认证口径放后面并覆盖**：它的名字来自认证 markTemplates 里的具体
+                # 物品名（「供电桩」），而公开口径只能拿到 catalog 的子类名，那是个
+                # **类别**（「供电设备」）。实测 13 个 templateId 两边不一致
+                # （供电设备/供电桩、滑索/长距滑索架、暗管/暗管入口…），
+                # 用错就会把供电桩画成供电设备的图标。
+                templates[tid] = {
                     "n": info.get("name"),
                     "m": info.get("mainType"),
                     "s": info.get("subType"),
                     # 图标文件名（中文名.png）；空串表示没有图标，前端画圆点
                     "icon": info.get("icon") or "",
-                })
+                }
         data = load_json(d / "points.json")
         if isinstance(data, dict):
             for p in data.get(map_id) or []:
