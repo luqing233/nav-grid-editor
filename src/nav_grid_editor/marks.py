@@ -75,6 +75,100 @@ def marks_auth_dir(assets_root: Path) -> Path:
     return Path(assets_root) / "items" / "map_auth"
 
 
+def icons_dir(assets_root: Path) -> Path:
+    """标记图标缓存：<assets>/items/icons/<templateId>.<ext>。
+
+    图标来自 catalog/markTemplates 里的 `pic`（远在 bbs.hycdn.cn）。抓到本地一份，
+    前端画地图时就不用每次打远程 CDN（也不依赖外网）。
+    """
+    return Path(assets_root) / "items" / "icons"
+
+
+#: 文件名里不能出现的字符（Windows 最严：\ / : * ? " < > | 加控制字符）
+_ICON_BAD_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]+')
+
+
+def icon_filename(name: str) -> str:
+    """物品名 → 安全的文件名。中文保留，只清掉文件系统不认的字符。
+
+    Windows 还不接受结尾的点和空格（会被静默吃掉，导致名字对不上）。
+    """
+    s = _ICON_BAD_CHARS.sub("_", (name or "").strip()).strip(" .")
+    return s or "unnamed"
+
+
+def download_icons(entries: list[tuple[str, str, str]], icons_dir_path: Path,
+                   log: Log = _noop) -> dict[str, str]:
+    """下载图标，**按中文名命名并去重**；返回 ``{templateId: 文件名}``。
+
+    entries 是 ``(templateId, 物品名, pic_url)``。去重口径只看**名字**：
+    实测 204 个 templateId 只有 168 个不同的名字，所以同名合并（12 组，如
+    「供电设备」5 个 id → 一个文件）后是 168 个文件 / 168 次请求。
+
+    同图不同名的（3 组）各下一份——**不做"同 URL 只下一次"的额外优化**，
+    按用户要求保持逻辑简单。
+    """
+    icons_dir_path = Path(icons_dir_path)
+    icons_dir_path.mkdir(parents=True, exist_ok=True)
+
+    # 先按名字归并（同名多 id → 一个文件）
+    by_name: dict[str, dict] = {}
+    for tid, name, url in entries:
+        if not name or not url:
+            continue
+        e = by_name.setdefault(name, {"url": url, "tids": []})
+        e["tids"].append(tid)
+        e["url"] = url
+
+    tid_file: dict[str, str] = {}
+    used: set[str] = set()
+    stats = {"network": 0, "failed": 0, "written": 0, "skipped": 0}
+
+    for name in sorted(by_name):
+        e = by_name[name]
+        url = e["url"]
+        ext = Path(url.split("?", 1)[0]).suffix or ".png"
+        base = icon_filename(name)
+        fname = base + ext
+        # 清洗后可能撞名（"A/B" 与 "A:B" 都变 A_B），加序号区分
+        if fname in used:
+            i = 2
+            while f"{base}_{i}{ext}" in used:
+                i += 1
+            fname = f"{base}_{i}{ext}"
+        used.add(fname)
+        dest = icons_dir_path / fname
+
+        if dest.is_file() and dest.stat().st_size > 0:
+            stats["skipped"] += 1
+        else:
+            try:
+                req = request.Request(url, headers={"User-Agent": "Mozilla/5.0",
+                                                    "Referer": REFERER})
+                with request.urlopen(req, timeout=TIMEOUT) as resp:
+                    data = resp.read()
+                stats["network"] += 1
+            except Exception as ex:  # noqa: BLE001
+                stats["failed"] += 1
+                log(f"图标下载失败 {name}: {ex}")
+                continue
+            try:
+                tmp = dest.with_name(dest.name + ".part")
+                tmp.write_bytes(data)
+                tmp.replace(dest)
+                stats["written"] += 1
+            except OSError as ex:
+                stats["failed"] += 1
+                log(f"图标写盘失败 {fname}: {ex}")
+                continue
+        for tid in e["tids"]:
+            tid_file[tid] = fname
+
+    log(f"图标：新下 {stats['network']} 个（已有 {stats['skipped']}）→ "
+        f"覆盖 {len(tid_file)} 个 templateId，失败 {stats['failed']}")
+    return tid_file
+
+
 def hg_content_path(config_dir: Path | None = None) -> Path:
     return Path(config_dir or CONFIG_DIR) / "hg_content.txt"
 
@@ -157,6 +251,12 @@ def _freeze(groups: dict) -> dict:
     }
 
 
+def _freeze_points(points: dict) -> dict:
+    """{mapId: [{t,x,y,z}]} 按坐标排序（同 _freeze，保证输出确定）。"""
+    return {m: sorted(v, key=lambda p: (p["x"], p["y"], p["z"]))
+            for m, v in sorted(points.items())}
+
+
 def _write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -177,6 +277,8 @@ def fetch_public(out_dir: Path, log: Log = _noop) -> dict:
     requests_made = 1
 
     all_maps: dict = defaultdict(lambda: defaultdict(dict))
+    points: dict = defaultdict(list)
+    icon_entries: list = []
     names: set = set()
     tid_name: dict = {}
     dupes = 0
@@ -195,12 +297,16 @@ def fetch_public(out_dir: Path, log: Log = _noop) -> dict:
             n = (t.get("name") or "").strip()
             if n:
                 tid_name.setdefault(tid, n)
+            pic = (t.get("pic") or "").strip()
+            if pic and n:
+                icon_entries.append((tid, n, pic))
         tmap = {tid: (t.get("name") or "").strip() for tid, t in templates.items()}
         names.update(n for n in tmap.values() if n and n not in SLACKLINE_MARKS)
 
         def add(mark: dict, _tmap=tmap, _map_id=map_id) -> None:
             nonlocal dupes
-            name = _tmap.get(mark.get("templateId"))
+            tid = mark.get("templateId")
+            name = _tmap.get(tid)
             if not name or name in SLACKLINE_MARKS:
                 return
             pos = mark.get("pos")
@@ -209,10 +315,14 @@ def fetch_public(out_dir: Path, log: Log = _noop) -> dict:
             x, y, z = pos.get("x"), pos.get("y"), pos.get("z")
             if None in (x, y, z):
                 return
-            bucket = all_maps[mark.get("mapId") or _map_id][name]
+            mid = mark.get("mapId") or _map_id
+            bucket = all_maps[mid][name]
             if (x, y, z) in bucket:
                 dupes += 1
             bucket[(x, y, z)] = {"x": x, "y": y, "z": z}
+            # 另存一份带 templateId 的点位：summary.json 按物品名存，丢了
+            # templateId，前端就没法据此找图标
+            points[mid].append({"t": tid, "x": x, "y": y, "z": z})
 
         for mark in data.get("marks") or []:
             add(mark)
@@ -222,16 +332,7 @@ def fetch_public(out_dir: Path, log: Log = _noop) -> dict:
     log("GET /map/catalog")
     catalog = _get_json("/web/v1/game/endfield/map/catalog") or {}
     requests_made += 1
-    struct = {}
-    for mt in (catalog.get("data") or {}).get("mainTypes") or []:
-        for st in mt.get("subTypes") or []:
-            for tid in st.get("templateIds") or []:
-                struct[tid] = {
-                    "name": st.get("name"),
-                    "mainType": mt.get("name"),
-                    "subType": st.get("name"),
-                    "pic": st.get("pic"),
-                }
+    struct = _parse_catalog(catalog)
     for tid, item in struct.items():
         if tid in tid_name:
             item["name"] = tid_name[tid]
@@ -239,6 +340,12 @@ def fetch_public(out_dir: Path, log: Log = _noop) -> dict:
     summary = _freeze(all_maps)
     _write_json(out_dir / "summary.json", summary)
     _write_json(out_dir / "item_names.json", sorted(names))
+    _write_json(out_dir / "points.json", _freeze_points(points))
+
+    log("下载图标…")
+    tid_file = download_icons(icon_entries, icons_dir(out_dir.parent.parent), log)
+    for tid, item in struct.items():
+        item["icon"] = tid_file.get(tid, "")
     _write_json(out_dir / "template_catalog.json", struct)
 
     return {
@@ -249,7 +356,8 @@ def fetch_public(out_dir: Path, log: Log = _noop) -> dict:
         "items": len(names),
         "points": sum(len(v) for g in summary.values() for v in g.values()),
         "duplicates": dupes,
-        "files": ["summary.json", "item_names.json", "template_catalog.json"],
+        "icons": len(tid_file),
+        "files": ["summary.json", "item_names.json", "template_catalog.json", "points.json"],
     }
 
 
@@ -398,6 +506,26 @@ def _collect_level_queries(tree_resp: Any) -> list[dict]:
     return out
 
 
+def _parse_catalog(catalog_resp: Any) -> dict:
+    """catalog 响应 → ``{templateId: {name, mainType, subType, pic}}``。
+
+    公开与认证两条口径都用它，免得各自解析一遍。
+    """
+    out: dict = {}
+    for mt in ((catalog_resp or {}).get("data") or {}).get("mainTypes") or []:
+        if not isinstance(mt, dict):
+            continue
+        for st in mt.get("subTypes") or []:
+            for tid in st.get("templateIds") or []:
+                out[tid] = {
+                    "name": st.get("name"),
+                    "mainType": mt.get("name"),
+                    "subType": st.get("name"),
+                    "pic": st.get("pic"),
+                }
+    return out
+
+
 def _collect_structure_types(catalog_resp: Any) -> dict:
     out = {}
     for mt in ((catalog_resp or {}).get("data") or {}).get("mainTypes") or []:
@@ -443,6 +571,8 @@ def fetch_auth(out_dir: Path, content: str, log: Log = _noop,
 
     summary: dict = defaultdict(lambda: defaultdict(dict))
     structures: dict = defaultdict(lambda: defaultdict(dict))
+    points: dict = defaultdict(list)
+    icon_entries: list = []
     names: set = set()
     dupes = saved_marks = requests_made = 0
 
@@ -454,10 +584,16 @@ def fetch_auth(out_dir: Path, content: str, log: Log = _noop,
             data = (resp or {}).get("data") or {}
             tmap = {t["id"]: (t.get("name") or "").strip() for t in data.get("markTemplates") or []}
             names.update(n for n in tmap.values() if n and n not in exclude)
+            for t in data.get("markTemplates") or []:
+                pic = (t.get("pic") or "").strip()
+                nm = (t.get("name") or "").strip()
+                if pic and nm:
+                    icon_entries.append((t["id"], nm, pic))
 
             def add(mark: dict, _tmap=tmap, _mid=q["mapId"]) -> None:
                 nonlocal dupes
-                name = _tmap.get(mark.get("templateId"))
+                tid = mark.get("templateId")
+                name = _tmap.get(tid)
                 if not name or name in exclude:
                     return
                 pos = mark.get("pos")
@@ -472,7 +608,8 @@ def fetch_auth(out_dir: Path, content: str, log: Log = _noop,
                 if coord in bucket:
                     dupes += 1
                 bucket[coord] = {"x": x, "y": y, "z": z}
-                sub = struct_types.get(mark.get("templateId"))
+                points[mid].append({"t": tid, "x": x, "y": y, "z": z})
+                sub = struct_types.get(tid)
                 if sub:
                     structures[mid][sub].setdefault(
                         coord, {"name": name, "x": x, "y": y, "z": z})
@@ -495,6 +632,17 @@ def fetch_auth(out_dir: Path, content: str, log: Log = _noop,
     _write_json(out_dir / "summary.json", summary_f)
     _write_json(out_dir / "item_names.json", sorted(names))
     _write_json(out_dir / "structures.json", structures_f)
+    _write_json(out_dir / "points.json", _freeze_points(points))
+
+    log("下载图标…")
+    tid_file = download_icons(icon_entries, icons_dir(out_dir.parent.parent), log)
+    # 认证口径也出一份 catalog：前端画图标要知道每个 templateId 的类别与图标文件名
+    auth_catalog = _parse_catalog(catalog)
+    for tid, item in auth_catalog.items():
+        if tid in tid_name:
+            item["name"] = tid_name[tid]
+        item["icon"] = tid_file.get(tid, "")
+    _write_json(out_dir / "template_catalog.json", auth_catalog)
 
     return {
         "kind": "auth",
@@ -506,11 +654,13 @@ def fetch_auth(out_dir: Path, content: str, log: Log = _noop,
         "points": sum(len(v) for g in summary_f.values() for v in g.values()),
         "saved_marks": saved_marks,
         "duplicates": dupes,
+        "icons": len(tid_file),
         "structures": {m: {s: len(p) for s, p in sorted(g.items())}
                        for m, g in sorted(structures_f.items())},
         "structure_points": sum(len(v) for g in structures_f.values() for v in g.values()),
         "excluded": bool(exclude_slacklines),
-        "files": ["summary.json", "item_names.json", "structures.json"],
+        "files": ["summary.json", "item_names.json", "structures.json", "points.json",
+                  "template_catalog.json"],
     }
 
 
@@ -550,6 +700,49 @@ def validate(stats: dict, summary: dict, old_summary: dict | None,
             if old_v and new_v < old_v * (1 - MAX_DROP):
                 errs.append(f"{label} {old_v} -> {new_v}，跌幅超过 {MAX_DROP:.0%}")
     return errs
+
+
+def load_map_markers(assets_root: Path, map_id: str) -> dict:
+    """给前端画地图用：某张图的全部点位 + templateId 元信息。
+
+    合并**公开与认证**两份 points.json——认证那份才含玩家自建结构。两份会大量
+    重叠（认证口径是公开口径的超集），所以按 (templateId, x, y, z) 去重。
+    """
+    assets_root = Path(assets_root)
+    templates: dict = {}
+    seen: set = set()
+    pts: list = []
+    for d in (marks_dir(assets_root), marks_auth_dir(assets_root)):
+        catalog = load_json(d / "template_catalog.json")
+        if isinstance(catalog, dict):
+            for tid, info in catalog.items():
+                templates.setdefault(tid, {
+                    "n": info.get("name"),
+                    "m": info.get("mainType"),
+                    "s": info.get("subType"),
+                    # 图标文件名（中文名.png）；空串表示没有图标，前端画圆点
+                    "icon": info.get("icon") or "",
+                })
+        data = load_json(d / "points.json")
+        if isinstance(data, dict):
+            for p in data.get(map_id) or []:
+                key = (p.get("t"), p.get("x"), p.get("y"), p.get("z"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                pts.append([p.get("t"), p.get("x"), p.get("y"), p.get("z")])
+
+    pts.sort(key=lambda r: (r[1], r[2], r[3]))
+    return {"map": map_id, "templates": templates, "points": pts}
+
+
+def find_icon(assets_root: Path, filename: str) -> Path | None:
+    """按文件名取本地图标。只接受**裸文件名**——任何目录成分都拒掉。"""
+    name = (filename or "").strip()
+    if not name or name != Path(name).name or "/" in name or "\\" in name:
+        return None
+    p = icons_dir(assets_root) / name
+    return p if p.is_file() else None
 
 
 def load_json(path: Path):

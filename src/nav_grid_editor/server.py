@@ -31,7 +31,8 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
-from .map_service import MapService
+from . import marks as marks_mod
+from .map_service import MapService, default_assets_dir
 
 BASE_DIR = Path(__file__).resolve().parent
 HOST = "127.0.0.1"
@@ -181,6 +182,29 @@ def fetch_status() -> JSONResponse:
 @app.get("/api/marks/status")
 def marks_status() -> JSONResponse:
     return JSONResponse(_svc().marks_status())
+
+
+@app.get("/api/marks/data")
+def marks_data(map: str = "") -> JSONResponse:
+    """某张图的标记点位 + templateId 元信息（供热力图/图标层画到地图上）。
+
+    合并公开与认证两份 points.json，认证那份才含玩家自建结构。
+    """
+    return JSONResponse(marks_mod.load_map_markers(
+        default_assets_dir(_svc().data_root), map))
+
+
+@app.get("/api/marks/icon")
+def marks_icon(request: Request, f: str = "") -> Response:
+    """按**文件名**取本地图标（图标以中文名落盘，见 marks.download_icons）。"""
+    p = marks_mod.find_icon(default_assets_dir(_svc().data_root), f)
+    if not p:
+        return Response("icon not found", status_code=404,
+                        media_type="text/plain; charset=utf-8")
+    # 图标基本不变（只在重抓后可能换），给一天缓存 + ETag
+    resp = _cached_file(request, p, _image_type(p), max_age=86400)
+    return resp or Response("icon not found", status_code=404,
+                            media_type="text/plain; charset=utf-8")
 
 
 # ---------------- 图片：都带 ETag / 304 ----------------

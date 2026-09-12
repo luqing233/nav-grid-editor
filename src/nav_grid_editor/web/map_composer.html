@@ -395,6 +395,11 @@
         </div>
         <div id="marksCred"></div>
         <div id="marksStatus">未抓取</div>
+        <div style="margin-top:8px">
+          <label><input type="checkbox" id="chkMarksOn"> 显示在地图上</label>
+        </div>
+        <div id="markLayers" style="margin-top:6px;line-height:1.9"></div>
+        <div id="marksHint" class="t-time"></div>
       </div>
     </section>
 
@@ -474,6 +479,9 @@ const state = {
   activeKey: null,
   compose: null, // {map, zoom, total, done}
   marks: null,   // 地图标记抓取状态（/api/marks/status）
+  markers: null, // 当前地图的标记点位（/api/marks/data）
+  marksOn: false,   // 是否把标记画到地图上
+  markLayers: {},   // 大类 -> 开关（未设过的大类默认开）
 };
 
 const $ = id => document.getElementById(id);
@@ -540,6 +548,7 @@ function setActive(key) {
   hidePickMarker();
   $("pickReadout").textContent = "-";
   if (edit.mode) loadGrid2D(false);
+  if (state.marksOn) loadMarkers();   // 换了图，标记也要跟着换
 }
 
 // 顶部信息条：实时显示当前拼接的地图名 / zoom / 瓦片数 / 坐标范围
@@ -774,6 +783,9 @@ function render() {
       g.stroke();
     }
   }
+
+  // 2.5) 地图标记层：画在瓦片之上、网格/路径之下
+  drawMarkers(g);
 
   // 3) 网格编辑层与选择层（只在编辑模式画）
   if (edit.mode) {
@@ -1109,6 +1121,7 @@ async function loadMappingForCurrent() {
   renderCalibList(); renderCalibMarks();
   updatePlayerMarker(lastPos);
   syncPathCanvas();
+  updateMarksHint();   // 标定状态决定标记能不能画
 }
 
 // 玩家定位：游戏坐标 (x,z) → 像素 → 画布红色标记
@@ -1956,6 +1969,133 @@ async function startMarks(kind) {
   renderMarksPanel();
 }
 
+// ---------------- 标记图层（把图标画到地图上） ----------------
+// 标记是世界坐标 (x,y,z)，要靠标定矩阵换算成像素；没标定的图没法画。
+// 跟瓦片一样"只画可见范围 + 设缩放下限"——map01@4 有 2414 个点，不设限会糊满屏。
+const markIcons = new Map();      // 图标文件名 -> Image | "loading" | "missing"
+const MARK_MIN_SCALE = 0.12;      // 低于此缩放不画（与瓦片的 600 张阈值同量级）
+const MARK_ICON_PX = 22;          // 图标在屏幕上的目标尺寸（像素）
+const MARK_LAYER_OFF = new Set(["威胁"]);   // 默认关掉的大类（数量大且与导航无关）
+
+function showMarks() { return !!(state.marksOn && state.markers && state.markers.points.length); }
+
+// 未显式设过的大类默认**开**（除了 MARK_LAYER_OFF 里那几个）；
+// 不然 state.markLayers 是空对象时会把所有层都判成关、什么都不画。
+function layerOn(cat) {
+  const v = state.markLayers[cat];
+  if (v !== undefined) return v;
+  return !MARK_LAYER_OFF.has(cat);
+}
+
+// 图标以**中文名**落盘（如「供电设备.png」），多个 templateId 可能指向同一个文件，
+// 所以按文件名缓存而不是按 templateId。
+function markIcon(file) {
+  const cur = markIcons.get(file);
+  if (cur !== undefined) return cur;
+  markIcons.set(file, "loading");
+  const img = new Image();
+  img.onload = () => { markIcons.set(file, img); requestRender(); };
+  img.onerror = () => { markIcons.set(file, "missing"); };
+  img.src = "/api/marks/icon?f=" + encodeURIComponent(file);
+  return "loading";
+}
+
+async function loadMarkers() {
+  const key = state.activeKey;
+  if (!key) return;
+  const map = key.split("@")[0];
+  if (state.markers && state.markers.key === key) return;
+  state.markers = { key, templates: {}, points: [], loaded: false };
+  try {
+    const res = await (await fetch("/api/marks/data?map=" + encodeURIComponent(map))).json();
+    if (state.activeKey !== key) return;     // 期间切图了，丢弃
+    state.markers = { key, templates: res.templates || {},
+                      points: res.points || [], loaded: true };
+    buildMarkLayers();
+  } catch (e) {
+    addLog("标记数据加载失败: " + e.message, "t-warn");
+  }
+  renderMarksPanel();
+  updateMarksHint();
+  requestRender();
+}
+
+function buildMarkLayers() {
+  const box = $("markLayers");
+  const tpls = state.markers ? state.markers.templates : {};
+  const cats = [...new Set(Object.values(tpls).map(t => t.m).filter(Boolean))].sort();
+  if (!cats.length) { box.innerHTML = ""; return; }
+  const ptCount = {};
+  for (const p of state.markers.points) {
+    const m = tpls[p[0]] && tpls[p[0]].m;
+    if (m) ptCount[m] = (ptCount[m] || 0) + 1;
+  }
+  box.innerHTML = cats.map(c =>
+    '<label style="margin-right:10px;white-space:nowrap">' +
+    '<input type="checkbox" data-cat="' + c + '"' +
+    (layerOn(c) ? " checked" : "") + "> " + c +
+    ' <span class="t-time">' + (ptCount[c] || 0) + "</span></label>").join("");
+  box.querySelectorAll("input[type=checkbox]").forEach(cb => {
+    cb.onchange = () => { state.markLayers[cb.dataset.cat] = cb.checked; requestRender(); };
+  });
+}
+
+function drawMarkers(g) {
+  if (!showMarks()) return;
+  const s = mapView.scale;
+  if (s < MARK_MIN_SCALE) return;            // 缩得太小就不画（跟瓦片一样）
+  const vis = visibleRect();
+  const v = state.views.get(state.activeKey);
+  if (!v || !hasBounds(v)) return;
+  const m = state.markers;
+  const inv = (calib.mapping && calib.key === state.activeKey)
+    ? calib.mapping.inverse_matrix : null;
+  if (!inv) return;                          // 没标定就拿不到 世界→像素
+  const size = MARK_ICON_PX / s;             // 换成 holder 单位，屏幕上才恒定大小
+  const half = size / 2;
+
+  for (const [tid, wx, _wy, wz] of m.points) {
+    const info = m.templates[tid];
+    if (!info || !layerOn(info.m)) continue;
+    const px = inv[0][0] * wx + inv[0][1] * wz + inv[0][2];
+    const py = inv[1][0] * wx + inv[1][1] * wz + inv[1][2];
+    if (px < vis.x - half || px > vis.x + vis.w + half) continue;
+    if (py < vis.y - half || py > vis.y + vis.h + half) continue;
+    const bmp = info.icon ? markIcon(info.icon) : "missing";
+    if (bmp && bmp !== "loading" && bmp !== "missing") {
+      g.drawImage(bmp, px - half, py - half, size, size);
+    } else {
+      // 没图标（或还没加载完）就画个小圆点，至少知道这里有东西
+      g.beginPath();
+      g.arc(px, py, size * 0.16, 0, Math.PI * 2);
+      g.fillStyle = "rgba(255,209,102,0.85)";
+      g.fill();
+    }
+  }
+}
+
+function setMarksOn(on) {
+  state.marksOn = !!on;
+  if (state.marksOn) loadMarkers();     // 打开时才去拉数据
+  updateMarksHint();
+  requestRender();
+}
+
+function updateMarksHint() {
+  const el = $("marksHint");
+  if (!state.marksOn) { el.textContent = ""; return; }
+  const m = state.markers;
+  if (!m || !m.loaded) { el.textContent = "加载中…"; return; }
+  if (!m.points.length) {
+    el.textContent = "这张图没有标记数据（先去上面抓一次）";
+    return;
+  }
+  const calibrated = !!(calib.mapping && calib.key === state.activeKey);
+  el.innerHTML = calibrated
+    ? `本图 ${m.points.length} 个点位；缩放 < ${MARK_MIN_SCALE} 时不画（跟瓦片一样）`
+    : '<b class="t-warn">这张图还没标定</b>：标记是世界坐标，没有标定就换不成像素';
+}
+
 function setBusyFetch(b) {
   state.busyFetch = b;
   syncButtons();
@@ -2240,6 +2380,7 @@ $("btnDownload").onclick = async () => {
   } catch (e) { addLog("下载失败: " + e.message, "t-err"); }
 };
 $("chkFollow").onchange = () => { state.follow = $("chkFollow").checked; };
+$("chkMarksOn").onchange = () => setMarksOn($("chkMarksOn").checked);
 $("btnFit").onclick = fitView;
 // 模式段：点当前模式回到"浏览"，点别的切过去
 $("btnBrowse").onclick = () => setMode("browse");

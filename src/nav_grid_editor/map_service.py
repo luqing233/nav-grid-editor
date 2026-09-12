@@ -37,7 +37,7 @@ from pathlib import Path
 
 import numpy as np  # 2D 网格的稠密 npz 读写必需（非可选依赖）
 
-from . import marks as marks_fetch
+from . import marks as marks_mod
 
 # =========================================================
 # 可选依赖
@@ -1166,7 +1166,7 @@ class MapService:
 
     def marks_status(self) -> dict:
         """给前端的状态快照（含凭证文件是否就位，便于提示）。"""
-        p = marks_fetch.hg_content_path()
+        p = marks_mod.hg_content_path()
         return {
             "running": bool(self._marks and self._marks.get("running")),
             "has_thread": self._marks_thread is not None and self._marks_thread.is_alive(),
@@ -1174,9 +1174,9 @@ class MapService:
             "stats": self._marks.get("stats") if self._marks else None,
             "error": self._marks.get("error") if self._marks else None,
             "credential_file": str(p),
-            "credential_ready": bool(marks_fetch.read_hg_content()),
-            "public_dir": str(marks_fetch.marks_dir(default_assets_dir(self.data_root))),
-            "auth_dir": str(marks_fetch.marks_auth_dir(default_assets_dir(self.data_root))),
+            "credential_ready": bool(marks_mod.read_hg_content()),
+            "public_dir": str(marks_mod.marks_dir(default_assets_dir(self.data_root))),
+            "auth_dir": str(marks_mod.marks_auth_dir(default_assets_dir(self.data_root))),
         }
 
     def start_marks(self, kind: str) -> dict:
@@ -1186,8 +1186,8 @@ class MapService:
         with self._lock:
             if self._marks_thread and self._marks_thread.is_alive():
                 return {"ok": False, "error": "标记抓取已在运行中"}
-            if kind == "auth" and not marks_fetch.read_hg_content():
-                p = marks_fetch.hg_content_path()
+            if kind == "auth" and not marks_mod.read_hg_content():
+                p = marks_mod.hg_content_path()
                 return {"ok": False,
                         "error": f"找不到凭证：请把 hg/check 响应的 data.content 粘到 {p} "
                                  "（该文件已 gitignore）"}
@@ -1209,17 +1209,17 @@ class MapService:
         assets = default_assets_dir(self.data_root)
         try:
             if kind == "public":
-                stats = marks_fetch.fetch_public(marks_fetch.marks_dir(assets), log=log)
+                stats = marks_mod.fetch_public(marks_mod.marks_dir(assets), log=log)
                 warnings = []
             else:
-                content = marks_fetch.read_hg_content()
+                content = marks_mod.read_hg_content()
                 if not content:
                     raise RuntimeError("凭证文件为空或读不到")
-                stats = marks_fetch.fetch_auth(marks_fetch.marks_auth_dir(assets),
+                stats = marks_mod.fetch_auth(marks_mod.marks_auth_dir(assets),
                                                content, log=log)
-                warnings = marks_fetch.validate(
+                warnings = marks_mod.validate(
                     stats,
-                    marks_fetch.load_json(marks_fetch.marks_auth_dir(assets) / "summary.json") or {},
+                    marks_mod.load_json(marks_mod.marks_auth_dir(assets) / "summary.json") or {},
                     None,
                 )
             self._marks = {"kind": kind, "running": False, "stats": stats,
