@@ -1,56 +1,91 @@
 # -*- coding: utf-8 -*-
-"""HTTP 层（server.Handler）的回归测试。
+"""HTTP 层（FastAPI 应用）的回归测试。
 
-重点是 POST 的统一异常边界：前端一律 `await resp.json()`，所以服务层漏出的
-任何异常都必须变成一条 JSON 响应，而不是"连接被断开、前端只看到一句没有原因
-的失败"。这里真的起一个 HTTP 服务来打，而不是只调函数。
+重点两条：
+- **POST 的统一异常边界**：前端一律 `await resp.json()`，所以服务层漏出的任何
+  异常都必须变成一条 JSON 响应，而不是"连接被断开、前端只看到一句没有原因的失败"。
+- **条件请求（ETag / 304）**：瓦片以前是 max-age=30 且没有 ETag，等于每 30 秒把
+  视野里那几百张全部重下一遍。
+
+这里真的起一个 uvicorn 实例来打（而不是只调函数）——HTTP 语义（状态码、头、
+304 不带正文）本身就是被测对象。
 """
 
 import json
 import tempfile
-import time
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
+
+import uvicorn
 
 from nav_grid_editor import server
 from nav_grid_editor.map_service import MapService
 
 
-class PostBoundaryTest(unittest.TestCase):
+class _ServerMixin:
+    """起一个真实 uvicorn 实例，端口交给系统分配。"""
+
+    def _start_server(self, svc: MapService) -> None:
+        server.service = svc
+        config = uvicorn.Config(server.app, host="127.0.0.1", port=0,
+                                log_level="warning", access_log=False)
+        self.uv = uvicorn.Server(config)
+        threading.Thread(target=self.uv.run, daemon=True).start()
+        deadline = time.time() + 15
+        while not self.uv.started:
+            if time.time() > deadline:
+                raise RuntimeError("uvicorn 启动超时")
+            time.sleep(0.02)
+        self.port = self.uv.servers[0].sockets[0].getsockname()[1]
+
+    def _stop_server(self) -> None:
+        self.uv.should_exit = True
+        for _ in range(200):
+            if not self.uv.started:
+                break
+            time.sleep(0.02)
+
+    def _request(self, path, data=None, headers=None):
+        """返回 (状态码, 正文, 响应头)。
+
+        响应头**不要**转成 dict：uvicorn 会把头名小写化（`etag` 而不是 `ETag`），
+        而 HTTPMessage 的 get 是大小写不敏感的，转成 dict 就把这个能力丢了。
+        """
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=data,
+            headers=headers or {},
+            method="POST" if data is not None else "GET")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.status, r.read(), r.headers
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), e.headers
+
+    def _post_json(self, path, body):
+        if isinstance(body, (dict, list)):
+            body = json.dumps(body)
+        status, raw, _ = self._request(path, data=body.encode("utf-8"),
+                                       headers={"Content-Type": "application/json"})
+        return status, json.loads(raw.decode("utf-8"))
+
+
+class PostBoundaryTest(_ServerMixin, unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         d = Path(self._tmp.name)
         self.svc = MapService(data_root=d, tiles_root=d / "tiles",
                               profile_dir=d / "p", grid2d_dir=d / "grids")
-        server.service = self.svc
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
-        self.port = self.httpd.server_address[1]
-        self.t = threading.Thread(target=self.httpd.serve_forever, daemon=True)
-        self.t.start()
+        self._start_server(self.svc)
 
     def tearDown(self):
-        self.httpd.shutdown()
-        self.httpd.server_close()
+        self._stop_server()
         self._tmp.cleanup()
-
-    def _post(self, path, body):
-        if isinstance(body, (dict, list)):
-            body = json.dumps(body)
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{self.port}{path}",
-            data=body.encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=10) as r:
-                return r.status, json.loads(r.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            return e.code, json.loads(e.read().decode("utf-8"))
 
     def test_non_object_body_gets_json_400_not_a_dropped_connection(self):
         """body 是合法 JSON 但不是对象（[] / 3 / "x" / null）时，
@@ -59,7 +94,7 @@ class PostBoundaryTest(unittest.TestCase):
         for path in ("/api/compose", "/api/grid2d", "/api/calib", "/api/fetch/start"):
             for body in ("[]", "3", '"x"', "null"):
                 with self.subTest(path=path, body=body):
-                    status, res = self._post(path, body)
+                    status, res = self._post_json(path, body)
                     self.assertEqual(status, 400)
                     self.assertFalse(res["ok"])
                     self.assertTrue(res["error"])
@@ -67,26 +102,26 @@ class PostBoundaryTest(unittest.TestCase):
     def test_unparseable_body_gets_json_400(self):
         for path in ("/api/compose", "/api/grid2d", "/api/calib"):
             with self.subTest(path=path):
-                status, res = self._post(path, "{not json")
+                status, res = self._post_json(path, "{not json")
                 self.assertEqual(status, 400)
                 self.assertFalse(res["ok"])
 
     def test_service_exception_becomes_json_500_not_a_dropped_connection(self):
-        """do_POST 的统一异常边界：服务层漏出的异常也必须是 JSON。
+        """统一异常边界：服务层漏出的异常也必须是 JSON。
 
         这条防的是"未知的畸形输入"——具体是哪个字段能触发不重要，重要的是
         任何异常都不会让前端拿到一个没有原因的失败。
         """
         boom = ValueError("模拟服务层异常")
         with mock.patch.object(MapService, "save_grid2d", side_effect=boom):
-            status, res = self._post("/api/grid2d", {"map": "m", "zoom": "4", "data": {}})
+            status, res = self._post_json("/api/grid2d", {"map": "m", "zoom": "4", "data": {}})
         self.assertEqual(status, 500)
         self.assertFalse(res["ok"])
         self.assertIn("模拟服务层异常", res["error"])
 
     def test_normal_request_still_works(self):
         """边界不能把正常请求也变成错误。"""
-        status, res = self._post("/api/grid2d", {
+        status, res = self._post_json("/api/grid2d", {
             "map": "m", "zoom": "4",
             "data": {"origin": [0, 0, 0], "cell_size": 1.0,
                      "cells": [[1, 1]], "blocked": []}})
@@ -94,14 +129,7 @@ class PostBoundaryTest(unittest.TestCase):
         self.assertTrue(res["ok"], res)
 
 
-class ConditionalGetTest(unittest.TestCase):
-    """条件请求（ETag / 304）。
-
-    这是"浏览地图时不反复重下"的关键：瓦片以前是 max-age=30 且没有 ETag，
-    等于每 30 秒把视野里那几百张全部重下一遍。现在带 ETag，过期后重验只回
-    304（不重传正文）。
-    """
-
+class ConditionalGetTest(_ServerMixin, unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         d = Path(self._tmp.name)
@@ -112,33 +140,20 @@ class ConditionalGetTest(unittest.TestCase):
         (self.tiles / "maps" / "m" / "4" / "m_4.png").write_bytes(b"composite")
         self.svc = MapService(data_root=d, tiles_root=self.tiles,
                               profile_dir=d / "p", grid2d_dir=d / "grids")
-        server.service = self.svc
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
-        self.port = self.httpd.server_address[1]
-        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self._start_server(self.svc)
 
     def tearDown(self):
-        self.httpd.shutdown()
-        self.httpd.server_close()
+        self._stop_server()
         self._tmp.cleanup()
 
-    def _get(self, path, extra=None):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}",
-                                     headers=extra or {})
-        try:
-            with urllib.request.urlopen(req, timeout=10) as r:
-                return r.status, r.read(), dict(r.headers)
-        except urllib.error.HTTPError as e:
-            return e.code, e.read(), dict(e.headers)
-
     def _check_revalidation(self, path):
-        st, body, hdr = self._get(path)
+        st, body, hdr = self._request(path)
         self.assertEqual(st, 200, path)
         self.assertTrue(body)
         etag = hdr.get("ETag")
         self.assertTrue(etag, f"{path} 没有 ETag")
         self.assertIn("max-age", hdr.get("Cache-Control", ""))
-        st2, body2, _ = self._get(path, {"If-None-Match": etag})
+        st2, body2, _ = self._request(path, headers={"If-None-Match": etag})
         self.assertEqual(st2, 304, f"{path} 命中了 ETag 却回 {st2}")
         self.assertEqual(body2, b"", "304 不能带正文")
 
@@ -150,11 +165,11 @@ class ConditionalGetTest(unittest.TestCase):
 
     def test_etag_changes_when_content_changes(self):
         """ETag 必须跟着内容走：瓦片重抓后内容变了，不能还回 304。"""
-        _, _, h1 = self._get("/tiles/m/4/0_0.png")
+        _, _, h1 = self._request("/tiles/m/4/0_0.png")
         p = self.tiles / "latest" / "m" / "4" / "0_0.png"
-        time.sleep(0.01)
         p.write_bytes(b"different-bytes")
-        st, body, h2 = self._get("/tiles/m/4/0_0.png", {"If-None-Match": h1["ETag"]})
+        st, body, _ = self._request("/tiles/m/4/0_0.png",
+                                    headers={"If-None-Match": h1["ETag"]})
         self.assertEqual(st, 200, "内容变了却回了 304")
         self.assertEqual(body, b"different-bytes")
 

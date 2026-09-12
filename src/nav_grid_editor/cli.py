@@ -50,7 +50,7 @@ from pathlib import Path
 from . import map_service
 from . import server
 from .map_service import MapService
-from .server import HOST, Handler, QuietThreadingHTTPServer
+from .server import HOST
 
 DEFAULT_PORT = 8765
 
@@ -129,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         profile_dir=Path(args.profile_dir) if args.profile_dir else None,
         grid2d_dir=Path(args.grid2d_dir) if args.grid2d_dir else None,
     )
-    # 把服务实例挂到 server 模块，Handler 路由直接使用
+    # 把服务实例挂到 server 模块，路由直接使用（与原来挂给 Handler 的用法一致）
     server.service = svc
 
     print(f"地图采集/编辑页面:       http://{HOST}:{args.port}/（自动跳转 /map）")
@@ -145,14 +145,18 @@ def main(argv: list[str] | None = None) -> int:
 
     start_ws_relay(svc)
 
-    httpd = QuietThreadingHTTPServer((HOST, args.port), Handler)
+    # uvicorn 自带 HTTP/1.1 keep-alive（原来用 stdlib 得手工设 protocol_version，
+    # 否则 Chrome 每个请求新开 socket、还要在 socket 池里等约 300ms）。
+    # access_log 关掉：瓦片请求是按张计的，几百张一屏会把控制台刷爆；
+    # 应用自己的 [map] / [nav-grid-editor] 日志保留。
+    import uvicorn
+
     print("按 Ctrl+C 退出")
     try:
-        httpd.serve_forever()
+        uvicorn.run(server.app, host=HOST, port=args.port,
+                    log_level="warning", access_log=False)
     except KeyboardInterrupt:
         print("\n已退出")
-    finally:
-        httpd.server_close()
     return 0
 
 
