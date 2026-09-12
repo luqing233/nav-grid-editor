@@ -4,7 +4,7 @@
     {
       "name": "nav-grid-editor",
       "runtimeExecutable": "E:/LuQing/python/nav-grid-editor/.venv/Scripts/python.exe",
-      "runtimeArgs": ["main.py"],
+      "runtimeArgs": ["-m", "nav_grid_editor"],
       "port": 8765
     }
   ]

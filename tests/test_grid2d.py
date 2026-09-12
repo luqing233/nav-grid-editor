@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from map_service import (
+from nav_grid_editor.map_service import (
     GRID_AXIS_CONVENTION,
     GRID_MAGIC,
     GRID_SCHEMA_VERSION,
@@ -134,6 +134,27 @@ class Grid2DReadValidationTest(unittest.TestCase):
         res = self.svc.get_grid2d("bad", "4")
         self.assertIsNotNone(res["data"])
         self.assertTrue(any("axis_convention" in w for w in res["warnings"]))
+
+    def test_read_rejects_path_traversal(self):
+        """读路径也必须校验地图名：grid2d_path 是拼字符串，`../x` 能读到目录外。
+
+        写路径（save_grid2d）一直有这道校验，读路径漏了就成了「读任意同格式
+        npz」的路径穿越。这里用 grids2d/../ 下的合法 npz 固定住这个边界。
+        """
+        np.savez_compressed(
+            self.d / "secret_4.grid.npz",
+            cells=np.array([[1, 1]], dtype=np.uint8), meta=np.array(_meta()))
+        for bad in ("../secret", "..\\secret", "a/b", "..", ""):
+            with self.subTest(map_name=bad):
+                res = self.svc.get_grid2d(bad, "4")
+                self.assertIsNone(res["data"], f"{bad!r} 竟然读到了数据")
+                self.assertIn("非法", res.get("error", ""))
+
+    def test_read_accepts_zoom_only_digits(self):
+        """zoom 同样不许带路径分隔符。"""
+        res = self.svc.get_grid2d("m", "../4")
+        self.assertIsNone(res["data"])
+        self.assertIn("非法", res.get("error", ""))
 
 
 if __name__ == "__main__":

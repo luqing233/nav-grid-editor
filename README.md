@@ -5,19 +5,29 @@
 
 ## 使用方法
 
-在 `nav-grid-editor` 目录下运行：
+在项目目录下启动，任选一种：
 
-```bash
-python main.py              # 推荐入口
-# python nav_grid_editor.py  旧命令同样可用（兼容入口）
-# uv run nav-grid-editor     装了 uv 后也可直接运行
+```powershell
+uv run nav-grid-editor                 # 推荐：uv 自动同步依赖后启动
+.venv\Scripts\nav-grid-editor.exe      # 已经 uv sync 过的话，直接双击/运行也行
+.venv\Scripts\activate                 # 或者先激活虚拟环境
+nav-grid-editor
 ```
+
+启动后浏览器打开 <http://127.0.0.1:8765>（自动跳转到 `/map`）。
+
+> 本项目的 Python 只装在 `.venv/` 里，没有写进系统 PATH，所以 `python main.py`
+> 这类命令是跑不起来的；请用上面三种方式之一。
+
+> 数据目录默认取**当前工作目录**：`tiles/`、`grids2d/`、`browser_profile/`
+> 都在你运行命令的那个目录下，所以请在项目目录里启动。换数据根目录用
+> `--data-root` 或环境变量 `NAV_DATA_ROOT`。
 
 常用参数：
 
-```bash
-python main.py \
-  --grid2d-dir D:/some/path/grids    # 2D 网格的落盘目录（默认项目内 grids2d/，可用环境变量 NAV_GRID2D_DIR）
+```powershell
+nav-grid-editor --port 8765 --data-root D:/some/data-root
+nav-grid-editor --grid2d-dir D:/some/path/grids   # 只改 2D 网格目录（NAV_GRID2D_DIR）
 ```
 
 > **2D 网格以稠密 npz 落盘**，文件名 `<地图>_<zoom>.grid.npz`（如 `base01_4.grid.npz`），
@@ -25,28 +35,35 @@ python main.py \
 > `origin` / `cell_size` 都内嵌在文件的 `meta` 里，保存时按「原数组范围 ∪ 已涂格子范围」
 > 确定（新建网格才退回已涂格子的边界盒），不需要外部坐标基准文件。
 
-浏览器打开 <http://127.0.0.1:8765>（自动跳转 /map）。
-
 ## 代码结构
 
 ```text
 nav-grid-editor/
-├── main.py                入口：参数解析、初始化、WS 坐标中继、启动服务
-├── server.py              HTTP 层：全部路由 / 服务器类
-├── map_service.py         地图瓦片采集/合成/标定/2D 网格服务
-├── nav_grid_editor.py     兼容入口（旧命令转发到 main）
-├── map_composer.html      全部功能页面（采集/合成/标定/网格编辑/路径/取坐标）
-├── tiles/                 瓦片数据（latest / run_* 会话 / maps 总图与标定）
-├── grids2d/               2D 网格（无高度）输出目录（可自定义），稠密 npz
-└── browser_profile/       Playwright 登录配置
+├── pyproject.toml           打包 / 依赖 / 入口（唯一事实来源）
+├── README.md
+├── src/nav_grid_editor/
+│   ├── cli.py               唯一入口：nav-grid-editor / python -m nav_grid_editor
+│   ├── server.py            HTTP 层：全部路由 / 服务器类
+│   ├── map_service.py       地图瓦片采集/合成/标定/2D 网格服务
+│   └── web/
+│       └── map_composer.html  全部功能页面（采集/合成/标定/网格编辑/路径/取坐标）
+├── tests/                   回归测试（unittest）
+├── tiles/                   瓦片数据（latest / run_* 会话 / maps 总图与标定）
+├── grids2d/                 2D 网格（无高度）输出目录，稠密 npz
+└── browser_profile/         Playwright 登录配置
 ```
 
 ## 功能
 
-- **合成总图**：选择地图/zoom 后点击“合成总图”，已有的瓦片会逐张贴上画布，
-  实时看到拼接过程；下拉框选择地图/zoom 会立即显示该地图；总图可用鼠标拖动平移、
-  滚轮缩放（以光标为中心）、双击/“适应窗口”按钮还原，支持下载拼好的总图 PNG。
+- **合成总图**：选择地图/zoom 后点击“合成总图”，已有的瓦片会实时刷新到画布上；
+  下拉框选择地图/zoom 会立即显示该地图；总图可用鼠标拖动平移、滚轮缩放（以光标为中心）、
+  双击/“适应窗口”按钮还原；下载总图取服务端保存的原始 PNG。
   服务端同步保存到 `tiles/maps/<地图>/<zoom>/<地图>_<zoom>.png`（同名覆盖只保留一份）。
+- **渲染方式（大图不卡的关键）**：画布只有一屏大小，永远只画“当前可见区域”。
+  打开地图先用服务端生成的缩略图打底（`/api/overview`，长边 ≤ 2048，几百 KB ~ 2 MB），
+  放大到能看清细节时才按需拉取可见范围内的瓦片；平移/缩放不重建画布，也不会因为整图
+  尺寸（例如 map02@4 是 10752×15872）而爆显存。缩略图缓存在
+  `tiles/maps/<地图>/<zoom>/<地图>_<zoom>.overview.png`，可随时删除，会按需重建。
 - **开始抓取**：用 Playwright 打开游戏地图页面（非无头模式下弹窗自动最大化、
   页面自适应窗口大小），拦截瓦片请求并实时贴到画布上，新瓦片自动落盘到
   `tiles/run_<时间戳>/` 会话（已下载过的瓦片直接本地应答、不再请求网络，
@@ -100,6 +117,11 @@ nav-grid-editor/
 如需沿用旧 wsserver 工程的数据，把它的 `tiles` 文件夹内容拷入本项目 `tiles/` 即可（目录结构一致，可直接识别）。
 也可用 `--tiles-root` / `--profile-dir`（或环境变量 `NAV_TILES_ROOT` / `NAV_PROFILE_DIR`）指定其他位置。
 
+> 抓取会话目录（`run_*`）只存本次**新增/变化**的瓦片：没变化的瓦片直接复用本地缓存、
+> 不重复写盘，所以它是增量而不是快照。合成总图、边界统计、`/tiles/...` 取图一律按
+> **所有目录的并集**处理，同一坐标以更新的为准（优先顺序：抓取中的会话 → `latest` →
+> 更早的会话 → 旧的扁平目录）。
+
 ## 输出对接（下游消费）
 
 `grids2d/<地图>_<zoom>.grid.npz` 就是 **ok-end-field 导航规划的运行时格式**，
@@ -118,9 +140,10 @@ print(g.shape, g.counts(), g.extent())
 ## 依赖安装（仅 Windows 上需要一次）
 
 ```powershell
-uv sync          # 安装 numpy / pillow / playwright / websockets（或 pip install -r requirements.txt）
-.venv\Scripts\activate
-playwright install chromium
+uv sync                        # 建 .venv、装依赖，并注册 nav-grid-editor 入口
+playwright install chromium    # 首次需要：下载抓取用的 Chromium
+uv run nav-grid-editor         # 启动（等价于 .venv\Scripts\activate 后执行 nav-grid-editor）
 ```
 
-没有 playwright 时抓取按钮会提示错误，其他功能不受影响。
+用 pip 的话：`pip install -e .`（装依赖并注册入口；也可以直接用 `python -m nav_grid_editor`
+启动）。没有 playwright 时抓取按钮会提示错误，其他功能不受影响。
