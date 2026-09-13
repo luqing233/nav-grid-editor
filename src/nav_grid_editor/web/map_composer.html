@@ -387,6 +387,10 @@
         </div>
         <div id="progressLine"></div>
       </div>
+    </section>
+
+    <!-- 地图标记在浏览和标定两个模式下都要能开关：标定时要拿标记当参照物对齐 -->
+    <section class="side-sec" data-mode="browse calib">
       <h3>地图标记</h3>
       <div class="panel">
         <div class="tb-act-hint" style="margin-bottom:6px">
@@ -903,6 +907,9 @@ const calib = {
 
 function renderCalibMarks() {
   canvasHolder.querySelectorAll(".calibMark, .calibNum").forEach(el => el.remove());
+  // 定位点**只在标定模式显示**：浏览/网格/取坐标时它们会压在地图上挡视线
+  // （标定时它们才是"我点了哪几个点"的参照）
+  if (!calib.mode) return;
   if (!calib.key || calib.key !== state.activeKey) return;
   calib.points.forEach((p, i) => {
     const [px, py] = p.pixel;
@@ -973,8 +980,11 @@ function syncModeChrome() {
     const btn = $({ browse: "btnBrowse", calib: "btnCalib", edit: "btnEdit", pick: "btnPick" }[k]);
     btn.classList.toggle("on", k === m);
   });
-  document.querySelectorAll(".tb-act").forEach(el => { el.hidden = el.dataset.mode !== m; });
-  document.querySelectorAll(".side-sec").forEach(el => { el.hidden = el.dataset.mode !== m; });
+  // data-mode 可以是**空格分隔的多个模式**（如 "browse calib"）：侧栏有些面板
+  // 在两个模式下都得能用——地图标记就是，标定时要拿它当参照物对齐。
+  const inMode = el => (el.dataset.mode || "").split(/\s+/).includes(m);
+  document.querySelectorAll(".tb-act").forEach(el => { el.hidden = !inMode(el); });
+  document.querySelectorAll(".side-sec").forEach(el => { el.hidden = !inMode(el); });
   $("modeTag").textContent = MODES[m].label;
   requestRender();   // 编辑层只在 edit 模式画，切换后要重画
 }
@@ -1006,6 +1016,7 @@ function setCalibMode(on) {
   statusEl.textContent = on
     ? "标定模式：点击地图上的特征点 → 输入游戏坐标 X/Z；≥3 个点后点“计算并保存标定”"
     : "已退出标定模式";
+  renderCalibMarks();   // 定位点只在标定模式显示，进出都要重画
   syncModeChrome();
 }
 
