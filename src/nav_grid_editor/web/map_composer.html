@@ -264,6 +264,21 @@
   }
   #markTip b { color: #ffcc66; }
   #markTip .mono { font-family: var(--mono); color: #9fd8ff; }
+  /* 按住画笔快捷键时贴着光标显示的 HUD（当前画笔 + 粗细）。和 markTip 一样是
+     屏幕空间的，所以挂在 canvasWrap 下、用 left/top 定位，不跟地图缩放。 */
+  #brushHud {
+    position: absolute; display: none; pointer-events: none; z-index: 9;
+    background: rgba(14, 14, 22, 0.95); border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 7px; padding: 5px 10px; color: #e8ecf5;
+    font-size: var(--fs-detail); line-height: 1.4; white-space: nowrap;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.65);
+  }
+  #brushHud .bh-brush { font-weight: 600; }
+  #brushHud .bh-n { font-family: var(--mono); color: #ffcc66; font-weight: 600; }
+  /* 画笔名沿用按钮那三个颜色，HUD 和工具栏是同一套语义 */
+  #brushHud[data-brush="free"] .bh-brush    { color: #7fe8b4; }
+  #brushHud[data-brush="blocked"] .bh-brush { color: #ff9b9b; }
+  #brushHud[data-brush="erase"] .bh-brush   { color: #d8d8e0; }
   .calibRow { display: flex; align-items: center; gap: 6px; padding: 2px 0; border-bottom: 1px dashed #2a2a44; }
   .calibRow input[type="checkbox"] { accent-color: #ffcc33; }
   .calibRow .c-del { background: none; border: none; color: #ff7777; cursor: pointer; font-size: 13px; padding: 0 2px; }
@@ -399,17 +414,17 @@
       <span class="tb-act-hint">点击地图上的特征点，输入对应游戏坐标</span>
     </div>
     <div class="tb-act" data-mode="edit">
-      <button class="brushBtn on" data-brush="free" title="左键涂成 Free（快捷键 1）">Free</button>
-      <button class="brushBtn" data-brush="blocked" title="左键涂成 Blocked（快捷键 2）">Blocked</button>
-      <button class="brushBtn" data-brush="erase" title="左键擦回未知（快捷键 3）">未知</button>
-      <span>画笔 <input id="editBrush" type="number" min="1" max="50" value="1" title="画笔宽度（格子数，1=单格）"></span>
+      <button class="brushBtn on" data-brush="free" title="左键涂成 Free（快捷键 1，按住可用滚轮调粗细）">Free</button>
+      <button class="brushBtn" data-brush="blocked" title="左键涂成 Blocked（快捷键 2，按住可用滚轮调粗细）">Blocked</button>
+      <button class="brushBtn" data-brush="erase" title="左键擦回未知（快捷键 3，按住可用滚轮调粗细）">未知</button>
+      <span>画笔 <input id="editBrush" type="number" min="1" max="50" value="1" title="画笔宽度（格子数，1=单格）；按住画笔键滚轮也能调"></span>
       <div class="tb-sep"></div>
       <span>选中 <b id="selCount" class="num">0</b> 格</span>
       <button id="btnSelFree" title="把选中的格子填成 Free（快捷键 Enter）">填充 Free</button>
       <button id="btnSelBlocked" title="把选中的格子填成 Blocked（快捷键 Enter）">填充 Blocked</button>
       <button id="btnSelErase" title="把选中的格子擦成未知（快捷键 Enter）">填充未知</button>
       <button id="btnSelClear" title="取消框选（快捷键 Esc）">取消选择</button>
-      <span class="tb-act-hint">1/2/3 选画笔 · Enter 用当前画笔填充选中</span>
+      <span class="tb-act-hint">1/2/3 选画笔 · 按住画笔键滚轮调粗细 · Enter 用当前画笔填充选中</span>
     </div>
     <div class="tb-act" data-mode="pick">
       <span class="tb-act-hint">点击地图任意位置取坐标</span>
@@ -427,7 +442,7 @@
 </div>
 
 <div id="main">
-  <div id="canvasWrap"><div id="canvasHolder"><canvas id="composeCanvas"></canvas><canvas id="editCanvas"></canvas><canvas id="selCanvas"></canvas><canvas id="pathCanvas"></canvas><div id="playerMarker"></div><div id="pickMarker"></div></div><div id="markTip"></div></div>
+  <div id="canvasWrap"><div id="canvasHolder"><canvas id="composeCanvas"></canvas><canvas id="editCanvas"></canvas><canvas id="selCanvas"></canvas><canvas id="pathCanvas"></canvas><div id="playerMarker"></div><div id="pickMarker"></div></div><div id="markTip"></div><div id="brushHud"></div></div>
   <div id="side">
     <!-- 侧栏按模式显隐。每个 section 把标题和它的面板包在一起，否则藏了面板
          会剩一个孤儿标题。被隐藏时只是 hidden，DOM 与状态都保留，切回来还在。 -->
@@ -1239,6 +1254,7 @@ const edit = {
   painting: false, lastCell: null,
   marquee: null,
   v: null, dirty: false,
+  pointer: null,   // 光标在 canvasWrap 内的位置，按住画笔键时 HUD 用它定位
 };
 const editCanvasEl = $("editCanvas");
 const ectx = editCanvasEl.getContext("2d");
@@ -2671,7 +2687,13 @@ document.addEventListener("keydown", (e) => {
             t.tagName === "SELECT" || t.isContentEditable)) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const brush = BRUSH_BY_KEY[e.key];
-  if (brush) { setBrush(brush); e.preventDefault(); return; }
+  if (brush) {
+    // 按住不放进入"调粗细"状态：滚轮改粗细而不是缩放，光标旁出 HUD
+    heldBrushKeys.add(e.key);
+    if (!e.repeat) { setBrush(brush); showBrushHud(); }
+    e.preventDefault();
+    return;
+  }
   // Enter = 用当前画笔填充选中。
   // 焦点在按钮上时**直接交给浏览器**：它本来就会把 Enter 当成"点这个按钮"，
   // 我们再填一次就会填两遍或填错填法。不靠 preventDefault 拦这个默认行为，
@@ -2682,18 +2704,64 @@ document.addEventListener("keydown", (e) => {
     applySelection(edit.brush);
   }
 });
+
+document.addEventListener("keyup", (e) => {
+  if (!heldBrushKeys.delete(e.key)) return;
+  if (!heldBrushKeys.size) hideBrushHud();   // 全松开了才收 HUD
+});
+
+// 切标签/切窗口时 keyup 收不到，按键会卡在"按住"状态
+window.addEventListener("blur", () => { heldBrushKeys.clear(); hideBrushHud(); });
 $("btnCalibSave").onclick = saveCalib;
 $("btnCalibClear").onclick = () => {
   calib.points = []; calib.mapping = null;
   $("calibStatus").textContent = "未标定（开标定模式后点击地图添加控制点）";
   renderCalibList(); renderCalibMarks();
 };
+// ---------------- 画笔：按钮 / 快捷键 / 按住滚轮调粗细 ----------------
+const heldBrushKeys = new Set();   // 当前按住的画笔键（1/2/3）
+
+function brushLabel(name) {
+  return name === "free" ? "Free" : name === "blocked" ? "Blocked" : "未知";
+}
+
 // 画笔 = 左键涂什么，也决定"填充选中"填什么（快捷键 1/2/3 走同一个入口）
 function setBrush(name) {
   edit.brush = name;
   document.querySelectorAll(".brushBtn").forEach(x =>
     x.classList.toggle("on", x.dataset.brush === name));
+  if (heldBrushKeys.size) showBrushHud();   // 按住时改画笔，HUD 跟着换
 }
+
+// 粗细只有一个来源（edit.brushSize），输入框只是它的一个视图
+function setBrushSize(n) {
+  edit.brushSize = Math.max(1, Math.min(50, parseInt(n, 10) || 1));
+  $("editBrush").value = edit.brushSize;
+  if (heldBrushKeys.size) showBrushHud();
+}
+
+// 按住画笔键时贴着光标显示"当前画笔 + 粗细"。和 markTip 一样是屏幕空间定位，
+// 所以挂在 canvasWrap 下、用相对它的 left/top，不跟地图缩放走。
+function showBrushHud() {
+  const el = $("brushHud"), p = edit.pointer;
+  if (!el || !p) return;
+  el.dataset.brush = edit.brush;
+  el.innerHTML = '<span class="bh-brush">' + brushLabel(edit.brush) +
+                 '</span> · 粗细 <span class="bh-n">' + edit.brushSize + "</span>";
+  el.style.display = "block";
+  // canvasWrap 是 overflow:hidden，贴着右/下边时 HUD 会被裁掉——先量一下尺寸，
+  // 放不下就翻到光标另一侧，再夹进可视区
+  const gap = 16, pad = 4;
+  const w = el.offsetWidth, h = el.offsetHeight;
+  const cw = canvasWrap.clientWidth, ch = canvasWrap.clientHeight;
+  let x = p.x + gap, y = p.y + gap;
+  if (x + w + pad > cw) x = p.x - gap - w;
+  if (y + h + pad > ch) y = p.y - gap - h;
+  el.style.left = Math.max(pad, x) + "px";
+  el.style.top = Math.max(pad, y) + "px";
+}
+function hideBrushHud() { const el = $("brushHud"); if (el) el.style.display = "none"; }
+
 document.querySelectorAll(".brushBtn").forEach(b => {
   b.onclick = () => setBrush(b.dataset.brush);
 });
@@ -2709,10 +2777,7 @@ $("btnPathClear").onclick = clearPath;
 $("editCellSize").onchange = () => { const e = ed(), n = parseFloat($("editCellSize").value); if (e && n > 0) { e.cellSize = n; edit.dirty = true; requestRender(); } };
 $("editOriginX").onchange = () => { const e = ed(), n = parseFloat($("editOriginX").value); if (e && !isNaN(n)) { e.origin[0] = n; edit.dirty = true; requestRender(); } };
 $("editOriginZ").onchange = () => { const e = ed(), n = parseFloat($("editOriginZ").value); if (e && !isNaN(n)) { e.origin[1] = n; edit.dirty = true; requestRender(); } };
-$("editBrush").onchange = () => {
-  edit.brushSize = Math.max(1, Math.min(50, parseInt($("editBrush").value, 10) || 1));
-  $("editBrush").value = edit.brushSize;
-};
+$("editBrush").onchange = () => setBrushSize($("editBrush").value);
 
 // ---------------- 总图拖动 / 缩放 / 涂色 交互 ----------------
 canvasWrap.addEventListener("pointerdown", (e) => {
@@ -2750,6 +2815,12 @@ canvasWrap.addEventListener("pointerdown", (e) => {
   e.preventDefault();
 });
 canvasWrap.addEventListener("pointermove", (e) => {
+  // 只在按住画笔键时才取 rect / 记录位置——这是每次移动都会跑的热路径
+  if (heldBrushKeys.size) {
+    const rect = canvasWrap.getBoundingClientRect();
+    edit.pointer = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    showBrushHud();
+  }
   if (dragState && e.pointerId === dragState.id) {
     if (!dragState.moved &&
         (Math.abs(e.clientX - dragState.sx) + Math.abs(e.clientY - dragState.sy) > 4)) {
@@ -2811,10 +2882,19 @@ canvasWrap.addEventListener("pointercancel", endDrag);
 canvasWrap.addEventListener("wheel", (e) => {
   e.preventDefault();
   const rect = canvasWrap.getBoundingClientRect();
+  // 按住画笔键时滚轮改画笔粗细，不改缩放——否则"按住 1 滚轮"和"按住 2 滚轮"
+  // 会是两种毫不相干的行为。顺便用滚轮位置刷新 HUD，光标没动也能跟着。
+  if (edit.mode && heldBrushKeys.size) {
+    edit.pointer = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    setBrushSize(edit.brushSize + (e.deltaY < 0 ? 1 : -1));
+    return;
+  }
   zoomAt(e.clientX - rect.left, e.clientY - rect.top, e.deltaY < 0 ? 1.15 : 1 / 1.15);
 }, { passive: false });
 canvasWrap.addEventListener("dblclick", () => { if (!calib.mode && !edit.mode) fitView(); });
 canvasWrap.addEventListener("contextmenu", (e) => { if (edit.mode) e.preventDefault(); });
+// HUD 是相对 canvasWrap 定位的，光标移出去就该收起来（移回来 pointermove 会再开）
+canvasWrap.addEventListener("pointerleave", () => { if (heldBrushKeys.size) hideBrushHud(); });
 
 window.addEventListener("resize", () => { clampPan(); applyView(); });
 window.addEventListener("load", () => {
