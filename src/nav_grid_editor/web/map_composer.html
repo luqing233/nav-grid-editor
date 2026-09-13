@@ -420,11 +420,11 @@
       <span>画笔 <input id="editBrush" type="number" min="1" max="50" value="1" title="画笔宽度（格子数，1=单格）；按住画笔键滚轮也能调"></span>
       <div class="tb-sep"></div>
       <span>选中 <b id="selCount" class="num">0</b> 格</span>
-      <button id="btnSelFree" title="把选中的格子填成 Free（快捷键 Enter）">填充 Free</button>
-      <button id="btnSelBlocked" title="把选中的格子填成 Blocked（快捷键 Enter）">填充 Blocked</button>
-      <button id="btnSelErase" title="把选中的格子擦成未知（快捷键 Enter）">填充未知</button>
+      <button id="btnSelFree" title="把选中的格子填成 Free（框选后按 1 同效）">填充 Free</button>
+      <button id="btnSelBlocked" title="把选中的格子填成 Blocked（框选后按 2 同效）">填充 Blocked</button>
+      <button id="btnSelErase" title="把选中的格子擦成未知（框选后按 3 同效）">填充未知</button>
       <button id="btnSelClear" title="取消框选（快捷键 Esc）">取消选择</button>
-      <span class="tb-act-hint">1/2/3 选画笔 · 按住画笔键滚轮调粗细 · Enter 用当前画笔填充选中</span>
+      <span class="tb-act-hint">1/2/3 选画笔，框选后按同一个键直接填充 · 按住画笔键滚轮调粗细</span>
     </div>
     <div class="tb-act" data-mode="pick">
       <span class="tb-act-hint">点击地图任意位置取坐标</span>
@@ -1477,6 +1477,12 @@ function clearSelection() {
   if (v && v.edit) v.edit.selRect = null;
   requestRender();
   updateSelBar();
+}
+
+// 当前是否框选着格子（网格模式的快捷键要靠它决定"做事"还是"选工具"）
+function hasSelection() {
+  const v = state.views.get(state.activeKey);
+  return !!(v && v.edit && v.edit.selection && v.edit.selection.size);
 }
 
 // 对选中的格子批量执行画笔操作
@@ -2688,20 +2694,19 @@ document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const brush = BRUSH_BY_KEY[e.key];
   if (brush) {
-    // 按住不放进入"调粗细"状态：滚轮改粗细而不是缩放，光标旁出 HUD
-    heldBrushKeys.add(e.key);
-    if (!e.repeat) { setBrush(brush); showBrushHud(); }
+    // 1/2/3 = "用这个画笔做事"：
+    //   框选着格子 → 直接把选中的填成该状态（这是框完收手的收尾动作）
+    //   没有框选   → 只是切画笔，并进入"按住"状态（滚轮可以调粗细、HUD 出现）
+    // 填完就不再进按住状态：动作已经做完了，再让滚轮去改粗细没有意义。
+    if (hasSelection()) {
+      setBrush(brush);
+      if (!e.repeat) applySelection(brush);
+    } else {
+      heldBrushKeys.add(e.key);
+      if (!e.repeat) { setBrush(brush); showBrushHud(); }
+    }
     e.preventDefault();
     return;
-  }
-  // Enter = 用当前画笔填充选中。
-  // 焦点在按钮上时**直接交给浏览器**：它本来就会把 Enter 当成"点这个按钮"，
-  // 我们再填一次就会填两遍或填错填法。不靠 preventDefault 拦这个默认行为，
-  // 因为那属于浏览器实现细节，让它自己处理更稳。实际流程里也没影响——用户是
-  // 在画布上拖框之后才按 Enter，那时焦点已经不在按钮上了。
-  if (e.key === "Enter" && (!t || t.tagName !== "BUTTON")) {
-    e.preventDefault();
-    applySelection(edit.brush);
   }
 });
 
