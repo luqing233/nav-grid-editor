@@ -214,6 +214,74 @@
     border-radius: 5px; padding: 4px 10px; cursor: pointer; margin-left: 6px;
   }
   #calibList { max-height: 160px; overflow-y: auto; font-size: 11.5px; margin: 6px 0; line-height: 1.5; }
+
+  /* ---- 物品图标选择器（覆盖层）：左侧分类导航 + 右侧图标网格 ---- */
+  #markPicker {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: min(860px, 92vw); height: min(620px, 86vh);
+    display: none; flex-direction: column;
+    background: #1b1b26; border: 1px solid #45455c; border-radius: 10px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7); z-index: 40;
+  }
+  #markPicker.on { display: flex; }
+  .mp-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-bottom: 1px solid var(--line); flex: 0 0 auto;
+  }
+  .mp-head .mp-title { font-weight: 600; }
+  .mp-head .mp-sub { color: #8a93a8; font-size: var(--fs-secondary); margin-left: auto; }
+  .mp-body { display: flex; flex: 1 1 auto; min-height: 0; }
+  #mpCats {
+    flex: 0 0 190px; overflow-y: auto; padding: 8px;
+    border-right: 1px solid var(--line); background: rgba(0, 0, 0, 0.18);
+  }
+  .mp-cat {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    padding: 9px 10px; margin-bottom: 3px; border-radius: 7px;
+    background: none; border: none; color: #c8cede; cursor: pointer;
+    font-size: var(--fs-control); text-align: left;
+  }
+  .mp-cat:hover { background: rgba(255, 255, 255, 0.06); }
+  /* 选中态照参考图：白底黑字 */
+  .mp-cat.on { background: #e8e8ef; color: #14141c; font-weight: 600; }
+  .mp-cat .mp-n { margin-left: auto; opacity: 0.65; font-family: var(--mono); font-size: var(--fs-detail); }
+  #mpItems {
+    flex: 1 1 auto; overflow-y: auto; padding: 12px;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+    gap: 10px; align-content: start;
+  }
+  .mp-item {
+    display: flex; flex-direction: column; align-items: center; gap: 5px;
+    padding: 8px 4px; border-radius: 8px; cursor: pointer;
+    background: rgba(255, 255, 255, 0.04); border: 1px solid transparent;
+  }
+  .mp-item:hover { background: rgba(255, 255, 255, 0.10); border-color: var(--ctl-border); }
+  .mp-item.on { border-color: #ffcc33; background: rgba(255, 204, 51, 0.12); }
+  .mp-item img { width: 46px; height: 46px; object-fit: contain; }
+  .mp-item .mp-ph { width: 46px; height: 46px; border-radius: 50%; background: rgba(255, 209, 102, 0.25); }
+  .mp-item .mp-name {
+    font-size: var(--fs-detail); color: #d8dcea; text-align: center;
+    line-height: 1.25; word-break: break-all;
+  }
+  .mp-item .mp-cnt { font-family: var(--mono); font-size: var(--fs-detail); color: #ffcc66; }
+  .mp-item.no-pos { opacity: 0.45; }
+  .mp-foot {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-top: 1px solid var(--line); flex: 0 0 auto;
+  }
+  .mp-empty { color: #8a93a8; font-size: var(--fs-secondary); padding: 20px; }
+
+  /* 点地图上的徽章时弹出的小提示（定位在 canvasWrap 内，不跟地图一起缩放） */
+  #markTip {
+    position: absolute; display: none; pointer-events: none; z-index: 8;
+    transform: translate(-50%, -100%);
+    background: rgba(14, 14, 22, 0.95); border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 7px; padding: 6px 10px; color: #e8ecf5;
+    font-size: var(--fs-detail); line-height: 1.55; white-space: nowrap;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.65);
+  }
+  #markTip b { color: #ffcc66; }
+  #markTip .mono { font-family: var(--mono); color: #9fd8ff; }
   .calibRow { display: flex; align-items: center; gap: 6px; padding: 2px 0; border-bottom: 1px dashed #2a2a44; }
   .calibRow input[type="checkbox"] { accent-color: #ffcc33; }
   .calibRow .c-del { background: none; border: none; color: #ff7777; cursor: pointer; font-size: 13px; padding: 0 2px; }
@@ -369,7 +437,7 @@
 </div>
 
 <div id="main">
-  <div id="canvasWrap"><div id="canvasHolder"><canvas id="composeCanvas"></canvas><canvas id="editCanvas"></canvas><canvas id="selCanvas"></canvas><canvas id="pathCanvas"></canvas><div id="playerMarker"></div><div id="pickMarker"></div></div></div>
+  <div id="canvasWrap"><div id="canvasHolder"><canvas id="composeCanvas"></canvas><canvas id="editCanvas"></canvas><canvas id="selCanvas"></canvas><canvas id="pathCanvas"></canvas><div id="playerMarker"></div><div id="pickMarker"></div></div><div id="markTip"></div></div>
   <div id="side">
     <!-- 侧栏按模式显隐。每个 section 把标题和它的面板包在一起，否则藏了面板
          会剩一个孤儿标题。被隐藏时只是 hidden，DOM 与状态都保留，切回来还在。 -->
@@ -401,6 +469,7 @@
         <div id="marksStatus">未抓取</div>
         <div style="margin-top:8px">
           <label><input type="checkbox" id="chkMarksOn"> 显示在地图上</label>
+          <button id="btnMarkPicker" style="margin-left:8px">浏览图标…</button>
         </div>
         <div id="markLayers" style="margin-top:6px;line-height:1.9"></div>
         <div id="marksHint" class="t-time"></div>
@@ -467,6 +536,23 @@
   </div>
 </div>
 
+<!-- 物品图标选择器：左分类导航 + 右图标网格，点图标定位到地图上 -->
+<div id="markPicker">
+  <div class="mp-head">
+    <span class="mp-title">物品图标</span>
+    <span class="mp-sub" id="mpSub">-</span>
+    <button id="mpClose">关闭</button>
+  </div>
+  <div class="mp-body">
+    <div id="mpCats"></div>
+    <div id="mpItems"></div>
+  </div>
+  <div class="mp-foot">
+    <button id="mpReset">重置</button>
+    <span class="mp-sub" id="mpTip">点图标即可跳到它的位置</span>
+  </div>
+</div>
+
 <script>
 "use strict";
 
@@ -486,6 +572,11 @@ const state = {
   markers: null, // 当前地图的标记点位（/api/marks/data）
   marksOn: false,   // 是否把标记画到地图上
   markLayers: {},   // 大类 -> 开关（未设过的大类默认开）
+  markFocus: null,  // 图标选择器选了哪个 templateId（选中时只高亮它）
+  mpCat: null,      // 选择器当前的大类
+  mpCats: [],       // [[大类, [条目]]]，打开选择器时算一次
+  markersPromise: null,  // 正在进行的标记请求（并发调用共享它）
+  markersKey: null,
 };
 
 const $ = id => document.getElementById(id);
@@ -836,6 +927,7 @@ function fitView() {
 
 // 以鼠标位置为中心缩放
 function zoomAt(cx, cy, factor) {
+  showMarkTip(null);   // 缩放后徽章位置变了，旧提示会指错地方
   const old = mapView.scale;
   // 先记下鼠标锚点所在的 holder 坐标：缩放前后这个点是不动的，它就是我们
   // 要"优先加载"的那个焦点。cx/cy 是相对 canvasWrap 的屏幕坐标。
@@ -2040,24 +2132,34 @@ function markBadge(file) {
   return cv;
 }
 
+// 并发调用**共享同一次请求**：以前是"key 相同就 return"，于是第二个调用者
+// 立刻返回、看到的却是上一个调用刚设下的 loaded:false，直接放弃——
+// openMarkPicker 就是这么被坑的（点"浏览图标"没反应）。
 async function loadMarkers() {
   const key = state.activeKey;
   if (!key) return;
+  if (state.markers && state.markers.loaded && state.markers.key === key) return;
+  if (state.markersPromise && state.markersKey === key) return state.markersPromise;
   const map = key.split("@")[0];
-  if (state.markers && state.markers.key === key) return;
+  state.markersKey = key;
   state.markers = { key, templates: {}, points: [], loaded: false };
-  try {
-    const res = await (await fetch("/api/marks/data?map=" + encodeURIComponent(map))).json();
-    if (state.activeKey !== key) return;     // 期间切图了，丢弃
-    state.markers = { key, templates: res.templates || {},
-                      points: res.points || [], loaded: true };
-    buildMarkLayers();
-  } catch (e) {
-    addLog("标记数据加载失败: " + e.message, "t-warn");
-  }
-  renderMarksPanel();
-  updateMarksHint();
-  requestRender();
+  state.markersPromise = (async () => {
+    try {
+      const res = await (await fetch("/api/marks/data?map=" + encodeURIComponent(map))).json();
+      if (state.activeKey !== key) return;     // 期间切图了，丢弃
+      state.markers = { key, templates: res.templates || {},
+                        points: res.points || [], loaded: true };
+      buildMarkLayers();
+    } catch (e) {
+      addLog("标记数据加载失败: " + e.message, "t-warn");
+    } finally {
+      state.markersPromise = null;
+    }
+    renderMarksPanel();
+    updateMarksHint();
+    requestRender();
+  })();
+  return state.markersPromise;
 }
 
 function buildMarkLayers() {
@@ -2109,6 +2211,9 @@ function drawMarkers(g) {
     if (py < vis.y - padTop || py > vis.y + vis.h + d) continue;
 
     const badge = info.icon ? markBadge(info.icon) : null;
+    // 选择器选中了某个物品时：它高亮，其余压暗，方便一眼看出在哪
+    const focused = !state.markFocus || state.markFocus === tid;
+    g.globalAlpha = focused ? 1 : 0.22;
     if (badge) {
       // 底部小三角的**尖端正好落在锚点**上，圆徽章坐在它上面
       g.beginPath();
@@ -2127,11 +2232,124 @@ function drawMarkers(g) {
       g.fill();
     }
   }
+  g.globalAlpha = 1;   // 必须复位：g 是复用的画布上下文，漏出去会影响下一帧
 }
 
 function setMarksOn(on) {
   state.marksOn = !!on;
   if (state.marksOn) loadMarkers();     // 打开时才去拉数据
+  else state.markFocus = null;          // 关掉图层就没什么可高亮的了
+  updateMarksHint();
+  requestRender();
+}
+
+// ---------------- 物品图标选择器 ----------------
+// 左侧按 catalog 大类导航，右侧是该类的图标网格；点某个图标跳到它的位置并高亮。
+async function openMarkPicker() {
+  if (!state.marksOn) { $("chkMarksOn").checked = true; setMarksOn(true); }
+  if (!state.markers || !state.markers.loaded) await loadMarkers();
+  if (!state.markers || !state.markers.loaded) {
+    addLog("标记数据还没加载好，稍后再试", "t-warn");
+    return;
+  }
+  $("markPicker").classList.add("on");
+  buildMarkPicker();
+}
+
+function closeMarkPicker() { $("markPicker").classList.remove("on"); }
+
+// 归出 {大类: [{tid, 名称, 图标文件, 本图点位数}]}，只保留**本图真有点位**的图标
+function buildMarkPicker() {
+  const tpls = state.markers.templates;
+  const cnt = new Map();
+  for (const p of state.markers.points) cnt.set(p[0], (cnt.get(p[0]) || 0) + 1);
+
+  const byCat = new Map();
+  for (const [tid, info] of Object.entries(tpls)) {
+    const n = cnt.get(tid) || 0;
+    if (!n || !info.m) continue;
+    if (!byCat.has(info.m)) byCat.set(info.m, []);
+    byCat.get(info.m).push({ tid, name: info.n || "?", icon: info.icon || "", n });
+  }
+  for (const arr of byCat.values()) {
+    arr.sort((a, b) => b.n - a.n || a.name.localeCompare(b.name, "zh"));
+  }
+  state.mpCats = [...byCat.entries()].sort((a, b) => a[0].localeCompare(b[0], "zh"));
+  $("mpSub").textContent = `本图 ${state.markers.points.length} 个点位`;
+
+  if (!state.mpCats.length) {
+    state.mpCat = null;
+    $("mpCats").innerHTML = "";
+    $("mpItems").innerHTML = '<div class="mp-empty">这张图没有标记数据（先去抓一次）</div>';
+    return;
+  }
+  if (!state.mpCats.some(([c]) => c === state.mpCat)) state.mpCat = state.mpCats[0][0];
+  renderMpCats();
+  renderMpItems();
+}
+
+function renderMpCats() {
+  $("mpCats").innerHTML = state.mpCats.map(([cat, items]) => {
+    const n = items.reduce((a, x) => a + x.n, 0);
+    return '<button class="mp-cat' + (cat === state.mpCat ? " on" : "") +
+           '" data-cat="' + cat + '"><span>' + cat + '</span>' +
+           '<span class="mp-n">' + n + "</span></button>";
+  }).join("");
+  $("mpCats").querySelectorAll(".mp-cat").forEach(b => {
+    b.onclick = () => { state.mpCat = b.dataset.cat; renderMpCats(); renderMpItems(); };
+  });
+}
+
+function renderMpItems() {
+  const entry = state.mpCats.find(([c]) => c === state.mpCat);
+  const box = $("mpItems");
+  if (!entry) { box.innerHTML = ""; return; }
+  box.innerHTML = entry[1].map(it =>
+    '<div class="mp-item' + (it.tid === state.markFocus ? " on" : "") +
+    '" data-tid="' + it.tid + '" title="' + it.name + "（" + it.n + " 个点）\">" +
+    (it.icon
+      ? '<img src="/api/marks/icon?f=' + encodeURIComponent(it.icon) + '" alt="">'
+      : '<div class="mp-ph"></div>') +
+    '<div class="mp-cnt">' + it.n + "</div>" +
+    '<div class="mp-name">' + it.name + "</div></div>").join("");
+  box.querySelectorAll(".mp-item").forEach(el => {
+    el.onclick = () => focusMarkItem(el.dataset.tid);
+  });
+}
+
+// 点图标 → 把视图缩放到该物品所有点的范围，并把这一类高亮出来
+function focusMarkItem(tid) {
+  const pts = state.markers.points.filter(p => p[0] === tid);
+  if (!pts.length) return;
+  const inv = (calib.mapping && calib.key === state.activeKey)
+    ? calib.mapping.inverse_matrix : null;
+  if (!inv) { addLog("这张图还没标定：标记是世界坐标，换算不成像素就没法定位", "t-warn"); return; }
+
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const [, wx, , wz] of pts) {
+    const px = inv[0][0] * wx + inv[0][1] * wz + inv[0][2];
+    const py = inv[1][0] * wx + inv[1][1] * wz + inv[1][2];
+    x0 = Math.min(x0, px); x1 = Math.max(x1, px);
+    y0 = Math.min(y0, py); y1 = Math.max(y1, py);
+  }
+  const W = canvasWrap.clientWidth, H = canvasWrap.clientHeight;
+  const bw = Math.max(96, x1 - x0), bh = Math.max(96, y1 - y0);
+  const pad = 140;                        // 留边，别让徽章贴着窗口边
+  let s = Math.min((W - pad) / bw, (H - pad) / bh);
+  s = Math.max(0.02, Math.min(8, s));
+  mapView.scale = s;
+  mapView.panX = W / 2 - ((x0 + x1) / 2) * s;
+  mapView.panY = H / 2 - ((y0 + y1) / 2) * s;
+  state.markFocus = tid;
+  clampPan(); applyView(); render();
+  updateMarksHint();
+  closeMarkPicker();
+  addLog(`定位到「${state.markers.templates[tid].n}」（${pts.length} 个点）`, "t-ok");
+}
+
+function resetMarkFocus() {
+  state.markFocus = null;
+  renderMpItems();
   updateMarksHint();
   requestRender();
 }
@@ -2146,9 +2364,67 @@ function updateMarksHint() {
     return;
   }
   const calibrated = !!(calib.mapping && calib.key === state.activeKey);
-  el.innerHTML = calibrated
+  let line = calibrated
     ? `本图 ${m.points.length} 个点位；缩放 < ${MARK_MIN_SCALE} 时不画（跟瓦片一样）`
     : '<b class="t-warn">这张图还没标定</b>：标记是世界坐标，没有标定就换不成像素';
+  if (state.markFocus && m.templates[state.markFocus]) {
+    const nm = m.templates[state.markFocus].n;
+    line += `<br>正在高亮「<b>${nm}</b>」<button id="hintClearFocus">取消高亮</button>`;
+  }
+  el.innerHTML = line;
+  const clr = $("hintClearFocus");
+  if (clr) clr.onclick = resetMarkFocus;
+}
+
+// ---------------- 点地图上的徽章 → 看它是谁、在哪 ----------------
+// 徽章是**画在画布上的**（不是 DOM），所以得自己做命中测试：把点击位置换算成
+// holder 坐标，再看落不落在某个徽章的圆里（圆心在锚点上方 ph + r 处）。
+function hitTestMarker(clientX, clientY) {
+  if (!showMarks()) return null;
+  const s = mapView.scale;
+  if (s < MARK_MIN_SCALE) return null;     // 这个缩放下根本没画，别误判
+  const inv = (calib.mapping && calib.key === state.activeKey)
+    ? calib.mapping.inverse_matrix : null;
+  if (!inv) return null;
+  const rect = canvasWrap.getBoundingClientRect();
+  const hx = (clientX - rect.left - mapView.panX) / s;
+  const hy = (clientY - rect.top - mapView.panY) / s;
+  const r = (MARK_BADGE_PX / s) / 2;
+  const ph = MARK_POINTER_PX / s;
+  let best = null, bestD = Infinity;
+  for (const [tid, wx, , wz] of state.markers.points) {
+    const info = state.markers.templates[tid];
+    if (!info || !layerOn(info.m)) continue;
+    const px = inv[0][0] * wx + inv[0][1] * wz + inv[0][2];
+    const py = inv[1][0] * wx + inv[1][1] * wz + inv[1][2];
+    const d = Math.hypot(hx - px, hy - (py - ph - r));
+    if (d <= r && d < bestD) { bestD = d; best = { tid, wx, wz, px, py }; }
+  }
+  return best;
+}
+
+function showMarkTip(hit) {
+  const el = $("markTip");
+  if (!hit) { el.style.display = "none"; return; }
+  const info = state.markers.templates[hit.tid];
+  const s = mapView.scale;
+  const rows = [`<b>${info.n}</b>`];
+  const cat = [info.m, info.s].filter(Boolean).filter((x, i, a) => a.indexOf(x) === i);
+  if (cat.length) rows.push(cat.join(" · "));
+  rows.push(`世界坐标 <span class="mono">${hit.wx.toFixed(1)}, ${hit.wz.toFixed(1)}</span>`);
+  // 这张图有 2D 网格就顺带给出格子下标（网格编辑时对得上）
+  const v = state.views.get(state.activeKey);
+  const e = v && v.edit;
+  if (e && e.cellSize && e.origin) {
+    rows.push("<span class=\"mono\">格子 " +
+      Math.floor((hit.wx - e.origin[0]) / e.cellSize) + ", " +
+      Math.floor((hit.wz - e.origin[1]) / e.cellSize) + "</span>");
+  }
+  rows.push(`本图共 <span class="mono">${state.markers.points.filter(p => p[0] === hit.tid).length}</span> 个`);
+  el.innerHTML = rows.join("<br>");
+  el.style.left = (hit.px * s + mapView.panX) + "px";
+  el.style.top = ((hit.py - MARK_POINTER_PX / s) * s + mapView.panY - 8) + "px";
+  el.style.display = "block";
 }
 
 function setBusyFetch(b) {
@@ -2436,6 +2712,9 @@ $("btnDownload").onclick = async () => {
 };
 $("chkFollow").onchange = () => { state.follow = $("chkFollow").checked; };
 $("chkMarksOn").onchange = () => setMarksOn($("chkMarksOn").checked);
+$("btnMarkPicker").onclick = openMarkPicker;
+$("mpClose").onclick = closeMarkPicker;
+$("mpReset").onclick = resetMarkFocus;
 $("btnFit").onclick = fitView;
 // 模式段：点当前模式回到"浏览"，点别的切过去
 $("btnBrowse").onclick = () => setMode("browse");
@@ -2510,6 +2789,7 @@ canvasWrap.addEventListener("pointerdown", (e) => {
     return;
   }
   if (e.button !== 0 && e.pointerType === "mouse") return;
+  showMarkTip(null);   // 开始平移就把徽章提示收起来，别拖着一块跑
   dragState = { id: e.pointerId, sx: e.clientX, sy: e.clientY, px: mapView.panX, py: mapView.panY, moved: false };
   canvasWrap.setPointerCapture(e.pointerId);
   canvasWrap.classList.add("dragging");
@@ -2556,6 +2836,15 @@ const endDrag = (e) => {
     } else if (wasTap && pick.mode && !edit.mode && !calib.mode) {
       // 取坐标模式：轻点 → 显示坐标
       doPick(e);
+    } else if (wasTap && !edit.mode) {
+      // 浏览模式：点地图上的徽章 → 弹出它是谁、在哪，并高亮这一类
+      const hit = hitTestMarker(e.clientX, e.clientY);
+      showMarkTip(hit);
+      if (hit) {
+        state.markFocus = hit.tid;
+        updateMarksHint();
+        requestRender();
+      }
     }
   }
   if (edit.mode && edit.painting && e.pointerId === edit.painting.id) {
