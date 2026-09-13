@@ -84,8 +84,12 @@ GRID_AXIS_CONVENTION = (
 CELL_UNKNOWN = 0
 CELL_FREE = 1
 CELL_BLOCKED = 2
-#: 稠密数组元素数上限：格子放得太散时 (max-min)² 会直接吃光内存，超限就拒绝
-DENSE_CELL_LIMIT = 4_000_000
+#: 稠密数组元素数上限。格子放得太散时 (max-min)² 会直接吃光内存，所以要有上限；
+#: 但它必须容得下**整张地图**，否则永远存不下来。实测 map02@4 的标记范围是
+#: x -1750..491 × z -2037..1550，cell_size=1 时约 9.6M 格，旧的 4M 上限连半张图
+#: 都盖不住（用户就是撞在这上面）。uint8 一格一字节，64M = 64MB，本地工具可接受，
+#: 同时仍能挡住写错世界坐标导致的离谱范围（偏出约 8000 格才会触发）。
+DENSE_CELL_LIMIT = 64_000_000
 #: 编辑器可保存的已涂格子上限（与前端框选上限一致）
 EDIT_CELL_LIMIT = 300_000
 #: 与 ok-end-field 的 grid_io.load_grid / scripts/nav/verify_grid.py 对齐的硬性约束
@@ -1611,9 +1615,16 @@ class MapService:
         width = max_ix - min_ix + 1   # 列数 = x 方向
         height = max_iz - min_iz + 1  # 行数 = z 方向
         if width * height > DENSE_CELL_LIMIT:
+            # 带上世界坐标范围：跨度炸了基本只有两种可能——地图本来就大（那就该
+            # 调大 cell_size，用更粗的格子覆盖），或者某一笔涂到了很远的坐标上，
+            # 看范围就能分辨是哪一种。
             return {"ok": False,
-                    "error": f"格子跨度 {width}×{height} 超过稠密化上限（{DENSE_CELL_LIMIT} 格），"
-                             "请把格子放在更集中的区域"}
+                    "error": f"格子跨度 {width}×{height}={width * height} 超过稠密化上限"
+                             f"（{DENSE_CELL_LIMIT} 格）。世界范围 x "
+                             f"{origin[0] + min_ix * cell_size:.0f}..{origin[0] + max_ix * cell_size:.0f}、"
+                             f"z {origin[2] + min_iz * cell_size:.0f}..{origin[2] + max_iz * cell_size:.0f}；"
+                             "要么把 cell_size 调大（格子更粗、覆盖同样范围用的格子更少），"
+                             "要么把涂到远处的格子擦掉"}
 
         # 行=iz、列=ix（必须与 ok-end-field 的 i=row=z / j=col=x 一致，否则网格会转置）
         grid = np.full((height, width), CELL_UNKNOWN, dtype=np.uint8)

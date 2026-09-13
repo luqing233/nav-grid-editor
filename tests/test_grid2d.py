@@ -97,6 +97,24 @@ class Grid2DRoundTripTest(unittest.TestCase):
             self.assertEqual(z["cells"].dtype, np.uint8)
             self.assertTrue(set(np.unique(z["cells"]).tolist()) <= {0, 1, 2})
 
+    def test_map_sized_grid_is_saveable(self):
+        """整张地图的跨度必须存得下来，稠密上限不能小于真实地图。
+
+        map02@4 的标记范围是 x -1750..491 × z -2037..1550，cell_size=1 时
+        约 9.6M 格；用户已有的网格是 997 列，往 x 方向涂到 1773 列就有 5.2M，
+        旧上限 4M 直接拒绝——**这张图永远存不下来**。这里就钉这个尺寸。
+        """
+        res = self._save(shape=[2938, 997], cells=[[0, 0], [1772, 2937], [1000, 1500]])
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["shape"], [2938, 1773])
+
+    def test_absurd_span_still_rejected(self):
+        """上限调大后仍要挡住离谱范围（世界坐标写错），并给出世界范围便于分辨。"""
+        res = self._save(cells=[[0, 0], [60000, 60000]])
+        self.assertFalse(res["ok"])
+        self.assertIn("超过稠密化上限", res["error"])
+        self.assertIn("世界范围", res["error"])
+
 
 class Grid2DReadValidationTest(unittest.TestCase):
     def setUp(self):
