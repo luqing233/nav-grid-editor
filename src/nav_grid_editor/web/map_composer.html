@@ -215,10 +215,10 @@
   }
   #calibList { max-height: 160px; overflow-y: auto; font-size: 11.5px; margin: 6px 0; line-height: 1.5; }
 
-  /* ---- 物品图标选择器：**内嵌在侧栏里**（不是弹窗，侧栏只有 300px 所以
-     分类用可换行的胶囊按钮、图标 3 列网格） ---- */
-  #markPicker { display: none; margin-top: 8px; }
-  #markPicker.on { display: block; }
+  /* ---- 物品图标选择器：常驻在侧栏里的面板（不是弹窗、也没有开关按钮，
+     图标默认就在地图上，筛选就是点图标本身）。侧栏只有 300px，所以分类
+     用可换行的胶囊按钮、图标 3 列网格 ---- */
+  #markPicker { margin-top: 8px; }
   .mp-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
   .mp-head .mp-sub { color: #8a93a8; font-size: var(--fs-detail); margin-left: auto; }
   #mpCats { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
@@ -457,17 +457,13 @@
         </div>
         <div id="marksCred"></div>
         <div id="marksStatus">未抓取</div>
-        <div style="margin-top:8px">
-          <label><input type="checkbox" id="chkMarksOn"> 显示在地图上</label>
-          <button id="btnMarkPicker" style="margin-left:8px">筛选图标…</button>
-        </div>
-        <!-- 图标筛选器：内嵌在这里，不是弹窗 -->
+        <!-- 图标筛选器：内嵌常驻，不是弹窗也不是开关 -->
         <div id="markPicker">
           <div class="mp-head">
             <span class="mp-sub" id="mpSub">-</span>
           </div>
           <div id="mpCats"></div>
-          <div id="mpItems"></div>
+          <div id="mpItems"><div class="mp-empty">先在上面选一张地图</div></div>
           <div class="mp-foot">
             <button id="mpAll">全选</button>
             <button id="mpNone">取消全选</button>
@@ -556,7 +552,6 @@ const state = {
   compose: null, // {map, zoom, total, done}
   marks: null,   // 地图标记抓取状态（/api/marks/status）
   markers: null, // 当前地图的标记点位（/api/marks/data）
-  marksOn: false,   // 是否把标记画到地图上
   markHidden: new Set(),  // 被选择器关掉的 templateId（不画这些）
   mpCat: null,      // 选择器当前的大类
   mpCats: [],       // [[大类, [条目]]]，打开选择器时算一次
@@ -628,7 +623,7 @@ function setActive(key) {
   hidePickMarker();
   $("pickReadout").textContent = "-";
   if (edit.mode) loadGrid2D(false);
-  if (state.marksOn) loadMarkers();   // 换了图，标记也要跟着换
+  loadMarkers();   // 换了图，标记也要跟着换
 }
 
 // 顶部信息条：实时显示当前拼接的地图名 / zoom / 瓦片数 / 坐标范围
@@ -2066,7 +2061,7 @@ const MARK_MIN_SCALE = 0.12;      // 低于此缩放不画（与瓦片的 600 �
 const MARK_BADGE_PX = 40;         // 徽章直径（**屏幕像素**，与缩放无关）
 const MARK_POINTER_PX = 8;        // 底部小三角高度（屏幕像素）
 
-function showMarks() { return !!(state.marksOn && state.markers && state.markers.points.length); }
+function showMarks() { return !!(state.markers && state.markers.points.length); }
 
 // 图标以**中文名**落盘（如「供电设备.png」），多个 templateId 可能指向同一个文件，
 // 所以按文件名缓存而不是按 templateId。
@@ -2110,7 +2105,7 @@ function markBadge(file) {
 
 // 并发调用**共享同一次请求**：以前是"key 相同就 return"，于是第二个调用者
 // 立刻返回、看到的却是上一个调用刚设下的 loaded:false，直接放弃——
-// openMarkPicker 就是这么被坑的（点"浏览图标"没反应）。
+// 换图时标记就画不出来。
 async function loadMarkers() {
   const key = state.activeKey;
   if (!key) return;
@@ -2131,6 +2126,7 @@ async function loadMarkers() {
       state.markersPromise = null;
     }
     renderMarksPanel();
+    buildMarkPicker();   // 数据到位后才填筛选器（失败时它会显示占位文案）
     updateMarksHint();
     requestRender();
   })();
@@ -2186,34 +2182,24 @@ function drawMarkers(g) {
   }
 }
 
-function setMarksOn(on) {
-  state.marksOn = !!on;
-  if (state.marksOn) loadMarkers();     // 打开时才去拉数据
-  updateMarksHint();
-  requestRender();
-}
-
 // ---------------- 物品图标选择器 ----------------
-// 左侧按 catalog 大类导航，右侧是该类的图标网格；点某个图标跳到它的位置并高亮。
-async function openMarkPicker() {
-  if (!state.marksOn) { $("chkMarksOn").checked = true; setMarksOn(true); }
-  if (!state.markers || !state.markers.loaded) await loadMarkers();
-  if (!state.markers || !state.markers.loaded) {
-    addLog("标记数据还没加载好，稍后再试", "t-warn");
-    return;
-  }
-  $("markPicker").classList.add("on");
-  buildMarkPicker();
-}
-
-// 内嵌面板，没有"关闭"概念，收起就是把按钮再点一次
-function closeMarkPicker() { $("markPicker").classList.remove("on"); }
+// 常驻在侧栏的面板：按 catalog 大类列出本图出现的图标，点图标逐个筛掉它
+// （见 toggleMarkItem）。由 loadMarkers() 在数据到位后填充。
 
 // 归出 {大类: [{tid, 名称, 图标文件, 本图点位数}]}，只保留**本图真有点位**的图标
 function buildMarkPicker() {
-  const tpls = state.markers.templates;
+  const m = state.markers;
+  if (!m || !m.loaded) {
+    state.mpCats = []; state.mpCat = null;
+    $("mpSub").textContent = "-";
+    $("mpCats").innerHTML = "";
+    $("mpItems").innerHTML = '<div class="mp-empty">' +
+      (m ? "标记数据加载中…" : "先在上面选一张地图") + "</div>";
+    return;
+  }
+  const tpls = m.templates;
   const cnt = new Map();
-  for (const p of state.markers.points) cnt.set(p[0], (cnt.get(p[0]) || 0) + 1);
+  for (const p of m.points) cnt.set(p[0], (cnt.get(p[0]) || 0) + 1);
 
   const byCat = new Map();
   for (const [tid, info] of Object.entries(tpls)) {
@@ -2291,7 +2277,7 @@ function setAllMarkItems(visible) {
   requestRender();
 }
 
-function resetMarkFocus() {
+function resetMarkFilter() {
   state.markHidden.clear();   // 重置 = 全都放出来
   renderMpItems();
   updateMarksHint();
@@ -2300,9 +2286,9 @@ function resetMarkFocus() {
 
 function updateMarksHint() {
   const el = $("marksHint");
-  if (!state.marksOn) { el.textContent = ""; return; }
   const m = state.markers;
-  if (!m || !m.loaded) { el.textContent = "加载中…"; return; }
+  if (!m) { el.textContent = ""; return; }        // 还没选图，别写"加载中"
+  if (!m.loaded) { el.textContent = "加载中…"; return; }
   if (!m.points.length) {
     el.textContent = "这张图没有标记数据（先去上面抓一次）";
     return;
@@ -2313,11 +2299,11 @@ function updateMarksHint() {
     : '<b class="t-warn">这张图还没标定</b>：标记是世界坐标，没有标定就换不成像素';
   if (state.markHidden.size) {
     line += `<br>已隐藏 <b>${state.markHidden.size}</b> 个图标` +
-            '<button id="hintClearFocus">全部显示</button>';
+            '<button id="hintClearFilter">全部显示</button>';
   }
   el.innerHTML = line;
-  const clr = $("hintClearFocus");
-  if (clr) clr.onclick = resetMarkFocus;
+  const clr = $("hintClearFilter");
+  if (clr) clr.onclick = resetMarkFilter;
 }
 
 // ---------------- 点地图上的徽章 → 看它是谁、在哪 ----------------
@@ -2655,11 +2641,9 @@ $("btnDownload").onclick = async () => {
   } catch (e) { addLog("下载失败: " + e.message, "t-err"); }
 };
 $("chkFollow").onchange = () => { state.follow = $("chkFollow").checked; };
-$("chkMarksOn").onchange = () => setMarksOn($("chkMarksOn").checked);
-$("btnMarkPicker").onclick = openMarkPicker;
 $("mpAll").onclick = () => setAllMarkItems(true);
 $("mpNone").onclick = () => setAllMarkItems(false);
-$("mpReset").onclick = resetMarkFocus;
+$("mpReset").onclick = resetMarkFilter;
 $("btnFit").onclick = fitView;
 // 模式段：点当前模式回到"浏览"，点别的切过去
 $("btnBrowse").onclick = () => setMode("browse");
