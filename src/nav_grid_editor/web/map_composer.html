@@ -386,8 +386,7 @@
       <button id="btnCompose" title="把当前地图/zoom 的已有瓦片逐张贴上总图">合成总图</button>
       <button id="btnSim" title="不落盘的模拟抓取，用来演示实时贴图">模拟抓取</button>
       <div class="tb-sep"></div>
-      <button id="btnMarksPublic" title="抓取官方地图标记（免鉴权）：采集物、怪种等，写到 assets/items/map/">抓取公开标记</button>
-      <button id="btnMarksAuth" title="抓取认证标记：含玩家自建的滑索/暗管/供电桩等，写到 assets/items/map_auth/">抓取认证标记</button>
+      <button id="btnMarksAuth" title="抓取官方地图标记（认证口径，含玩家自建的滑索/暗管/供电桩等），写到 assets/items/map_auth/">抓取地图标记</button>
       <div class="tb-sep"></div>
       <button id="btnFit" title="缩放并居中显示整张总图（也可双击画布）">适应窗口</button>
       <button id="btnReset" title="清除当前地图画布">清空画布</button>
@@ -2025,27 +2024,22 @@ function renderMarksPanel() {
   if (m.running) line = "抓取中…（进度见日志）";
   else if (m.error) line = '<b class="t-err">上次失败: ' + m.error + "</b>";
   else if (s) {
-    line = (s.kind === "auth" ? "上次（认证）: " : "上次（公开）: ")
-         + s.maps + " 图 / " + s.items + " 物品名 / " + s.points + " 点位";
+    line = "上次: " + s.maps + " 图 / " + s.items + " 物品名 / " + s.points + " 点位";
     if (s.structure_points) line += " · 玩家自建结构 " + s.structure_points + " 个";
     line += '<br><span class="t-time">' + s.out_dir + "</span>";
   } else line = "未抓取";
   $("marksStatus").innerHTML = line;
 
-  $("btnMarksPublic").disabled = !!m.running;
   $("btnMarksAuth").disabled = !!m.running;
 }
 
-async function startMarks(kind) {
+async function startMarks() {
   try {
-    const res = await (await fetch("/api/marks/fetch", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind }),
-    })).json();
+    const res = await (await fetch("/api/marks/fetch", { method: "POST" })).json();
     if (!res.ok) { addLog("标记抓取启动失败: " + res.error, "t-err"); return; }
-    addLog("开始抓取地图标记（" + (kind === "auth" ? "认证" : "公开") + "口径）", "t-ok");
+    addLog("开始抓取地图标记（认证口径）", "t-ok");
     state.marks = Object.assign({}, state.marks,
-      { running: true, kind, stats: null, error: null });
+      { running: true, stats: null, error: null });
   } catch (e) {
     addLog("标记抓取请求失败: " + e.message, "t-err");
   }
@@ -2498,7 +2492,7 @@ async function handleEvent(evt) {
       break;
     case "marks_start":
       state.marks = Object.assign({}, state.marks || {},
-        { running: true, kind: evt.kind, stats: null, error: null });
+        { running: true, stats: null, error: null });
       renderMarksPanel();
       break;
     case "marks_done":
@@ -2594,8 +2588,7 @@ async function openSelectedMap() {
 }
 
 $("btnCompose").onclick = startCompose;
-$("btnMarksPublic").onclick = () => startMarks("public");
-$("btnMarksAuth").onclick = () => startMarks("auth");
+$("btnMarksAuth").onclick = () => startMarks();
 $("btnFetch").onclick = async () => {
   try {
     const resp = await fetch("/api/fetch/start", {

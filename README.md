@@ -53,7 +53,7 @@ nav-grid-editor/
 ├── assets/                  全部采集/编辑产物
 │   ├── tiles/               瓦片数据（latest / run_* 会话 / maps 总图与标定）
 │   ├── grids2d/             2D 网格（无高度）输出目录，稠密 npz
-│   └── items/               地图标记数据（map/ 公开口径、map_auth/ 认证口径）
+│   └── items/               地图标记（map_auth/ 认证口径唯一数据 + icons/ 图标缓存）
 └── browser_profile/         Playwright 登录配置（登录态，不进 assets/）
 ```
 
@@ -119,7 +119,7 @@ nav-grid-editor/
     │   ├── run_<时间戳>/  每次抓取会话
     │   └── maps/          拼接总图与标定（按 地图/zoom 分类）
     ├── grids2d/           2D 网格（无高度），base01_4.grid.npz 风格命名（稠密 uint8）
-    └── items/             地图标记数据（map/ 公开口径、map_auth/ 认证口径）
+    └── items/             地图标记（map_auth/ 认证口径唯一数据 + icons/ 图标缓存）
 ```
 
 如需沿用旧 wsserver 工程的数据，把它的 `tiles` 文件夹内容拷入本项目 `assets/tiles/` 即可（目录结构一致，可直接识别）。

@@ -317,11 +317,9 @@ async def compose(request: Request) -> Response:
 
 
 @app.post("/api/marks/fetch")
-async def marks_fetch(request: Request) -> Response:
-    req, err = await _json_body(request)
-    if err:
-        return _bad_request(err)
-    return JSONResponse(_svc().start_marks(str(req.get("kind", "public"))))
+def marks_fetch() -> JSONResponse:
+    """抓认证标记（含玩家自建结构）。公开口径已退场，不再有 kind 参数。"""
+    return JSONResponse(_svc().start_marks())
 
 
 @app.post("/api/simulate/start")

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""官方地图标记抓取（公开口径 / 认证口径）。
+"""官方地图标记抓取（**只走认证口径**）。
 
-两条口径：
+只有认证口径：``saveMarks`` 里才有**玩家自建的结构**（滑索、暗管、供电桩、
+中继器…），而 ``saveMarks`` 只在带账号凭证的请求里才有值。认证链路：
+content → HG grant → oauth code → dId → cred/token → 带签名请求。
 
-- **公开**：三个端点都无需鉴权，只拿得到 `marks`（地图上固定的采集物、怪种等）。
-- **认证**：`saveMarks` 里才有**玩家自建的结构**（滑索、暗管、供电桩、中继器…），
-  而 `saveMarks` 只在带账号凭证的请求里才有值。认证链路：
-  content → HG grant → oauth code → dId → cred/token → 带签名请求。
+匿名口径（免鉴权、只拿得到 ``marks``）已于 2026-09-13 按用户要求**整体退场**：
+产出目录 ``assets/items/map/``、``fetch_public``、``scripts/fetch_endfield_map_marks.py``
+都已删除，读取端也只认 ``assets/items/map_auth/``。别再往公开口径上加东西。
 
-本模块是**唯一实现**：命令行（``scripts/fetch_endfield_map_marks*.py``）和网页
+本模块是**唯一实现**：命令行（``scripts/fetch_endfield_marks_auth.py``）和网页
 （``POST /api/marks/fetch``）都调它，免得两边各写一遍再慢慢漂移。
 
 凭证：认证口径需要 `hg/check` 响应里的 ``data.content``。按用户要求，它**只从
@@ -39,15 +40,13 @@ ORIGIN = "https://game.skland.com"
 REFERER = "https://game.skland.com/map/endfield"
 UA = "Mozilla/5.0 ok-ef map dump script"
 
-#: 公开脚本会排除这两项（场景装饰，不是可拾取物品）；认证口径默认**不排除**，
-#: 因为滑索架正是要抓的东西
+#: ``--exclude-slacklines`` 排除的项（滑索架是场景装饰，不是可拾取物品）。
+#: **默认不排除**——滑索架正是认证口径要抓的玩家自建结构之一。
 SLACKLINE_MARKS = {"长距滑索架", "滑索架"}
 
 #: structures.json 只收这个主类下的子类（滑索/暗管/供电设备…）
 STRUCTURE_MAIN_TYPE = "工业设施"
 
-#: 未鉴权的三个端点
-PUBLIC_BASE = API_HOST
 TIMEOUT = 30
 
 Log = Callable[[str], None]
@@ -61,16 +60,10 @@ def _noop(_msg: str) -> None:
 # 输出位置
 # =========================================================
 
-def marks_dir(assets_root: Path) -> Path:
-    """公开口径产物目录：<assets>/items/map"""
-    return Path(assets_root) / "items" / "map"
-
-
 def marks_auth_dir(assets_root: Path) -> Path:
-    """认证口径产物目录：<assets>/items/map_auth。
+    """标记产物目录：<assets>/items/map_auth。
 
-    **刻意与公开口径分开**：认证口径默认不排除滑索架，写进公开目录会破坏
-    两个仓库约定的格式一致。
+    公开口径退场后这是**唯一**的标记数据目录，读取端只认它（见 load_map_markers）。
     """
     return Path(assets_root) / "items" / "map_auth"
 
@@ -208,16 +201,6 @@ def _open_json(req: request.Request):
     return json.loads(text) if text else None
 
 
-def _get_json(path: str) -> Any:
-    """匿名 GET（公开口径用）。"""
-    req = request.Request(API_HOST + path, headers={
-        "User-Agent": "Mozilla/5.0",
-        "Referer": REFERER,
-        "Origin": ORIGIN,
-    })
-    return _open_json(req)
-
-
 def _post_json(url: str, payload: dict, headers: dict | None = None) -> Any:
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     h = {
@@ -281,106 +264,6 @@ def _freeze_points(points: dict) -> dict:
 def _write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-# =========================================================
-# 公开口径
-# =========================================================
-
-def fetch_public(out_dir: Path, log: Log = _noop) -> dict:
-    """抓公开标记，写 summary.json / item_names.json / template_catalog.json。
-
-    只按 mapId 查：实测 mapId 一次就覆盖该地图所有 level，逐 level 再查是纯冗余。
-    """
-    out_dir = Path(out_dir)
-    log("GET /map/tree")
-    tree = _get_json("/web/v1/game/endfield/map/tree")
-    requests_made = 1
-
-    all_maps: dict = defaultdict(lambda: defaultdict(dict))
-    points: dict = defaultdict(list)
-    icon_entries: list = []
-    names: set = set()
-    tid_name: dict = {}
-    dupes = 0
-
-    for game_map in (tree.get("data") or {}).get("maps") or []:
-        map_id = game_map.get("id")
-        if not map_id:
-            continue
-        path = "/web/v1/game/endfield/map/mark/list?" + parse.urlencode({"mapId": map_id})
-        log(f"GET {path}")
-        data = (_get_json(path) or {}).get("data") or {}
-        requests_made += 1
-
-        templates = {t["id"]: t for t in data.get("markTemplates") or []}
-        for tid, t in templates.items():
-            n = (t.get("name") or "").strip()
-            if n:
-                tid_name.setdefault(tid, n)
-            pic = (t.get("pic") or "").strip()
-            if pic and n:
-                icon_entries.append((tid, n, pic))
-        tmap = {tid: (t.get("name") or "").strip() for tid, t in templates.items()}
-        names.update(n for n in tmap.values() if n and n not in SLACKLINE_MARKS)
-
-        def add(mark: dict, _tmap=tmap, _map_id=map_id) -> None:
-            nonlocal dupes
-            tid = mark.get("templateId")
-            name = _tmap.get(tid)
-            if not name or name in SLACKLINE_MARKS:
-                return
-            pos = mark.get("pos")
-            if not isinstance(pos, dict):
-                return
-            x, y, z = pos.get("x"), pos.get("y"), pos.get("z")
-            if None in (x, y, z):
-                return
-            mid = mark.get("mapId") or _map_id
-            bucket = all_maps[mid][name]
-            if (x, y, z) in bucket:
-                dupes += 1
-            bucket[(x, y, z)] = {"x": x, "y": y, "z": z}
-            # 另存一份带 templateId 的点位：summary.json 按物品名存，丢了
-            # templateId，前端就没法据此找图标
-            points[mid].append({"t": tid, "x": x, "y": y, "z": z})
-
-        for mark in data.get("marks") or []:
-            add(mark)
-        for mark in data.get("saveMarks") or []:
-            add(mark)
-
-    log("GET /map/catalog")
-    catalog = _get_json("/web/v1/game/endfield/map/catalog") or {}
-    requests_made += 1
-    struct = _parse_catalog(catalog)
-    for tid, item in struct.items():
-        if tid in tid_name:
-            item["name"] = tid_name[tid]
-
-    summary = _freeze(all_maps)
-    _write_json(out_dir / "summary.json", summary)
-    _write_json(out_dir / "item_names.json", sorted(names))
-    _write_json(out_dir / "points.json", _freeze_points(points))
-
-    log("下载图标…")
-    tid_file = download_icons(merge_icon_sources(struct, icon_entries),
-                              icons_dir(out_dir.parent.parent), log)
-    for tid, item in struct.items():
-        item["icon"] = tid_file.get(tid, "")
-    _write_json(out_dir / "template_catalog.json", struct)
-
-    return {
-        "kind": "public",
-        "out_dir": str(out_dir),
-        "requests": requests_made,
-        "maps": len(summary),
-        "items": len(names),
-        "points": sum(len(v) for g in summary.values() for v in g.values()),
-        "duplicates": dupes,
-        "icons": len(tid_file),
-        "files": ["summary.json", "item_names.json", "template_catalog.json", "points.json"],
-    }
 
 
 # =========================================================
@@ -564,7 +447,8 @@ def fetch_auth(out_dir: Path, content: str, log: Log = _noop,
                raw_dir: Path | None = None) -> dict:
     """抓认证标记（含玩家自建的滑索/暗管），写 summary/item_names/structures.json。
 
-    默认**不排除**任何标记；``exclude_slacklines=True`` 恢复公开口径的排除。
+    默认**不排除**任何标记；``exclude_slacklines=True`` 才把
+    :data:`SLACKLINE_MARKS` 里的场景装饰滤掉。
     """
     out_dir = Path(out_dir)
     exclude = SLACKLINE_MARKS if exclude_slacklines else set()
@@ -731,38 +615,34 @@ def validate(stats: dict, summary: dict, old_summary: dict | None,
 def load_map_markers(assets_root: Path, map_id: str) -> dict:
     """给前端画地图用：某张图的全部点位 + templateId 元信息。
 
-    合并**公开与认证**两份 points.json——认证那份才含玩家自建结构。两份会大量
-    重叠（认证口径是公开口径的超集），所以按 (templateId, x, y, z) 去重。
+    **只读认证口径**（``assets/items/map_auth/``）——公开口径已于 2026-09-13
+    整体退场，不再合并任何公开数据。
+
+    同一个 (templateId, x, y, z) 仍要去重：账号下有多个终末地角色时会对每个角色
+    各查一遍，同一张图的点位会重复进来。
     """
-    assets_root = Path(assets_root)
+    d = marks_auth_dir(Path(assets_root))
     templates: dict = {}
+    catalog = load_json(d / "template_catalog.json")
+    if isinstance(catalog, dict):
+        for tid, info in catalog.items():
+            templates[tid] = {
+                "n": info.get("name"),
+                "m": info.get("mainType"),
+                "s": info.get("subType"),
+                # 图标文件名（中文名.png）；空串表示没有图标，前端画圆点
+                "icon": info.get("icon") or "",
+            }
     seen: set = set()
     pts: list = []
-    for d in (marks_dir(assets_root), marks_auth_dir(assets_root)):
-        catalog = load_json(d / "template_catalog.json")
-        if isinstance(catalog, dict):
-            for tid, info in catalog.items():
-                # **认证口径放后面并覆盖**：它的名字来自认证 markTemplates 里的具体
-                # 物品名（「供电桩」），而公开口径只能拿到 catalog 的子类名，那是个
-                # **类别**（「供电设备」）。实测 13 个 templateId 两边不一致
-                # （供电设备/供电桩、滑索/长距滑索架、暗管/暗管入口…），
-                # 用错就会把供电桩画成供电设备的图标。
-                templates[tid] = {
-                    "n": info.get("name"),
-                    "m": info.get("mainType"),
-                    "s": info.get("subType"),
-                    # 图标文件名（中文名.png）；空串表示没有图标，前端画圆点
-                    "icon": info.get("icon") or "",
-                }
-        data = load_json(d / "points.json")
-        if isinstance(data, dict):
-            for p in data.get(map_id) or []:
-                key = (p.get("t"), p.get("x"), p.get("y"), p.get("z"))
-                if key in seen:
-                    continue
-                seen.add(key)
-                pts.append([p.get("t"), p.get("x"), p.get("y"), p.get("z")])
-
+    data = load_json(d / "points.json")
+    if isinstance(data, dict):
+        for p in data.get(map_id) or []:
+            key = (p.get("t"), p.get("x"), p.get("y"), p.get("z"))
+            if key in seen:
+                continue
+            seen.add(key)
+            pts.append([p.get("t"), p.get("x"), p.get("y"), p.get("z")])
     pts.sort(key=lambda r: (r[1], r[2], r[3]))
     return {"map": map_id, "templates": templates, "points": pts}
 

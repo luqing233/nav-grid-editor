@@ -97,7 +97,7 @@ GRID_STATES = frozenset((CELL_UNKNOWN, CELL_FREE, CELL_BLOCKED))
 # 采集/编辑**产物**统一收在 assets/ 下，根目录只留源码与"凭证类"目录：
 #   assets/tiles/              瓦片数据（latest / run_* 会话 / maps 总图）
 #   assets/grids2d/            2D 导航网格 npz
-#   assets/items/map*/         地图标记数据
+#   assets/items/map_auth/     地图标记数据（只此一份，公开口径已退场）
 #   browser_profile/           Playwright 持久化登录配置（是登录态，不是产物）
 #   configs/                   数美 dId 缓存（是设备标识，不是产物）
 # browser_profile/ 与 configs/ 刻意留在 assets/ 外面：assets 语义上是"要分发的
@@ -618,7 +618,7 @@ class MapService:
         self._simulate: dict | None = None
         self._simulation_cancel = threading.Event()
         self._sim_tiles: dict[tuple[int, int], bytes] = {}  # 模拟瓦片（内存）
-        # 地图标记抓取（公开/认证口径）：{"kind","running","stats","error"}
+        # 地图标记抓取（认证口径）：{"running","stats","error"}
         self._marks: dict | None = None
         self._marks_thread: threading.Thread | None = None
 
@@ -1159,10 +1159,11 @@ class MapService:
             self.bus.emit(type="log", text=f"模拟抓取结束，共 {n} 张瓦片（未写盘）")
 
     # =========================================================
-    # 地图标记抓取（公开口径 / 认证口径）
+    # 地图标记抓取（只走认证口径）
     # =========================================================
-    # 与命令行 scripts/fetch_endfield_marks*.py 共用 nav_grid_editor.marks，
+    # 与命令行 scripts/fetch_endfield_marks_auth.py 共用 nav_grid_editor.marks，
     # 网页只是换个触发方式，产出与统计口径完全一致。
+    # 公开口径已于 2026-09-13 整体退场（见 marks.py 模块头）。
 
     def marks_status(self) -> dict:
         """给前端的状态快照（含凭证文件是否就位，便于提示）。"""
@@ -1170,68 +1171,59 @@ class MapService:
         return {
             "running": bool(self._marks and self._marks.get("running")),
             "has_thread": self._marks_thread is not None and self._marks_thread.is_alive(),
-            "kind": self._marks.get("kind") if self._marks else None,
             "stats": self._marks.get("stats") if self._marks else None,
             "error": self._marks.get("error") if self._marks else None,
             "credential_file": str(p),
             "credential_ready": bool(marks_mod.read_hg_content()),
-            "public_dir": str(marks_mod.marks_dir(default_assets_dir(self.data_root))),
-            "auth_dir": str(marks_mod.marks_auth_dir(default_assets_dir(self.data_root))),
+            "data_dir": str(marks_mod.marks_auth_dir(default_assets_dir(self.data_root))),
         }
 
-    def start_marks(self, kind: str) -> dict:
-        """kind: "public"（免鉴权）或 "auth"（用本地凭证文件，含玩家自建结构）。"""
-        if kind not in ("public", "auth"):
-            return {"ok": False, "error": f"未知口径: {kind!r}（应为 public 或 auth）"}
+    def start_marks(self) -> dict:
+        """抓认证标记（含玩家自建的滑索/暗管/供电桩等）。"""
         with self._lock:
             if self._marks_thread and self._marks_thread.is_alive():
                 return {"ok": False, "error": "标记抓取已在运行中"}
-            if kind == "auth" and not marks_mod.read_hg_content():
+            if not marks_mod.read_hg_content():
                 p = marks_mod.hg_content_path()
                 return {"ok": False,
                         "error": f"找不到凭证：请把 hg/check 响应的 data.content 粘到 {p} "
                                  "（该文件已 gitignore）"}
-            self._marks = {"kind": kind, "running": True, "stats": None, "error": None}
+            self._marks = {"running": True, "stats": None, "error": None}
             self._marks_thread = threading.Thread(
-                target=self._marks_run, args=(kind,), name=f"marks-{kind}", daemon=True)
+                target=self._marks_run, name="marks-auth", daemon=True)
             self._marks_thread.start()
-        self.bus.emit(type="marks_start", kind=kind)
+        self.bus.emit(type="marks_start")
         self.bus.emit(type="log",
-                      text="开始抓取地图标记（" + ("认证口径，含玩家自建结构" if kind == "auth" else "公开口径")
-                           + "）")
-        return {"ok": True, "kind": kind}
+                      text="开始抓取地图标记（认证口径，含玩家自建结构）")
+        return {"ok": True}
 
-    def _marks_run(self, kind: str):
+    def _marks_run(self):
         def log(msg: str):
             _log(f"[marks] {msg}")
             self.bus.emit(type="log", text=msg)
 
         assets = default_assets_dir(self.data_root)
         try:
-            if kind == "public":
-                stats = marks_mod.fetch_public(marks_mod.marks_dir(assets), log=log)
-                warnings = []
-            else:
-                content = marks_mod.read_hg_content()
-                if not content:
-                    raise RuntimeError("凭证文件为空或读不到")
-                stats = marks_mod.fetch_auth(marks_mod.marks_auth_dir(assets),
-                                               content, log=log)
-                warnings = marks_mod.validate(
-                    stats,
-                    marks_mod.load_json(marks_mod.marks_auth_dir(assets) / "summary.json") or {},
-                    None,
-                )
-            self._marks = {"kind": kind, "running": False, "stats": stats,
+            content = marks_mod.read_hg_content()
+            if not content:
+                raise RuntimeError("凭证文件为空或读不到")
+            stats = marks_mod.fetch_auth(marks_mod.marks_auth_dir(assets),
+                                         content, log=log)
+            warnings = marks_mod.validate(
+                stats,
+                marks_mod.load_json(marks_mod.marks_auth_dir(assets) / "summary.json") or {},
+                None,
+            )
+            self._marks = {"running": False, "stats": stats,
                            "error": None, "warnings": warnings}
-            self.bus.emit(type="marks_done", kind=kind, stats=stats, warnings=warnings)
+            self.bus.emit(type="marks_done", stats=stats, warnings=warnings)
             self.bus.emit(type="log", text=f"标记抓取完成：{stats.get('maps')} 张图 / "
                                            f"{stats.get('items')} 个物品名 / "
                                            f"{stats.get('points')} 个点位")
         except Exception as e:  # noqa: BLE001 — 线程里必须兜住，否则前端只看到"运行中"
             _log(f"标记抓取失败: {e}")
-            self._marks = {"kind": kind, "running": False, "stats": None, "error": str(e)}
-            self.bus.emit(type="marks_done", kind=kind, stats=None, error=str(e))
+            self._marks = {"running": False, "stats": None, "error": str(e)}
+            self.bus.emit(type="marks_done", stats=None, error=str(e))
             self.bus.emit(type="log", text=f"标记抓取失败: {e}")
 
     # =========================================================
