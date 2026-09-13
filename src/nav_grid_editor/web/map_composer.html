@@ -399,16 +399,17 @@
       <span class="tb-act-hint">点击地图上的特征点，输入对应游戏坐标</span>
     </div>
     <div class="tb-act" data-mode="edit">
-      <button class="brushBtn on" data-brush="free">Free</button>
-      <button class="brushBtn" data-brush="blocked">Blocked</button>
-      <button class="brushBtn" data-brush="erase">未知</button>
+      <button class="brushBtn on" data-brush="free" title="左键涂成 Free（快捷键 1）">Free</button>
+      <button class="brushBtn" data-brush="blocked" title="左键涂成 Blocked（快捷键 2）">Blocked</button>
+      <button class="brushBtn" data-brush="erase" title="左键擦回未知（快捷键 3）">未知</button>
       <span>画笔 <input id="editBrush" type="number" min="1" max="50" value="1" title="画笔宽度（格子数，1=单格）"></span>
       <div class="tb-sep"></div>
       <span>选中 <b id="selCount" class="num">0</b> 格</span>
-      <button id="btnSelFree">填充 Free</button>
-      <button id="btnSelBlocked">填充 Blocked</button>
-      <button id="btnSelErase">填充未知</button>
-      <button id="btnSelClear">取消选择</button>
+      <button id="btnSelFree" title="把选中的格子填成 Free（快捷键 Enter）">填充 Free</button>
+      <button id="btnSelBlocked" title="把选中的格子填成 Blocked（快捷键 Enter）">填充 Blocked</button>
+      <button id="btnSelErase" title="把选中的格子擦成未知（快捷键 Enter）">填充未知</button>
+      <button id="btnSelClear" title="取消框选（快捷键 Esc）">取消选择</button>
+      <span class="tb-act-hint">1/2/3 选画笔 · Enter 用当前画笔填充选中</span>
     </div>
     <div class="tb-act" data-mode="pick">
       <span class="tb-act-hint">点击地图任意位置取坐标</span>
@@ -2654,10 +2655,31 @@ $("calibOk").onclick = submitCalibPoint;
 $("calibCancel").onclick = closeCalibDialog;
 $("calibX").addEventListener("keydown", (e) => { if (e.key === "Enter") submitCalibPoint(); });
 $("calibZ").addEventListener("keydown", (e) => { if (e.key === "Enter") submitCalibPoint(); });
+// 网格模式的快捷键。只在 edit 模式下生效，且正在输入框里打字时不抢键
+// （宽度输入框、控制点坐标框都要能正常输入数字）。
+const BRUSH_BY_KEY = { "1": "free", "2": "blocked", "3": "erase" };
+
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if ($("calibDlg").style.display === "block") closeCalibDialog();
     else if (edit.mode) clearSelection();
+    return;
+  }
+  if (!edit.mode) return;
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" ||
+            t.tagName === "SELECT" || t.isContentEditable)) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const brush = BRUSH_BY_KEY[e.key];
+  if (brush) { setBrush(brush); e.preventDefault(); return; }
+  // Enter = 用当前画笔填充选中。
+  // 焦点在按钮上时**直接交给浏览器**：它本来就会把 Enter 当成"点这个按钮"，
+  // 我们再填一次就会填两遍或填错填法。不靠 preventDefault 拦这个默认行为，
+  // 因为那属于浏览器实现细节，让它自己处理更稳。实际流程里也没影响——用户是
+  // 在画布上拖框之后才按 Enter，那时焦点已经不在按钮上了。
+  if (e.key === "Enter" && (!t || t.tagName !== "BUTTON")) {
+    e.preventDefault();
+    applySelection(edit.brush);
   }
 });
 $("btnCalibSave").onclick = saveCalib;
@@ -2666,11 +2688,14 @@ $("btnCalibClear").onclick = () => {
   $("calibStatus").textContent = "未标定（开标定模式后点击地图添加控制点）";
   renderCalibList(); renderCalibMarks();
 };
+// 画笔 = 左键涂什么，也决定"填充选中"填什么（快捷键 1/2/3 走同一个入口）
+function setBrush(name) {
+  edit.brush = name;
+  document.querySelectorAll(".brushBtn").forEach(x =>
+    x.classList.toggle("on", x.dataset.brush === name));
+}
 document.querySelectorAll(".brushBtn").forEach(b => {
-  b.onclick = () => {
-    edit.brush = b.dataset.brush;
-    document.querySelectorAll(".brushBtn").forEach(x => x.classList.toggle("on", x === b));
-  };
+  b.onclick = () => setBrush(b.dataset.brush);
 });
 $("btnEditLoad").onclick = () => loadGrid2D(true);
 $("btnEditSave").onclick = saveGrid2D;
