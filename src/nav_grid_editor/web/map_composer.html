@@ -1971,9 +1971,16 @@ async function doPick(e) {
 }
 
 // ---------------- 日志 / 统计 ----------------
+// 注意：正文必须按**文本**插入，不能用 innerHTML。服务端传来的错误串可能是
+// '<urlopen error ...>' 这种尖括号包起来的形状，当 HTML 解析会被浏览器整段吃掉，
+// 日志里只剩"标记抓取失败:"，把真正的原因吞掉（2026-09-13 排查 WAF 掐连接时踩到）。
 function addLog(text, cls) {
   const d = document.createElement("div");
-  d.innerHTML = '<span class="t-time">' + new Date().toLocaleTimeString() + '</span>' + text;
+  const ts = document.createElement("span");
+  ts.className = "t-time";
+  ts.textContent = new Date().toLocaleTimeString();
+  d.appendChild(ts);
+  d.appendChild(document.createTextNode(text));
   if (cls) d.className = cls;
   logBox.appendChild(d);
   while (logBox.children.length > 400) logBox.removeChild(logBox.firstChild);

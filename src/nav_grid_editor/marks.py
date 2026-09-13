@@ -198,6 +198,13 @@ def _open_json(req: request.Request):
     except error.HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")[:1000]
         raise RuntimeError(f"HTTP {e.code} {e.reason}: {body}") from e
+    except error.URLError as e:
+        # URLError 的 str() 形如 '<urlopen error ...>'，信息量低又容易被当成标签，
+        # 这里拆成一句人话。reason 实测常见的是 SSL: UNEXPECTED_EOF_WHILE_READING——
+        # skland 前面挂着阿里云 WAF，会在 TLS 层掐断连接；同一台机器同一个时刻
+        # curl（Windows 的 Schannel）能通而 Python 的 OpenSSL 被拒，是按 TLS
+        # 指纹识别，不是网络不通、也不是限流（重试无用）。
+        raise RuntimeError(f"连接 {req.host} 失败: {e.reason}") from e
     return json.loads(text) if text else None
 
 
