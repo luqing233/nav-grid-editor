@@ -47,6 +47,12 @@ SLACKLINE_MARKS = {"长距滑索架", "滑索架"}
 #: structures.json 只收这个主类下的子类（滑索/暗管/供电设备…）
 STRUCTURE_MAIN_TYPE = "工业设施"
 
+#: /map/catalog 没收录、只在 markTemplates 里出现的 templateId 归到这个大类。
+#: 实测 base01 的 14 个标记类型里有 13 个是这种情况（会客室/制造舱/战术训练/总控中枢…
+#: 这类基地设施），markTemplates 只给 {id, name, pic, desc, triggerDistance}，
+#: **没有分类字段**，所以真类别无从得知。
+UNCLASSIFIED_MAIN_TYPE = "未分类"
+
 TIMEOUT = 30
 
 Log = Callable[[str], None]
@@ -421,7 +427,8 @@ def _collect_level_queries(tree_resp: Any) -> list[dict]:
 def _parse_catalog(catalog_resp: Any) -> dict:
     """catalog 响应 → ``{templateId: {name, mainType, subType, pic}}``。
 
-    公开与认证两条口径都用它，免得各自解析一遍。
+    注意它**不是** templateId 的全集：只在 markTemplates 出现的 id 这里没有，
+    fetch_auth 会另外补一条「未分类」进去（见那里的注释）。
     """
     out: dict = {}
     for mt in ((catalog_resp or {}).get("data") or {}).get("mainTypes") or []:
@@ -559,6 +566,22 @@ def fetch_auth(out_dir: Path, content: str, log: Log = _noop,
         if tid in tid_name:
             item["name"] = tid_name[tid]
         item["icon"] = tid_file.get(tid, "")
+    # /map/catalog 并没有覆盖 markTemplates 的全部 templateId：实测 base01 的 14 个
+    # 标记类型里 13 个只在 markTemplates 出现（会客室/制造舱/战术训练/总控中枢…这类
+    # 基地设施）。不补进来的话，点位收到了、catalog 里查不到，前端 drawMarkers 的
+    # `if (!info) continue` 会直接跳过——**点位收了、地图上不画**（base01 16 个点里
+    # 只有 2 个出得来）。真类别只有 /map/catalog 有而它没收，所以归「未分类」。
+    tid_pic = {tid: url for tid, _n, url in icon_entries}
+    for tid, name in tid_name.items():
+        if tid in auth_catalog:
+            continue
+        auth_catalog[tid] = {
+            "name": name,
+            "mainType": UNCLASSIFIED_MAIN_TYPE,
+            "subType": name,
+            "pic": tid_pic.get(tid, ""),
+            "icon": tid_file.get(tid, ""),
+        }
     _write_json(out_dir / "template_catalog.json", auth_catalog)
 
     return {
