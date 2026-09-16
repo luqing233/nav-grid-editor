@@ -1,172 +1,188 @@
-# 终末地地图采集 / 标定 / 网格编辑工具
+# 终末地地图采集、标定与 2D 网格编辑
 
-独立的本地网页工具：地图瓦片实时采集、拼合总图、像素↔游戏坐标标定、
-2D 无高度网格编辑、路径标记、取坐标。
+本地部署的地图工具，面向终末地地图数据采集与导航网格制作。提供瓦片抓取、
+总图合成、像素与世界坐标标定、路径标记、坐标读取和 2D 无高度网格编辑能力。
 
-## 使用方法
+项目主要面向 Windows。所有运行数据均保存在本地，Web 服务默认仅监听
+`127.0.0.1`。
 
-在项目目录下启动，任选一种：
+## 快速开始
 
-```powershell
-uv run nav-grid-editor                 # 推荐：uv 自动同步依赖后启动
-.venv\Scripts\nav-grid-editor.exe      # 已经 uv sync 过的话，直接双击/运行也行
-.venv\Scripts\activate                 # 或者先激活虚拟环境
-nav-grid-editor
-```
+### 环境要求
 
-启动后浏览器打开 <http://127.0.0.1:8765>（自动跳转到 `/map`）。
-
-> 本项目的 Python 只装在 `.venv/` 里，没有写进系统 PATH，所以 `python main.py`
-> 这类命令是跑不起来的；请用上面三种方式之一。
-
-> 数据根目录默认取**当前工作目录**，所以请在项目目录里启动。采集/编辑**产物**
-> 统一收在根目录下的 `assets/`（`assets/tiles/`、`assets/grids2d/`、
-> `assets/items/`）；`browser_profile/`（登录态）与 `configs/`（设备ID）是凭证类
-> 目录，刻意留在 `assets/` 外面。换数据根目录用 `--data-root` 或环境变量
-> `NAV_DATA_ROOT`。
-
-常用参数：
+- Python 3.12 或更高版本
+- [uv](https://docs.astral.sh/uv/)
+- Windows 桌面环境，用于 Playwright 持久化浏览器
+- 首次抓取前安装 Playwright Chromium
 
 ```powershell
-nav-grid-editor --port 8765 --data-root D:/some/data-root
-nav-grid-editor --grid2d-dir D:/some/path/grids   # 只改 2D 网格目录（NAV_GRID2D_DIR）
+git clone https://github.com/luqing233/nav-grid-editor.git
+cd nav-grid-editor
+
+uv sync
+uv run playwright install chromium
+uv run nav-grid-editor
 ```
 
-> **2D 网格以稠密 npz 落盘**，文件名 `<地图>_<zoom>.grid.npz`（如 `base01_4.grid.npz`），
-> 就是 ok-end-field 导航规划的运行时格式，可被它直接读取。
-> `origin` / `cell_size` 都内嵌在文件的 `meta` 里，保存时按「原数组范围 ∪ 已涂格子范围」
-> 确定（新建网格才退回已涂格子的边界盒），不需要外部坐标基准文件。
+启动后访问：
 
-## 代码结构
+<http://127.0.0.1:8765>
 
-```text
-nav-grid-editor/
-├── pyproject.toml           打包 / 依赖 / 入口（唯一事实来源）
-├── README.md
-├── src/nav_grid_editor/
-│   ├── cli.py               唯一入口：nav-grid-editor / python -m nav_grid_editor
-│   ├── api/
-│   │   └── app.py           HTTP 层：FastAPI 应用与全部路由
-│   ├── commands/
-│   │   └── fetch_marks.py   命令行抓取地图标记
-│   ├── services/
-│   │   ├── maps/            瓦片、事件、网格、标定与服务编排
-│   │   └── marks.py         地图标记抓取与校验
-│   ├── integrations/smsdk/  设备 ID、指纹与 SMSdk 运行资源
-│   └── web/
-│       ├── map_composer.html  页面结构
-│       └── static/            CSS / JavaScript 静态资源
-├── tests/                   回归测试（unittest）
-├── assets/                  运行数据
-│   ├── grids2d/             2D 网格，随仓库发布
-│   ├── tiles/maps/          拼接总图与标定，随仓库发布
-│   ├── tiles/latest|run_*/  瓦片缓存与抓取会话，仅保留本地
-│   └── items/               地图标记与图标缓存，仅保留本地
-└── browser_profile/         Playwright 登录配置（登录态，不进 assets/）
+根路径会自动跳转到 `/map`。
+
+### 常用参数
+
+| 参数 | 说明 |
+| --- | --- |
+| `--port` | HTTP 服务端口，默认 `8765` |
+| `--data-root` | 数据根目录，默认当前工作目录 |
+| `--tiles-root` | 瓦片目录，默认 `<data-root>/assets/tiles` |
+| `--profile-dir` | Playwright 登录态目录，默认 `<data-root>/browser_profile` |
+| `--grid2d-dir` | 2D 网格输出目录，默认 `<data-root>/assets/grids2d` |
+
+示例：
+
+```powershell
+uv run nav-grid-editor --port 8765 --data-root D:/nav-data
+uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 ```
 
-依赖方向保持单向：`cli -> api -> services -> integrations`。`services` 不依赖
-FastAPI，页面通过 `/static/` 读取 CSS/JavaScript；认证资源只由 SMSdk 集成层访问。
+对应环境变量包括 `NAV_DATA_ROOT`、`NAV_TILES_ROOT`、`NAV_PROFILE_DIR`
+和 `NAV_GRID2D_DIR`。
+
+> 数据根目录默认取当前工作目录。建议始终在项目根目录启动，或显式传入
+> `--data-root`。
 
 ## 功能
 
-- **合成总图**：选择地图/zoom 后点击“合成总图”，已有的瓦片会实时刷新到画布上；
-  下拉框选择地图/zoom 会立即显示该地图；总图可用鼠标拖动平移、滚轮缩放（以光标为中心）、
-  双击/“适应窗口”按钮还原；下载总图取服务端保存的原始 PNG。
-  服务端同步保存到 `assets/tiles/maps/<地图>/<zoom>/<地图>_<zoom>.png`（同名覆盖只保留一份）。
-- **渲染方式（大图不卡的关键）**：画布只有一屏大小，永远只画“当前可见区域”。
-  打开地图先用服务端生成的缩略图打底（`/api/overview`，长边 ≤ 2048 的 WebP，
-  约一两百 KB），放大到能看清细节时才按需拉取可见范围内的瓦片；平移/缩放不重建
-  画布，也不会因为整图尺寸（例如 map02@4 是 10752×15872）而爆显存。
-  缩略图缓存在 `assets/tiles/maps/<地图>/<zoom>/<地图>_<zoom>.overview.webp`，可随时删除。
-  **它是“合成总图”时顺手生成的**——那时整张图已经在内存里，所以打开地图不用等；
-  只有在别处产生总图、或你手动删掉缩略图时，才会去解码那张几十 MB 的 PNG
-  （map02@4 冷生成约 4.6 秒，日志里会打出用时）。
-- **开始抓取**：用 Playwright 打开游戏地图页面（非无头模式下弹窗自动最大化、
-  页面自适应窗口大小），拦截瓦片请求并实时贴到画布上，新瓦片自动落盘到
-  `assets/tiles/run_<时间戳>/` 会话（已下载过的瓦片直接本地应答、不再请求网络，
-  每次抓取只抓取未下载过的），结束后自动合并到 `assets/tiles/latest`。
-  首次使用需在弹出的浏览器里登录一次，登录态保存在本项目 `browser_profile/` 下。
-- **模拟抓取**：不落盘、纯内存演示实时贴图效果，无需登录。
-- **地图标定（建立坐标系）**：点“◎ 标定”进入标定模式，点击地图上的特征点、
-  输入游戏坐标 X/Z（建议 ≥3 个、尽量分散），点“计算并保存标定”：
-  用仿射最小二乘 + RANSAC（剔除误点）算出 像素↔游戏坐标 映射，保存到
-  `assets/tiles/maps/<地图>/<zoom>/<地图>_<zoom>_mapping.json`（与控制点误差一起显示；
-  格式与 wsserver 的 map_calibrator 兼容，旧标定文件可直接识别）。
-- **玩家定位**：地图标定后，`POST /api/coords`（或 `ws://127.0.0.1:3001`）上报的
-  游戏坐标会实时换算成地图像素，画布上显示红色玩家标记（含坐标标签）。
-- **路径标记**：粘贴坐标串如 `(-97.2,6.0) -> (-91.2,6.0) -> ...`（括号坐标或 x,z 对
-  均可，自动忽略 `->` 和文字标签），点“标记路径”即在标定地图上画出折线路径：
-  起始点绿色、终点红色、途经点橙色带编号；每个地图的路径独立保存，清除按钮可移除。
-- **取坐标**：点“◎ 取坐标”后点击地图任意位置，立即显示该点的**游戏世界坐标 (x, z)**
-  和 2D 网格格子坐标 [格子X, 格子Z]（蓝色标记点带坐标标签）；未标定的地图显示像素坐标。
-- **网格编辑（2D，无高度）**：标定好的地图上点“✎ 编辑网格”，**左键点击/拖动放置
-  Free / Blocked / 未知格子**（画笔宽度可调 1~50 格；**Shift+左键拖动框选**矩形区域后
-  可批量填充，Esc 取消选择；右键拖动平移）。三态的含义（下游规划器就按这个理解）：
-  **Free = 确认可走**、**Blocked = 墙/不可通行**、**未知 = 没探过**。规划器把未知当作
-  “可冒险、代价更高”，所以**别**把未探区域刷成 Free（会穿墙），也**别**刷成 Blocked
-  （会无路可走）。画笔里的“未知”即**擦除**（把格子退回未探状态）。
-  编辑面板实时显示 Free / Blocked / 未知 的数量，并把**保存范围**用淡色加黄框画出来——
-  那就是保存后文件的真实范围（范围内未涂色的格子会被存成未知；跨度超过 400 万格会被
-  拒绝保存）。打开已有网格时保存范围取「文件里的原范围 ∪ 已涂格子范围」，只扩不缩，
-  未知边框不会被裁掉；涂到范围外会自动扩图。
-  **保存网格**写出稠密 `uint8` npz，命名 `<地图>_<zoom>.grid.npz`（如 `base01_4.grid.npz`），
-  固定落在 `assets/grids2d/`（`--grid2d-dir` / `NAV_GRID2D_DIR` 可改）。文件恰好两个成员：
-  `cells`（`(H, W)` 稠密数组，`0=未知 / 1=可走 / 2=阻挡`，**行对应世界 z、列对应世界 x**）
-  与 `meta`（内嵌 JSON，含 `origin`、`cell_size`、`magic`、`schema_version`）。
-  `origin` 是 `cells[0,0]` **最小角**的世界坐标；读取时的校验与 ok-end-field 的读方同级
-  （npz 成员集合、`cells` dtype、值域、`meta` 必须是字符串数组、`magic`/`schema_version`、
-  `axis_convention`），落盘前还会读回自检一次，所以写出的文件必然能被规划器读入。
-  因此**面板里显示的格子下标是相对保存范围最小角的**，不再是旧版的绝对网格索引。
-- 页面右侧有新增/更新/未变化统计与实时日志。
+- **地图抓取**：通过 Playwright 打开游戏地图页面，拦截瓦片请求并实时写入
+  浏览器画布。已存在的瓦片直接使用本地缓存；抓取结束后自动合并到
+  `assets/tiles/latest`。首次使用需要在弹出的浏览器中完成登录。
+- **模拟抓取**：在内存中生成瓦片并实时演示拼接过程，不写盘，也不需要登录。
+- **总图合成**：将当前地图与层级的所有瓦片合成为 PNG，保存到
+  `assets/tiles/maps/<地图>/<zoom>/<地图>_<zoom>.png`，同名文件覆盖。
+- **高性能渲染**：画布只绘制当前可见区域。打开地图时先加载长边不超过
+  2048 像素的缩略图，缩放后再按需加载瓦片，避免大图占用过量显存。
+- **地图标定**：在地图上选择特征点并输入游戏坐标 X/Z。系统使用仿射最小二乘
+  和 RANSAC 计算像素与世界坐标的映射，结果写入对应地图的
+  `<地图>_<zoom>_mapping.json`。
+- **玩家定位**：标定完成后，通过 `POST /api/coords` 或兼容的 WebSocket
+  中继发送世界坐标，网页会实时显示玩家位置。
+- **路径标记**：粘贴 `(x,z)` 坐标序列后生成路径折线。起点为绿色，终点为
+  红色，途经点显示编号。
+- **坐标读取**：点击地图即可查看游戏世界坐标，以及对应的 2D 网格格子坐标。
+- **地图标记**：支持抓取认证口径的官方地图标记，包括玩家自建结构。标记筛选
+  面板在浏览、网格和取坐标模式下可用，标定模式下隐藏。
+- **2D 网格编辑**：在已标定的地图上绘制 `Free`、`Blocked` 和未知格子。
+  支持画笔宽度、区域框选和批量填充。
+
+### 网格状态
+
+| 状态 | 值 | 含义 |
+| --- | ---: | --- |
+| 未知 | `0` | 尚未探索。下游规划通常将其视为高代价区域 |
+| Free | `1` | 已确认可通行 |
+| Blocked | `2` | 障碍或不可通行区域 |
+
+不要把未探索区域标记为 `Free`，也不建议将整个未知区域标记为 `Blocked`。
 
 ## 数据目录
 
 ```text
-nav-grid-editor/
-└── assets/
-    ├── tiles/
-    │   ├── latest/        最新合并瓦片，仅本地
-    │   ├── run_<时间戳>/  每次抓取会话，仅本地
-    │   └── maps/          拼接总图与标定，随仓库发布
-    ├── grids2d/           2D 网格，随仓库发布
-    └── items/             地图标记与图标，仅本地
+assets/
+├── grids2d/             2D 网格，随仓库发布
+├── tiles/
+│   ├── latest/          最新合并瓦片，仅本地
+│   ├── run_<时间戳>/    抓取会话，仅本地
+│   └── maps/            拼接总图与标定，随仓库发布
+└── items/               地图标记与图标，仅本地
 ```
 
-GitHub 仓库只跟踪 `assets/grids2d/` 和 `assets/tiles/maps/`。瓦片缓存、抓取会话、
-标记数据及缩略图缓存均保留在本机，不进入版本库。
+GitHub 仓库只跟踪以下内容：
 
-如需沿用旧 wsserver 工程的数据，把它的 `tiles` 文件夹内容拷入本项目 `assets/tiles/` 即可（目录结构一致，可直接识别）。
-也可用 `--tiles-root` / `--profile-dir`（或环境变量 `NAV_TILES_ROOT` / `NAV_PROFILE_DIR`）指定其他位置。
+- `assets/grids2d/`
+- `assets/tiles/maps/`
 
-> 抓取会话目录（`run_*`）只存本次**新增/变化**的瓦片：没变化的瓦片直接复用本地缓存、
-> 不重复写盘，所以它是增量而不是快照。合成总图、边界统计、`/tiles/...` 取图一律按
-> **所有目录的并集**处理，同一坐标以更新的为准（优先顺序：抓取中的会话 → `latest` →
-> 更早的会话 → 旧的扁平目录）。
+瓦片缓存、抓取会话、地图标记、图标和缩略图缓存均保留在本机。
+`browser_profile/` 与 `configs/` 包含登录态和设备标识，始终不会进入版本库。
 
-## 输出对接（下游消费）
+抓取会话目录是增量目录，不是完整快照。读取瓦片时，系统会合并抓取中的会话、
+`latest`、历史会话和旧版扁平目录；同一坐标以较新的来源为准。
 
-`assets/grids2d/<地图>_<zoom>.grid.npz` 就是 **ok-end-field 导航规划的运行时格式**，
-放到它期望的位置（默认 `assets/nav/`）即可直接使用，**不需要任何转换脚本**：
+## 2D 网格格式
+
+网格以稠密 `uint8` NPZ 保存，文件名为 `<地图>_<zoom>.grid.npz`。
+文件仅包含两个成员：
+
+| 成员 | 类型 | 说明 |
+| --- | --- | --- |
+| `cells` | `(H, W)` `uint8` | 行对应世界 z，列对应世界 x |
+| `meta` | JSON 字符串 | 标定原点、格子尺寸和格式版本 |
+
+`meta` 包含 `origin`、`cell_size`、`magic`、`schema_version` 和
+`axis_convention`。`origin` 表示 `cells[0,0]` 最小角的世界坐标。
+
+保存范围取“原数组范围与已涂格子范围的并集”，因此已有未知边框不会被裁掉。
+当前限制：
+
+- 单次编辑最多保存 `300,000` 个已涂格子。
+- 稠密数组跨度最多为 `64,000,000` 个格子。
+- 写入前会执行一次完整读回校验，校验失败时不会覆盖原文件。
+
+### 下游使用
+
+生成的网格可直接交由 ok-end-field 的导航模块读取：
 
 ```python
 from src.nav.grid_io import load_grid
+
 g = load_grid("assets/grids2d/map01_4.grid.npz")
 print(g.shape, g.counts(), g.extent())
 ```
 
-`load_grid` 会严格校验 `magic` / `schema_version` / 数组形状 / 值域 / `cell_size > 0`，
-不符就直接报错——所以本工具的产出**要么被正常读入，要么明确失败**，不会静默读出错位的网格。
-本工具导出前会自检同样的条件，因此正常保存的文件必然能读回。
+读取端会校验格式、版本、维度、值域和坐标参数。不符合规范的文件会明确报错，
+不会以未知格或错位坐标的形式静默载入。
 
-## 依赖安装（仅 Windows 上需要一次）
+## 命令行地图标记
+
+除网页操作外，也可以通过主命令抓取认证地图标记：
 
 ```powershell
-uv sync                        # 建 .venv、装依赖，并注册 nav-grid-editor 入口
-uv run playwright install chromium  # 首次需要：下载抓取用的 Chromium
-uv run nav-grid-editor         # 启动（等价于 .venv\Scripts\activate 后执行 nav-grid-editor）
-uv run nav-grid-editor fetch-marks --help  # 可选：命令行抓取地图标记
+uv run nav-grid-editor fetch-marks --help
+uv run nav-grid-editor fetch-marks --per-level
 ```
 
-用 pip 的话：`pip install -e .`（装依赖并注册入口；也可以直接用 `python -m nav_grid_editor`
-启动）。没有 playwright 时抓取按钮会提示错误，其他功能不受影响。
+默认读取 `configs/hg_content.txt`。该文件包含认证凭证，不会进入版本库。
+
+## 项目结构
+
+```text
+src/nav_grid_editor/
+├── cli.py                       命令入口
+├── api/
+│   └── app.py                   FastAPI 应用与路由
+├── commands/
+│   └── fetch_marks.py           命令行地图标记抓取
+├── services/
+│   ├── maps/                    瓦片、事件、网格、标定与服务编排
+│   └── marks.py                 地图标记抓取与校验
+├── integrations/smsdk/          设备 ID、指纹与 SMSdk 运行资源
+└── web/
+    ├── map_composer.html        页面结构
+    └── static/                  CSS 与 JavaScript
+```
+
+依赖方向为 `cli -> api -> services -> integrations`。服务层不依赖 FastAPI，
+浏览器资源由 `/static/` 提供。
+
+## 开发与测试
+
+```powershell
+uv sync --locked
+uv run python -m unittest discover -s tests -t . -v
+uv lock --check
+uv build
+```
+
+如果无法直接执行 `nav-grid-editor`，请使用 `uv run nav-grid-editor`，避免依赖
+系统 Python 或全局 PATH。
