@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from nav_grid_editor.map_service import (
+from nav_grid_editor.services.maps import (
     GRID_AXIS_CONVENTION,
     GRID_MAGIC,
     GRID_SCHEMA_VERSION,

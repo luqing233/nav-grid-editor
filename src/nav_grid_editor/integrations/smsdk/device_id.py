@@ -59,6 +59,8 @@ from pathlib import Path
 
 from websockets.sync.client import connect as ws_connect
 
+from ...paths import CONFIG_DIR
+
 
 def _ensure_dir_for_file(file_path) -> None:
     Path(file_path).parent.mkdir(parents=True, exist_ok=True)
@@ -72,9 +74,7 @@ def _write_json_file(file_path, data) -> None:
 
 
 #: dId 与注册载荷的缓存目录：仓库根下的 configs/（已 gitignore）。
-#: 原实现按**当前工作目录**解析（get_relative_path 用的是 cwd），这里改成按
-#: 本文件位置解析，这样从任何目录调用都落在同一个地方。
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs"
+#: 路径集中在 nav_grid_editor.paths 中，从任何目录调用都落在同一个地方。
 
 MAP_PAGE_URL = "https://game.skland.com/map/endfield"
 _DEVICEPROFILE_URL = "https://fp-it.portal101.cn/deviceprofile/v4"
@@ -222,7 +222,7 @@ def _find_node() -> str:
     return shutil.which("node") or ""
 
 
-_RUNNER_PATH = Path(__file__).with_name("smsdk_runner.mjs")
+_RUNNER_PATH = Path(__file__).with_name("resources") / "smsdk_runner.mjs"
 # 官方 SMSdk 脚本（skland-bbs 前端引用的公开静态资源），不随仓库分发，
 # 首次使用时下载到 configs/ 缓存（该目录已被 gitignore）。
 _SDK_JS_URL = "https://bbs.hycdn.cn/public/skland/others/skland-bbs/60e9c30fb0b1d1ca574c4522ca06fc7b.js"
@@ -539,7 +539,7 @@ def mint_device_id() -> str:
 
     def _mint_synthetic() -> str:
         # 延迟导入：cryptography 缺失时仅该路径不可用，不影响其余路径
-        from .map_device_fingerprint import mint_device_id_synthetic
+        from .fingerprint import mint_device_id_synthetic
 
         return mint_device_id_synthetic()
 

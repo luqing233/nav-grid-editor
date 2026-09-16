@@ -2,10 +2,12 @@
 
 模块划分：
 
-- :mod:`nav_grid_editor.map_service`  数据层：瓦片采集/合成、标定、2D 网格读写
-- :mod:`nav_grid_editor.server`       HTTP 层：全部路由
-- :mod:`nav_grid_editor.cli`          唯一入口：``nav-grid-editor`` / ``python -m nav_grid_editor``
-- :mod:`nav_grid_editor.web`          前端页面（``map_composer.html``）
+- :mod:`nav_grid_editor.api.app`                 HTTP 路由
+- :mod:`nav_grid_editor.services.maps`           瓦片、标定与 2D 网格
+- :mod:`nav_grid_editor.services.marks`          地图标记抓取
+- :mod:`nav_grid_editor.integrations.smsdk`      设备 ID 与数美 SMSdk
+- :mod:`nav_grid_editor.cli`                     命令入口
+- :mod:`nav_grid_editor.web`                     前端页面与静态资源
 """
 
 __version__ = "0.2.0"

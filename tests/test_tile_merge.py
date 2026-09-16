@@ -12,8 +12,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from nav_grid_editor import map_service
-from nav_grid_editor.map_service import (
+from nav_grid_editor.services import maps as map_service
+from nav_grid_editor.services.maps import service as map_service_impl
+from nav_grid_editor.services.maps import (
     FetchState,
     MapService,
     TileStore,
@@ -126,7 +127,7 @@ class ComposeRunRobustnessTest(unittest.TestCase):
 
         q = self.svc.bus.subscribe()
         try:
-            with mock.patch.object(map_service, "Image", BoomImage):
+            with mock.patch.object(map_service_impl, "Image", BoomImage):
                 self.svc._compose_run("m", "4", [(0, 0, p)], save=True)
         finally:
             events = []

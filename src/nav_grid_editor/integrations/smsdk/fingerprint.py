@@ -8,7 +8,7 @@
 # 注意：本项目若对外发布，需一并遵守 AGPL-3.0。
 # ---------------------------------------------------------------------------
 # ruff: noqa: UP009
-"""合成数美(SMSdk)设备指纹并注册，纯 Python 铸造地图 dId。
+"""合成数美 SMSdk 设备指纹并注册，纯 Python 铸造地图 dId。
 
 算法移植自 NoelZong/skland-auto-sign 的 SecuritySm 实现（经本地
 auto-checkin 工具实测可用，与本项目同 organization/公钥/端点）。

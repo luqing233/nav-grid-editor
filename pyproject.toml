@@ -9,17 +9,10 @@ description = "终末地地图瓦片采集/合成、像素↔世界标定、2D �
 readme = "README.md"
 requires-python = ">=3.12"
 # numpy: 网格以稠密 uint8 npz 落盘（np.savez_compressed）
-# pillow: WebP 瓦片转 PNG + 拼接总图落盘 + 缩略总图
-# playwright: 抓取游戏地图瓦片（还需执行 `playwright install chromium`）
-# websockets: 3001 端口坐标中继（兼容 wsserver/main.py 客户端，可选）
-# fastapi/uvicorn: HTTP 层。自带 HTTP/1.1 keep-alive（原来用 stdlib 得手工设
-#   protocol_version，否则 Chrome 每请求新开 socket、还要等约 300ms）
-# numpy: 网格以稠密 uint8 npz 落盘（np.savez_compressed）
-# pillow: WebP 瓦片转 PNG + 拼接总图落盘 + 缩略总图
-# playwright: 抓取游戏地图瓦片（还需执行 `playwright install chromium`）
-# websockets: 3001 端口坐标中继（兼容 wsserver/main.py 客户端，可选）
-# fastapi/uvicorn: HTTP 层。自带 HTTP/1.1 keep-alive（原来用 stdlib 得手工设
-#   protocol_version，否则 Chrome 每请求新开 socket、还要等约 300ms）
+# pillow: WebP 瓦片转 PNG、拼接总图、缩略图
+# playwright: 抓取游戏地图瓦片（还需 `uv run playwright install chromium`）
+# websockets: 3001 端口坐标中继（兼容 wsserver/main.py 客户端）
+# fastapi/uvicorn: HTTP 层，自带 HTTP/1.1 keep-alive
 # cryptography: 数美设备ID 的「合成指纹」铸造路径（缺了还能走另外三条回退链）
 dependencies = [
     "numpy==2.5.3",
@@ -40,7 +33,11 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# 前端页面随包分发（server.py 用 Path(__file__).parent / "web" 定位）；
-# smsdk_runner.mjs 由 map_device_id.py 用 Path(__file__).with_name 定位
+# 前端与设备认证运行资源随 wheel 分发。
 [tool.setuptools.package-data]
-nav_grid_editor = ["web/*.html", "smsdk_runner.mjs"]
+"nav_grid_editor" = [
+    "web/*.html",
+    "web/static/css/*.css",
+    "web/static/js/*.js",
+]
+"nav_grid_editor.integrations.smsdk" = ["resources/*.mjs"]

@@ -45,10 +45,17 @@ nav-grid-editor/
 ├── README.md
 ├── src/nav_grid_editor/
 │   ├── cli.py               唯一入口：nav-grid-editor / python -m nav_grid_editor
-│   ├── server.py            HTTP 层：全部路由 / 服务器类
-│   ├── map_service.py       地图瓦片采集/合成/标定/2D 网格服务
+│   ├── api/
+│   │   └── app.py           HTTP 层：FastAPI 应用与全部路由
+│   ├── commands/
+│   │   └── fetch_marks.py   命令行抓取地图标记
+│   ├── services/
+│   │   ├── maps/            瓦片、事件、网格、标定与服务编排
+│   │   └── marks.py         地图标记抓取与校验
+│   ├── integrations/smsdk/  设备 ID、指纹与 SMSdk 运行资源
 │   └── web/
-│       └── map_composer.html  全部功能页面（采集/合成/标定/网格编辑/路径/取坐标）
+│       ├── map_composer.html  页面结构
+│       └── static/            CSS / JavaScript 静态资源
 ├── tests/                   回归测试（unittest）
 ├── assets/                  全部采集/编辑产物
 │   ├── tiles/               瓦片数据（latest / run_* 会话 / maps 总图与标定）
@@ -56,6 +63,9 @@ nav-grid-editor/
 │   └── items/               地图标记（map_auth/ 认证口径唯一数据 + icons/ 图标缓存）
 └── browser_profile/         Playwright 登录配置（登录态，不进 assets/）
 ```
+
+依赖方向保持单向：`cli -> api -> services -> integrations`。`services` 不依赖
+FastAPI，页面通过 `/static/` 读取 CSS/JavaScript；认证资源只由 SMSdk 集成层访问。
 
 ## 功能
 
@@ -149,8 +159,9 @@ print(g.shape, g.counts(), g.extent())
 
 ```powershell
 uv sync                        # 建 .venv、装依赖，并注册 nav-grid-editor 入口
-playwright install chromium    # 首次需要：下载抓取用的 Chromium
+uv run playwright install chromium  # 首次需要：下载抓取用的 Chromium
 uv run nav-grid-editor         # 启动（等价于 .venv\Scripts\activate 后执行 nav-grid-editor）
+uv run nav-grid-editor fetch-marks --help  # 可选：命令行抓取地图标记
 ```
 
 用 pip 的话：`pip install -e .`（装依赖并注册入口；也可以直接用 `python -m nav_grid_editor`

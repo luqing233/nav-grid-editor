@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""HTTP 服务层：FastAPI 应用。
+"""HTTP API：FastAPI 应用与路由。
 
 - ``/map``  地图瓦片实时采集/合成 + 标定 + 网格编辑 + 路径标记 + 取坐标
 - ``/``     重定向到 ``/map``
-- 全部接口的数据层在 map_service.py
+- 全部接口的数据层在 services/maps/
 
 由 cli.py 创建 MapService 并赋给本模块的 ``service`` 后启动；
-测试里也可以直接对 ``server.app`` 起一个 uvicorn 实例来打。
+测试里也可以直接对这个 ``app`` 起一个 uvicorn 实例来打。
 
 为什么从 http.server 换成 FastAPI：
 - **HTTP/1.1 keep-alive 是 uvicorn 自带的**。原来用 stdlib 时必须手工设
@@ -30,14 +30,15 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
-from . import marks as marks_mod
-from .map_service import MapService, default_assets_dir
+from ..services import marks as marks_mod
+from ..services.maps import MapService, default_assets_dir
 
-BASE_DIR = Path(__file__).resolve().parent
+PACKAGE_DIR = Path(__file__).resolve().parents[1]
 HOST = "127.0.0.1"
 
-WEB_DIR = BASE_DIR / "web"
+WEB_DIR = PACKAGE_DIR / "web"
 COMPOSER_FILE = WEB_DIR / "map_composer.html"
 
 #: cli.py 中创建 MapService 后赋给它
@@ -46,7 +47,7 @@ service: MapService | None = None
 
 def _svc() -> MapService:
     if service is None:  # pragma: no cover - 配置错误，正常路径不会发生
-        raise RuntimeError("server.service 未初始化")
+        raise RuntimeError("api.app.service 未初始化")
     return service
 
 
@@ -119,6 +120,16 @@ async def _json_body(request: Request) -> tuple[dict, str | None]:
 # =========================================================
 
 app = FastAPI(title="nav-grid-editor", docs_url="/docs", redoc_url=None)
+app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
+
+
+@app.middleware("http")
+async def _static_cache_policy(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        # ETag 负责内容一致性；no-cache 表示允许缓存但每次先向本机服务重验。
+        response.headers.setdefault("Cache-Control", "private, no-cache")
+    return response
 
 
 @app.exception_handler(Exception)

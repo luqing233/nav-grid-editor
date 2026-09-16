@@ -10,7 +10,7 @@ content → HG grant → oauth code → dId → cred/token → 带签名请求�
 产出目录 ``assets/items/map/``、``fetch_public``、``scripts/fetch_endfield_map_marks.py``
 都已删除，读取端也只认 ``assets/items/map_auth/``。别再往公开口径上加东西。
 
-本模块是**唯一实现**：命令行（``scripts/fetch_endfield_marks_auth.py``）和网页
+本模块是**唯一实现**：命令行（``nav-grid-editor fetch-marks``）和网页
 （``POST /api/marks/fetch``）都调它，免得两边各写一遍再慢慢漂移。
 
 凭证：认证口径需要 `hg/check` 响应里的 ``data.content``。按用户要求，它**只从
@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib import error, parse, request
 
-from .map_device_id import CONFIG_DIR, ensure_map_device_id
+from ..integrations.smsdk.device_id import CONFIG_DIR, ensure_map_device_id
 
 API_HOST = "https://zonai.skland.com"
 HG_GRANT_URL = "https://as.hypergryph.com/user/oauth2/v2/grant"

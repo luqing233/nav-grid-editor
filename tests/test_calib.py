@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from nav_grid_editor.map_service import MapService
+from nav_grid_editor.services.maps import MapService
 
 
 def _pts(n=3):

@@ -23,8 +23,8 @@ from unittest import mock
 
 import uvicorn
 
-from nav_grid_editor import server
-from nav_grid_editor.map_service import MapService
+from nav_grid_editor.api import app as server
+from nav_grid_editor.services.maps import MapService
 
 
 class _ServerMixin:
@@ -172,6 +172,41 @@ class ConditionalGetTest(_ServerMixin, unittest.TestCase):
                                     headers={"If-None-Match": h1["ETag"]})
         self.assertEqual(st, 200, "内容变了却回了 304")
         self.assertEqual(body, b"different-bytes")
+
+
+class StaticAssetsTest(_ServerMixin, unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        d = Path(self._tmp.name)
+        self.svc = MapService(data_root=d, tiles_root=d / "tiles",
+                              profile_dir=d / "p", grid2d_dir=d / "grids")
+        self._start_server(self.svc)
+
+    def tearDown(self):
+        self._stop_server()
+        self._tmp.cleanup()
+
+    def test_page_references_split_assets(self):
+        status, body, _ = self._request("/map")
+        html = body.decode("utf-8")
+        self.assertEqual(status, 200)
+        self.assertIn("/static/css/map_composer.css", html)
+        self.assertIn("/static/js/map_composer.js", html)
+        self.assertNotIn("<style>", html)
+        self.assertNotIn("<script>", html)
+        self.assertIn('<script src="/static/js/map_composer.js" defer></script>', html)
+        self.assertIn('data-mode="browse edit pick"', html)
+
+    def test_css_and_javascript_are_served(self):
+        status, css, headers = self._request("/static/css/map_composer.css")
+        self.assertEqual(status, 200)
+        self.assertIn("text/css", headers.get_content_type())
+        self.assertIn("no-cache", headers.get("Cache-Control", ""))
+        self.assertIn(b":root", css)
+
+        status, js, _ = self._request("/static/js/map_composer.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"use strict", js)
 
 
 if __name__ == "__main__":

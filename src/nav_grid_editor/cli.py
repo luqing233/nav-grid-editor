@@ -5,6 +5,7 @@
 用法::
 
     nav-grid-editor [--port 8765] [--data-root PATH]
+    nav-grid-editor fetch-marks [抓取参数]
     python -m nav_grid_editor [同上]
 
 页面：
@@ -12,7 +13,7 @@
 - ``/``     自动重定向到 ``/map``
 - ``/map``  地图瓦片实时采集/合成 + 标定 + 2D 网格编辑 + 路径标记 + 取坐标
 
-地图接口（路由见 ``server.py``，数据层见 ``map_service.py``）：
+地图接口（路由见 ``api/app.py``，数据层见 ``services/maps/``）：
 
 - GET  /api/tilemaps                      列出瓦片库里的地图与 zoom
 - GET  /api/maps?map=&zoom=               已保存总图信息（供下拉框瞬时显示）
@@ -44,13 +45,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 import threading
 from pathlib import Path
 
-from . import map_service
-from . import server
-from .map_service import MapService
-from .server import HOST
+from .api import app as api_app
+from .api.app import HOST
+from .services import maps as map_service
+from .services.maps import MapService
 
 DEFAULT_PORT = 8765
 
@@ -107,10 +109,12 @@ def start_ws_relay(svc: MapService, port: int = 3001):
 
 # ---------------- 入口 ----------------
 
-def main(argv: list[str] | None = None) -> int:
+def _run_server(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="nav-grid-editor",
-        description="地图瓦片采集/合成 + 标定 + 2D 网格编辑 统一服务")
+        description="地图瓦片采集/合成 + 标定 + 2D 网格编辑 统一服务",
+        epilog="附加命令: nav-grid-editor fetch-marks（用账号凭证抓取地图标记）",
+    )
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--data-root", default="",
                     help="数据根目录（assets/ browser_profile/ configs/ 的父目录，"
@@ -130,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         grid2d_dir=Path(args.grid2d_dir) if args.grid2d_dir else None,
     )
     # 把服务实例挂到 server 模块，路由直接使用（与原来挂给 Handler 的用法一致）
-    server.service = svc
+    api_app.service = svc
 
     print(f"地图采集/编辑页面:       http://{HOST}:{args.port}/（自动跳转 /map）")
     print(f"数据根目录:              {svc.data_root}")
@@ -139,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"浏览器登录配置:          {svc.profile_dir}")
     if not map_service.PLAYWRIGHT_OK:
         print("提示: 未安装 playwright，抓取功能不可用"
-              "（pip install playwright && playwright install chromium）")
+              "（uv sync && uv run playwright install chromium）")
     if map_service.Image is None:
         print("提示: 未安装 Pillow，WebP 瓦片转换与总图落盘不可用")
 
@@ -153,11 +157,20 @@ def main(argv: list[str] | None = None) -> int:
 
     print("按 Ctrl+C 退出")
     try:
-        uvicorn.run(server.app, host=HOST, port=args.port,
+        uvicorn.run(api_app.app, host=HOST, port=args.port,
                     log_level="warning", access_log=False)
     except KeyboardInterrupt:
         print("\n已退出")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "fetch-marks":
+        from .commands.fetch_marks import main as fetch_marks_main
+
+        return fetch_marks_main(args[1:])
+    return _run_server(args)
 
 
 if __name__ == "__main__":
