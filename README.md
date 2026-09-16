@@ -57,10 +57,11 @@ nav-grid-editor/
 │       ├── map_composer.html  页面结构
 │       └── static/            CSS / JavaScript 静态资源
 ├── tests/                   回归测试（unittest）
-├── assets/                  全部采集/编辑产物
-│   ├── tiles/               瓦片数据（latest / run_* 会话 / maps 总图与标定）
-│   ├── grids2d/             2D 网格（无高度）输出目录，稠密 npz
-│   └── items/               地图标记（map_auth/ 认证口径唯一数据 + icons/ 图标缓存）
+├── assets/                  运行数据
+│   ├── grids2d/             2D 网格，随仓库发布
+│   ├── tiles/maps/          拼接总图与标定，随仓库发布
+│   ├── tiles/latest|run_*/  瓦片缓存与抓取会话，仅保留本地
+│   └── items/               地图标记与图标缓存，仅保留本地
 └── browser_profile/         Playwright 登录配置（登录态，不进 assets/）
 ```
 
@@ -124,13 +125,16 @@ FastAPI，页面通过 `/static/` 读取 CSS/JavaScript；认证资源只由 SMS
 ```text
 nav-grid-editor/
 └── assets/
-    ├── tiles/             瓦片数据
-    │   ├── latest/        最新合并瓦片（按 地图/zoom 分类）
-    │   ├── run_<时间戳>/  每次抓取会话
-    │   └── maps/          拼接总图与标定（按 地图/zoom 分类）
-    ├── grids2d/           2D 网格（无高度），base01_4.grid.npz 风格命名（稠密 uint8）
-    └── items/             地图标记（map_auth/ 认证口径唯一数据 + icons/ 图标缓存）
+    ├── tiles/
+    │   ├── latest/        最新合并瓦片，仅本地
+    │   ├── run_<时间戳>/  每次抓取会话，仅本地
+    │   └── maps/          拼接总图与标定，随仓库发布
+    ├── grids2d/           2D 网格，随仓库发布
+    └── items/             地图标记与图标，仅本地
 ```
+
+GitHub 仓库只跟踪 `assets/grids2d/` 和 `assets/tiles/maps/`。瓦片缓存、抓取会话、
+标记数据及缩略图缓存均保留在本机，不进入版本库。
 
 如需沿用旧 wsserver 工程的数据，把它的 `tiles` 文件夹内容拷入本项目 `assets/tiles/` 即可（目录结构一致，可直接识别）。
 也可用 `--tiles-root` / `--profile-dir`（或环境变量 `NAV_TILES_ROOT` / `NAV_PROFILE_DIR`）指定其他位置。

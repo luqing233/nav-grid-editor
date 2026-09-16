@@ -26,7 +26,15 @@ browser_profile/
 # 设备指纹与账号无关但属于本机标识，不进版本库（删掉会自动重新铸造）。
 configs/
 
-# 注意：assets/tiles/ 与 assets/grids2d/ 是采集与编辑产物（体积大但属于数据，
-# 不是缓存），默认**纳入**版本库。若要移出，取消下面两行的注释。
-# assets/tiles/
-# assets/grids2d/
+# 仅 2D 网格与拼接总图随项目发布；瓦片会话、标记和其他缓存保留在本地。
+assets/*
+!assets/grids2d/
+!assets/grids2d/**
+!assets/tiles/
+assets/tiles/*
+!assets/tiles/maps/
+!assets/tiles/maps/**
+
+# 缩略图是可重建缓存，即使位于 maps/ 下也不发布。
+assets/tiles/maps/**/*.overview.png
+assets/tiles/maps/**/*.overview.webp
