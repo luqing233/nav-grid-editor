@@ -28,6 +28,11 @@ const canvasWrap = $("canvasWrap");
 const canvasHolder = $("canvasHolder");
 const canvas = $("composeCanvas");
 
+function setStatus(text, state = "idle") {
+  $("statusText").textContent = text;
+  statusEl.dataset.state = state;
+}
+
 // ---------------- 视图管理 ----------------
 function viewKey(map, zoom) { return map + "@" + zoom; }
 
@@ -79,7 +84,7 @@ function setActive(key) {
   redrawActive();
   fitView();
   updateCurBar();
-  statusEl.textContent = "当前视图: " + key + "（拖动平移 · 滚轮缩放 · 双击适应）";
+  setStatus("当前视图: " + key + "（拖动平移 · 滚轮缩放 · 双击适应）", "ready");
   loadMappingForCurrent();
   updatePlayerMarker(null);
   hidePickMarker();
@@ -91,10 +96,17 @@ function setActive(key) {
 // 顶部信息条：实时显示当前拼接的地图名 / zoom / 瓦片数 / 坐标范围
 function updateCurBar() {
   const bar = (id, txt) => { $(id).textContent = txt; };
-  if (!state.activeKey) { bar("curMap", "-"); bar("curZoom", "-"); bar("curCount", "0"); bar("curX", "-"); bar("curY", "-"); return; }
+  if (!state.activeKey) {
+    bar("curMap", "-"); bar("curZoom", "-"); bar("curCount", "0");
+    bar("curX", "-"); bar("curY", "-"); bar("canvasViewLabel", "NO MAP");
+    bar("sideViewLabel", "-");
+    return;
+  }
   const [map, zoom] = state.activeKey.split("@");
   bar("curMap", map);
   bar("curZoom", zoom);
+  bar("canvasViewLabel", map + " / L" + zoom);
+  bar("sideViewLabel", map + " / L" + zoom);
   const v = state.views.get(state.activeKey);
   if (hasBounds(v)) {
     bar("curCount", v.pasted.size);
@@ -261,7 +273,7 @@ function render() {
   const v = state.views.get(state.activeKey);
 
   const g = layoutLayer(canvas, canvas.getContext("2d"), vis, s);
-  g.fillStyle = "#101018";
+  g.fillStyle = "#080808";
   g.fillRect(vis.x, vis.y, vis.w, vis.h);
 
   if (hasBounds(v)) {
@@ -306,7 +318,7 @@ function render() {
         for (const [x, y] of pending) requestTileBitmap(map, zoom, x, y);
       }
       // 瓦片接缝
-      g.strokeStyle = "rgba(120,140,180,0.12)";
+      g.strokeStyle = "rgba(150,165,185,0.045)";
       g.lineWidth = 1 / s;
       g.beginPath();
       for (let x = x0; x <= x1 + 1; x++) {
@@ -339,6 +351,7 @@ function render() {
 function applyView() {
   canvasHolder.style.transform =
     "translate(" + mapView.panX + "px," + mapView.panY + "px) scale(" + mapView.scale + ")";
+  updatePlayerMarker(lastPos);
   requestRender();
 }
 
@@ -439,6 +452,66 @@ const calib = {
   pendingPixel: null,
 };
 
+const calibHistory = { undo: [], redo: [] };
+
+function calibSnapshot() {
+  return {
+    points: calib.points.map(p => ({
+      pixel: [p.pixel[0], p.pixel[1]],
+      world: p.world ? [p.world[0], p.world[1]] : null,
+      enabled: !!p.enabled,
+      error: p.error,
+      inlier: p.inlier,
+    })),
+    mapping: calib.mapping ? JSON.parse(JSON.stringify(calib.mapping)) : null,
+  };
+}
+
+function pushCalibHistory() {
+  calibHistory.undo.push(calibSnapshot());
+  if (calibHistory.undo.length > 100) calibHistory.undo.shift();
+  calibHistory.redo.length = 0;
+}
+
+function applyCalibSnapshot(snapshot) {
+  calib.points = snapshot.points.map(p => ({
+    pixel: [p.pixel[0], p.pixel[1]],
+    world: p.world ? [p.world[0], p.world[1]] : null,
+    enabled: !!p.enabled,
+    error: p.error,
+    inlier: p.inlier,
+  }));
+  calib.mapping = snapshot.mapping ? JSON.parse(JSON.stringify(snapshot.mapping)) : null;
+  renderCalibList();
+  renderCalibMarks();
+  updatePlayerMarker(lastPos);
+  syncPathCanvas();
+}
+
+function undoCalibEdit() {
+  const snapshot = calibHistory.undo.pop();
+  if (!snapshot) {
+    setStatus("没有可撤销的标定操作", "idle");
+    return false;
+  }
+  calibHistory.redo.push(calibSnapshot());
+  applyCalibSnapshot(snapshot);
+  setStatus("已撤销标定操作", "ready");
+  return true;
+}
+
+function redoCalibEdit() {
+  const snapshot = calibHistory.redo.pop();
+  if (!snapshot) {
+    setStatus("没有可重做的标定操作", "idle");
+    return false;
+  }
+  calibHistory.undo.push(calibSnapshot());
+  applyCalibSnapshot(snapshot);
+  setStatus("已重做标定操作", "ready");
+  return true;
+}
+
 function renderCalibMarks() {
   canvasHolder.querySelectorAll(".calibMark, .calibNum").forEach(el => el.remove());
   // 定位点**只在标定模式显示**：浏览/网格/取坐标时它们会压在地图上挡视线
@@ -467,7 +540,12 @@ function renderCalibList() {
     row.className = "calibRow";
     const cb = document.createElement("input");
     cb.type = "checkbox"; cb.checked = !!p.enabled;
-    cb.onchange = () => { p.enabled = cb.checked; renderCalibMarks(); updateCalibSaveBtn(); };
+    cb.onchange = () => {
+      pushCalibHistory();
+      p.enabled = cb.checked;
+      renderCalibMarks();
+      updateCalibSaveBtn();
+    };
     const info = document.createElement("span");
     info.textContent = "#" + (i + 1) +
       " px(" + Math.round(p.pixel[0]) + "," + Math.round(p.pixel[1]) + ")" +
@@ -475,7 +553,13 @@ function renderCalibList() {
       (p.error != null ? " err " + p.error.toFixed(2) + (p.inlier === false ? " 离群" : "") : "");
     const del = document.createElement("button");
     del.className = "c-del"; del.textContent = "✕";
-    del.onclick = () => { calib.points.splice(i, 1); renderCalibList(); renderCalibMarks(); updateCalibSaveBtn(); };
+    del.onclick = () => {
+      pushCalibHistory();
+      calib.points.splice(i, 1);
+      renderCalibList();
+      renderCalibMarks();
+      updateCalibSaveBtn();
+    };
     row.appendChild(cb); row.appendChild(info); row.appendChild(del);
     box.appendChild(row);
   });
@@ -491,10 +575,10 @@ function updateCalibSaveBtn() {
 // 不引入 state.mode 这种会和既有标志漂移的新状态：模式一律从既有标志**派生**，
 // 所以指示器永远反映真实状态——比如未标定时进网格会被拒，指示器不会骗人。
 const MODES = {
-  browse: { label: "浏览",   color: "#6b7a99" },
-  calib:  { label: "标定",   color: "#ffcc33" },
-  edit:   { label: "网格",   color: "#33cc88" },
-  pick:   { label: "取坐标", color: "#33aaff" },
+  browse: { label: "浏览",   color: "#c3fd43" },
+  calib:  { label: "标定",   color: "#ffd56a" },
+  edit:   { label: "网格",   color: "#80f0a5" },
+  pick:   { label: "取坐标", color: "#74dcf5" },
 };
 
 function currentMode() {
@@ -508,7 +592,9 @@ function currentMode() {
 // 状态栏模式标签，以及那个统一的 --mode 颜色变量（行1 强调条 / 选中态 / 标签共用）。
 function syncModeChrome() {
   const m = currentMode();
+  const modeOrder = { browse: "01", calib: "02", edit: "03", pick: "04" };
   document.documentElement.style.setProperty("--mode", MODES[m].color);
+  document.body.dataset.mode = m;
 
   ["browse", "calib", "edit", "pick"].forEach(k => {
     const btn = $({ browse: "btnBrowse", calib: "btnCalib", edit: "btnEdit", pick: "btnPick" }[k]);
@@ -522,13 +608,27 @@ function syncModeChrome() {
   document.querySelectorAll(".tb-act").forEach(el => { el.hidden = !inMode(el); });
   document.querySelectorAll(".side-sec").forEach(el => { el.hidden = !inMode(el); });
   $("modeTag").textContent = MODES[m].label;
+  $("canvasModeLabel").textContent = MODES[m].label;
+  $("sideModeCode").textContent = modeOrder[m];
   $("sideModeLabel").textContent = MODES[m].label;
+  document.querySelectorAll(".rail-mode").forEach(btn => {
+    btn.classList.toggle("is-active", btn.dataset.railMode === m);
+  });
   requestRender();   // 编辑层只在 edit 模式画，切换后要重画
 }
 
 function setSidePanel(open) {
   document.body.classList.toggle("side-open", open);
+  document.body.classList.toggle("side-collapsed", !open);
+  document.body.classList.remove("side-closed");
   $("btnPanel").setAttribute("aria-expanded", String(open));
+  const toggle = $("btnSideToggle");
+  toggle.setAttribute("aria-label", open ? "收起检查器" : "展开检查器");
+  toggle.title = open ? "收起检查器" : "展开检查器";
+}
+
+function isSidePanelOpen() {
+  return !document.body.classList.contains("side-collapsed");
 }
 
 function setMode(name) {
@@ -555,9 +655,9 @@ function setCalibMode(on) {
   }
   calib.mode = on;
   canvasWrap.style.cursor = on ? "crosshair" : "";
-  statusEl.textContent = on
+  setStatus(on
     ? "标定模式：点击地图上的特征点 → 输入游戏坐标 X/Z；≥3 个点后点“计算并保存标定”"
-    : "已退出标定模式";
+    : "已退出标定模式", on ? "active" : "idle");
   renderCalibMarks();   // 定位点只在标定模式显示，进出都要重画
   syncModeChrome();
 }
@@ -586,8 +686,9 @@ function closeCalibDialog() {
 
 function submitCalibPoint() {
   const x = parseFloat($("calibX").value), z = parseFloat($("calibZ").value);
-  if (isNaN(x) || isNaN(z)) { statusEl.textContent = "请输入有效的游戏坐标 X/Z"; return; }
+  if (isNaN(x) || isNaN(z)) { setStatus("请输入有效的游戏坐标 X/Z", "warning"); return; }
   if (!calib.pendingPixel) return;
+  pushCalibHistory();
   calib.points.push({
     pixel: [calib.pendingPixel[0], calib.pendingPixel[1]],
     world: [x, z], enabled: true, error: null, inlier: null,
@@ -595,7 +696,7 @@ function submitCalibPoint() {
   calib.mapping = null;
   closeCalibDialog();
   renderCalibList(); renderCalibMarks();
-  statusEl.textContent = "已添加控制点 #" + calib.points.length + "（≥3 个后可计算保存）";
+  setStatus("已添加控制点 #" + calib.points.length + "（≥3 个后可计算保存）", "ready");
 }
 
 async function saveCalib() {
@@ -638,6 +739,8 @@ async function loadMappingForCurrent() {
   const [map, zoom] = (state.activeKey || "").split("@");
   const wantKey = state.activeKey;  // 请求期间用户可能又切走了
   calib.points = []; calib.mapping = null; calib.key = wantKey;
+  calibHistory.undo.length = 0;
+  calibHistory.redo.length = 0;
   closeCalibDialog();
   if (!map || !zoom) {
     $("calibStatus").textContent = "未标定（开标定模式后点击地图添加控制点）";
@@ -677,7 +780,7 @@ async function loadMappingForCurrent() {
   updateMarksHint();   // 标定状态决定标记能不能画
 }
 
-// 玩家定位：游戏坐标 (x,z) → 像素 → 画布红色标记
+// 玩家定位：游戏坐标 (x,z) → 地图像素 → 固定屏幕尺寸的十字准星
 let lastPos = null;
 function updatePlayerMarker(pos) {
   lastPos = pos || lastPos;
@@ -697,8 +800,17 @@ function updatePlayerMarker(pos) {
     mk.style.display = "none";  // 坐标明显在地图外
     return;
   }
-  mk.style.left = px + "px"; mk.style.top = py + "px";
-  mk.dataset.label = "(" + x.toFixed(1) + ", " + z.toFixed(1) + ")";
+  const screenX = px * mapView.scale + mapView.panX;
+  const screenY = py * mapView.scale + mapView.panY;
+  if (screenX < -24 || screenY < -24 ||
+      screenX > canvasWrap.clientWidth + 24 ||
+      screenY > canvasWrap.clientHeight + 24) {
+    mk.style.display = "none";
+    return;
+  }
+  mk.style.left = screenX + "px";
+  mk.style.top = screenY + "px";
+  $("playerMarkerLabel").textContent = "(" + x.toFixed(1) + ", " + z.toFixed(1) + ")";
   mk.style.display = "block";
 }
 
@@ -777,8 +889,8 @@ function drawCell(ix, iz) {
   if (editCanvasEl.width <= 1 || !calib.mapping) return;   // 未标定就没有像素↔格子换算
   const e = ed();
   const r = cellRectPxInto(ix, iz, _rectScratch);
-  ectx.fillStyle = e.blocked.has(editCellKey(ix, iz)) ? "rgba(255,85,85,0.55)"
-                                                       : "rgba(51,204,102,0.45)";
+  ectx.fillStyle = e.blocked.has(editCellKey(ix, iz)) ? "rgba(255,85,85,0.24)"
+                                                       : "rgba(5,212,210,0.22)";
   ectx.fillRect(r.x, r.y, Math.max(1, r.w + 1), Math.max(1, r.h + 1));
 }
 
@@ -850,7 +962,7 @@ function drawAllCells() {
   if (!bb) return;
   // 保存范围整块铺一层淡色（单次 fillRect，不逐格循环 —— 范围可能很大）
   const p = cellRangeRectPx(bb.x0, bb.z0, bb.x1 + 1, bb.z1 + 1);
-  ectx.fillStyle = "rgba(120,120,140,0.18)";
+  ectx.fillStyle = "rgba(120,120,140,0.055)";
   ectx.fillRect(p.x, p.y, p.w, p.h);
   if (e.bbox) {
     // 只画可见格子：开销跟"屏幕上能看到多少格"走，而不是跟整张网格（可能几万格）走
@@ -869,7 +981,7 @@ function drawAllCells() {
       for (const k of e.blocked) { drawCell(parseInt(k, 10), +k.slice(k.indexOf(",") + 1)); }
     }
   }
-  ectx.strokeStyle = "rgba(255,220,120,0.9)";
+  ectx.strokeStyle = "rgba(255,220,120,0.68)";
   ectx.lineWidth = 1 / mapView.scale;
   ectx.strokeRect(p.x, p.y, p.w, p.h);
 }
@@ -912,9 +1024,9 @@ function drawSelLayer() {
   const r = selRectOf();
   if (!r) return;
   const p = cellRangeRectPx(r.x0, r.z0, r.x1 + 1, r.z1 + 1);
-  sctx.fillStyle = "rgba(140,90,255,0.32)";
+  sctx.fillStyle = "rgba(140,90,255,0.18)";
   sctx.fillRect(p.x, p.y, p.w, p.h);
-  sctx.strokeStyle = "rgba(190,150,255,0.95)";
+  sctx.strokeStyle = "rgba(190,150,255,0.72)";
   sctx.lineWidth = 1;
   sctx.strokeRect(p.x + 0.5, p.y + 0.5, Math.max(0, p.w), Math.max(0, p.h));
 }
@@ -946,11 +1058,14 @@ function applySelection(brush) {
   const sel = v && v.edit && v.edit.selection;
   if (!sel || !sel.size) { addLog("没有选中的格子", "t-err"); return; }
   const e = v.edit;
+  beginEditTransaction(e);
   for (const k of sel) {
+    recordGridCellBefore(e, k);
     if (brush === "free") { e.blocked.delete(k); e.free.add(k); }
     else if (brush === "blocked") { e.free.delete(k); e.blocked.add(k); }
     else { e.free.delete(k); e.blocked.delete(k); }
   }
+  commitEditTransaction(e);
   edit.dirty = true;
   e.selRect = null;
   updateEditStats();
@@ -1008,10 +1123,131 @@ function syncEditCanvas() {
   requestRender();
 }
 
+// 网格编辑历史使用逐格差分，避免每个笔画复制整份 free/blocked 集合。
+// 一次拖动只在第一次碰到某格时记录旧状态，收笔时再一次性入栈。
+function gridCellState(e, key) {
+  return e.free.has(key) ? 1 : (e.blocked.has(key) ? 2 : 0);
+}
+
+function setGridCellState(e, key, value) {
+  e.free.delete(key);
+  e.blocked.delete(key);
+  if (value === 1) e.free.add(key);
+  else if (value === 2) e.blocked.add(key);
+}
+
+function gridMetaSnapshot(e) {
+  return {
+    origin: [e.origin[0], e.origin[1]],
+    shape: e.shape ? [e.shape[0], e.shape[1]] : null,
+    cellSize: e.cellSize,
+  };
+}
+
+function historyOf(e) {
+  if (!e.history) e.history = { undo: [], redo: [], active: null };
+  return e.history;
+}
+
+function beginEditTransaction(e, withMeta = false) {
+  const h = historyOf(e);
+  if (h.active) return;
+  h.active = {
+    cells: new Map(),
+    metaBefore: withMeta ? gridMetaSnapshot(e) : null,
+  };
+}
+
+function recordGridCellBefore(e, key) {
+  const h = historyOf(e);
+  if (!h.active) beginEditTransaction(e);
+  if (!h.active.cells.has(key)) {
+    h.active.cells.set(key, gridCellState(e, key));
+  }
+}
+
+function commitEditTransaction(e) {
+  const h = historyOf(e);
+  const active = h.active;
+  h.active = null;
+  if (!active) return;
+  const cells = [];
+  for (const [key, before] of active.cells) {
+    const after = gridCellState(e, key);
+    if (before !== after) cells.push([key, before, after]);
+  }
+  const metaBefore = active.metaBefore;
+  const metaAfter = metaBefore ? gridMetaSnapshot(e) : null;
+  const metaChanged = !!metaBefore &&
+    JSON.stringify(metaBefore) !== JSON.stringify(metaAfter);
+  if (!cells.length && !metaChanged) return;
+  h.undo.push({ cells, metaBefore: metaChanged ? metaBefore : null,
+                metaAfter: metaChanged ? metaAfter : null });
+  if (h.undo.length > 100) h.undo.shift();
+  h.redo.length = 0;
+}
+
+function applyGridHistoryState(e, op, direction) {
+  if (op.metaBefore) {
+    const meta = direction === "undo" ? op.metaBefore : op.metaAfter;
+    e.origin = [meta.origin[0], meta.origin[1]];
+    e.shape = meta.shape ? [meta.shape[0], meta.shape[1]] : null;
+    e.cellSize = meta.cellSize;
+  }
+  for (const [key, before, after] of op.cells) {
+    setGridCellState(e, key, direction === "undo" ? before : after);
+  }
+  e.bbox = null;
+  e.selection = new Set();
+  e.selRect = null;
+  edit.dirty = true;
+}
+
+function refreshAfterGridHistory() {
+  adoptViewEdit(edit.v);
+  updateEditStats();
+  updateSelBar();
+  requestRender();
+}
+
+function undoGridEdit() {
+  const e = ed();
+  if (!e) return false;
+  const h = historyOf(e);
+  if (h.active) commitEditTransaction(e);
+  const op = h.undo.pop();
+  if (!op) {
+    setStatus("没有可撤销的网格操作", "idle");
+    return false;
+  }
+  h.redo.push(op);
+  applyGridHistoryState(e, op, "undo");
+  refreshAfterGridHistory();
+  setStatus("已撤销网格操作", "ready");
+  return true;
+}
+
+function redoGridEdit() {
+  const e = ed();
+  if (!e) return false;
+  const h = historyOf(e);
+  const op = h.redo.pop();
+  if (!op) {
+    setStatus("没有可重做的网格操作", "idle");
+    return false;
+  }
+  h.undo.push(op);
+  applyGridHistoryState(e, op, "redo");
+  refreshAfterGridHistory();
+  setStatus("已重做网格操作", "ready");
+  return true;
+}
+
 function paintCell(ix, iz) {
   const e = ed();
   if (!e) return;
   const k = editCellKey(ix, iz);
+  recordGridCellBefore(e, k);
   if (edit.brush === "free") { e.blocked.delete(k); e.free.add(k); }
   else if (edit.brush === "blocked") { e.free.delete(k); e.blocked.add(k); }
   else { e.free.delete(k); e.blocked.delete(k); }
@@ -1115,13 +1351,17 @@ async function loadGrid2D(force) {
   } catch (e) {
     $("editStatus").textContent = "网格加载失败: " + e.message;
   }
+  const history = historyOf(v.edit);
+  history.undo.length = 0;
+  history.redo.length = 0;
+  history.active = null;
   adoptViewEdit(v);
   edit.dirty = false;
 }
 
 function setEditMode(on) {
   if (on && (!calib.mapping || !calib.key || calib.key !== state.activeKey)) {
-    statusEl.textContent = "请先完成该地图的标定，才能在地图上放置格子";
+    setStatus("请先完成该地图的标定，才能在地图上放置格子", "warning");
     syncModeChrome();   // 被拒了，指示器要停在真实模式上
     return;
   }
@@ -1131,7 +1371,7 @@ function setEditMode(on) {
     setCalibMode(false);
     loadGrid2D(false);
     canvasWrap.style.cursor = "crosshair";
-    statusEl.textContent = "网格编辑：左键拖动涂色，Shift+左键框选，右键拖动平移，滚轮缩放";
+    setStatus("网格编辑：左键拖动涂色，Shift+左键框选，右键拖动平移，滚轮缩放", "active");
   } else {
     edit.painting = false;
     edit.marquee = null;
@@ -1139,7 +1379,7 @@ function setEditMode(on) {
     editCanvasEl.width = 1; editCanvasEl.height = 1;   // 清掉覆盖层
     selCanvasEl.width = 1; selCanvasEl.height = 1;
     canvasWrap.style.cursor = "";
-    statusEl.textContent = "已退出网格编辑";
+    setStatus("已退出网格编辑");
   }
   syncModeChrome();
 }
@@ -1268,6 +1508,10 @@ async function saveGrid2D() {
     }
     if (res.origin) e.origin = [res.origin[0], res.origin[2]];
     if (res.shape) e.shape = [res.shape[0], res.shape[1]];
+    const history = historyOf(e);
+    history.undo.length = 0;
+    history.redo.length = 0;
+    history.active = null;
     edit.dirty = false;
     const cw = connectivityWarning(e);
     $("editStatus").innerHTML = "已保存: <b>" + res.path + "</b>" +
@@ -1387,9 +1631,9 @@ function setPickMode(on) {
   }
   pick.mode = on;
   canvasWrap.style.cursor = on ? "crosshair" : "";
-  statusEl.textContent = on
+  setStatus(on
     ? "取坐标模式：点击地图任意位置显示该点游戏坐标（左键拖动平移 · 滚轮缩放）"
-    : "已退出取坐标模式";
+    : "已退出取坐标模式", on ? "active" : "idle");
   if (!on) {
     hidePickMarker();
     $("pickReadout").textContent = "-";
@@ -1441,10 +1685,10 @@ async function doPick(e) {
     } else {
       $("pickReadout").textContent = "(" + f1(wx) + ", " + f1(wz) + ")";
     }
-    statusEl.textContent = "坐标: (" + f1(wx) + ", " + f1(wz) + ")";
+    setStatus("坐标: (" + f1(wx) + ", " + f1(wz) + ")", "ready");
   } else {
     $("pickReadout").textContent = "未标定：像素 (" + Math.round(px) + ", " + Math.round(py) + ")";
-    statusEl.textContent = "该地图未标定，仅显示像素坐标";
+    setStatus("该地图未标定，仅显示像素坐标", "warning");
   }
 }
 
@@ -1539,8 +1783,23 @@ const markBadges = new Map();     // 图标文件名 -> 合成好的徽章画布
 const MARK_MIN_SCALE = 0.12;      // 低于此缩放不画（与瓦片的 600 张阈值同量级）
 const MARK_BADGE_PX = 40;         // 徽章直径（**屏幕像素**，与缩放无关）
 const MARK_POINTER_PX = 8;        // 底部小三角高度（屏幕像素）
+const DEFAULT_MARK_MAIN_TYPE = "地图探索";
+const DEFAULT_MARK_NAMES = new Set(["协议传送点", "次级核心", "协议核心"]);
 
 function showMarks() { return !!(state.markers && state.markers.points.length); }
+
+function defaultHiddenMarkTids(markers) {
+  // base01 保持完整点位；其余地图默认只显示地图探索里的指定三类。
+  if ((markers.key || "").split("@")[0] === "base01") return new Set();
+  const present = new Set((markers.points || []).map(p => p[0]));
+  const hidden = new Set();
+  for (const [tid, info] of Object.entries(markers.templates || {})) {
+    if (!present.has(tid)) continue;
+    if (info.m === DEFAULT_MARK_MAIN_TYPE && DEFAULT_MARK_NAMES.has(info.n)) continue;
+    hidden.add(tid);
+  }
+  return hidden;
+}
 
 // 图标以**中文名**落盘（如「供电设备.png」），多个 templateId 可能指向同一个文件，
 // 所以按文件名缓存而不是按 templateId。
@@ -1599,6 +1858,7 @@ async function loadMarkers() {
       if (state.activeKey !== key) return;     // 期间切图了，丢弃
       state.markers = { key, templates: res.templates || {},
                         points: res.points || [], loaded: true };
+      state.markHidden = defaultHiddenMarkTids(state.markers);
     } catch (e) {
       addLog("标记数据加载失败: " + e.message, "t-warn");
     } finally {
@@ -1701,7 +1961,10 @@ function buildMarkPicker() {
     $("mpItems").innerHTML = '<div class="mp-empty">这张图没有标记数据（先去抓一次）</div>';
     return;
   }
-  if (!state.mpCats.some(([c]) => c === state.mpCat)) state.mpCat = state.mpCats[0][0];
+  if (!state.mpCats.some(([c]) => c === state.mpCat)) {
+    const hasDefault = state.mpCats.some(([c]) => c === DEFAULT_MARK_MAIN_TYPE);
+    state.mpCat = hasDefault ? DEFAULT_MARK_MAIN_TYPE : state.mpCats[0][0];
+  }
   renderMpCats();
   renderMpItems();
 }
@@ -1759,7 +2022,9 @@ function setAllMarkItems(visible) {
 }
 
 function resetMarkFilter() {
-  state.markHidden.clear();   // 重置 = 全都放出来
+  state.markHidden = state.markers
+    ? defaultHiddenMarkTids(state.markers)
+    : new Set();
   renderMpItems();
   updateMarksHint();
   requestRender();
@@ -1784,7 +2049,7 @@ function updateMarksHint() {
   }
   el.innerHTML = line;
   const clr = $("hintClearFilter");
-  if (clr) clr.onclick = resetMarkFilter;
+  if (clr) clr.onclick = () => setAllMarkItems(true);
 }
 
 // ---------------- 点地图上的徽章 → 看它是谁、在哪 ----------------
@@ -1875,8 +2140,14 @@ async function startCompose() {
 // ---------------- SSE ----------------
 function connect() {
   const es = new EventSource("/api/events");
-  es.onopen = () => { statusEl.textContent = "已连接服务器"; };
-  es.onerror = () => { statusEl.textContent = "连接断开，重连中…"; };
+  es.onopen = () => {
+    setStatus("已连接服务器", "online");
+    $("sideLinkState").textContent = "ONLINE";
+  };
+  es.onerror = () => {
+    setStatus("连接断开，重连中…", "offline");
+    $("sideLinkState").textContent = "RETRY";
+  };
   es.onmessage = (ev) => {
     let evt;
     try { evt = JSON.parse(ev.data); } catch (e) { return; }
@@ -2047,7 +2318,7 @@ async function openSelectedMap() {
   if (hasBounds(v0) && v0.pasted.size > 0) {
     setActive(key);
     fitView();
-    statusEl.textContent = "已显示 " + key + "（内存视图）";
+    setStatus("已显示 " + key + "（内存视图）", "ready");
     return;
   }
   setActive(key);
@@ -2061,7 +2332,7 @@ async function openSelectedMap() {
       getView(map, zoom, { minX: info.minX, maxX: info.maxX, minY: info.minY, maxY: info.maxY });
       redrawActive();
       fitView();
-      statusEl.textContent = "已显示 " + key + "（缩略总图，放大后自动加载瓦片）";
+      setStatus("已显示 " + key + "（缩略总图，放大后自动加载瓦片）", "ready");
       addLog("下拉选择: 载入缩略总图 " + info.file, "t-ok");
       loadOverview(map, zoom);
       return;
@@ -2071,7 +2342,7 @@ async function openSelectedMap() {
   }
 
   // 3) 都没有 → 自动流式合成（瓦片逐张贴上，可实时观察）
-  statusEl.textContent = "该地图无已存总图，自动开始合成…";
+  setStatus("该地图无已存总图，自动开始合成…", "active");
   startCompose();
 }
 
@@ -2131,7 +2402,14 @@ $("btnBrowse").onclick = () => setMode("browse");
 $("btnCalib").onclick = () => setMode(calib.mode ? "browse" : "calib");
 $("btnEdit").onclick = () => setMode(edit.mode ? "browse" : "edit");
 $("btnPick").onclick = () => setMode(pick.mode ? "browse" : "pick");
-$("btnPanel").onclick = () => setSidePanel(!document.body.classList.contains("side-open"));
+$("btnPanel").onclick = () => setSidePanel(!isSidePanelOpen());
+$("btnSideToggle").onclick = () => setSidePanel(!isSidePanelOpen());
+document.querySelectorAll(".rail-mode").forEach(btn => {
+  btn.onclick = () => {
+    if (!isSidePanelOpen()) setSidePanel(true);
+    setMode(btn.dataset.railMode);
+  };
+});
 $("btnPanelClose").onclick = () => setSidePanel(false);
 $("sideBackdrop").onclick = () => setSidePanel(false);
 $("calibOk").onclick = submitCalibPoint;
@@ -2142,17 +2420,52 @@ $("calibZ").addEventListener("keydown", (e) => { if (e.key === "Enter") submitCa
 // （宽度输入框、控制点坐标框都要能正常输入数字）。
 const BRUSH_BY_KEY = { "1": "free", "2": "blocked", "3": "erase" };
 
+function isTextEditingTarget(target) {
+  return !!target && (
+    target.tagName === "INPUT" ||
+    target.tagName === "TEXTAREA" ||
+    target.tagName === "SELECT" ||
+    target.isContentEditable
+  );
+}
+
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    if (document.body.classList.contains("side-open")) setSidePanel(false);
+    if (isSidePanelOpen()) setSidePanel(false);
     else if ($("calibDlg").style.display === "block") closeCalibDialog();
     else if (edit.mode) clearSelection();
     return;
   }
+
+  const mod = e.ctrlKey || e.metaKey;
+  const key = e.key.toLowerCase();
+  if (mod && !e.altKey && key === "s") {
+    if (!edit.mode && !calib.mode) return;
+    e.preventDefault();
+    if (edit.mode) saveGrid2D();
+    else if (!$("btnCalibSave").disabled) saveCalib();
+    else setStatus("至少需要 3 个启用中的控制点才能保存标定", "warning");
+    return;
+  }
+  if (mod && !e.altKey && (key === "z" || key === "y")) {
+    if (isTextEditingTarget(e.target)) return;
+    if (!edit.mode && !calib.mode) return;
+    e.preventDefault();
+    const redo = key === "y" || e.shiftKey;
+    if (edit.mode) {
+      if (redo) redoGridEdit();
+      else undoGridEdit();
+    } else if (redo) {
+      redoCalibEdit();
+    } else {
+      undoCalibEdit();
+    }
+    return;
+  }
+
   if (!edit.mode) return;
   const t = e.target;
-  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" ||
-            t.tagName === "SELECT" || t.isContentEditable)) return;
+  if (isTextEditingTarget(t)) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const brush = BRUSH_BY_KEY[e.key];
   if (brush) {
@@ -2181,6 +2494,8 @@ document.addEventListener("keyup", (e) => {
 window.addEventListener("blur", () => { heldBrushKeys.clear(); hideBrushHud(); });
 $("btnCalibSave").onclick = saveCalib;
 $("btnCalibClear").onclick = () => {
+  if (!calib.points.length && !calib.mapping) return;
+  pushCalibHistory();
   calib.points = []; calib.mapping = null;
   $("calibStatus").textContent = "未标定（开标定模式后点击地图添加控制点）";
   renderCalibList(); renderCalibMarks();
@@ -2241,9 +2556,36 @@ $("btnSelClear").onclick = clearSelection;
 $("btnPathMark").onclick = markPath;
 $("btnPathClear").onclick = clearPath;
 // 注意用 isNaN 判定而非 `|| 默认值`：后者会把用户输入的 0 当成"空"而忽略掉
-$("editCellSize").onchange = () => { const e = ed(), n = parseFloat($("editCellSize").value); if (e && n > 0) { e.cellSize = n; edit.dirty = true; requestRender(); } };
-$("editOriginX").onchange = () => { const e = ed(), n = parseFloat($("editOriginX").value); if (e && !isNaN(n)) { e.origin[0] = n; edit.dirty = true; requestRender(); } };
-$("editOriginZ").onchange = () => { const e = ed(), n = parseFloat($("editOriginZ").value); if (e && !isNaN(n)) { e.origin[1] = n; edit.dirty = true; requestRender(); } };
+$("editCellSize").onchange = () => {
+  const e = ed(), n = parseFloat($("editCellSize").value);
+  if (e && n > 0) {
+    beginEditTransaction(e, true);
+    e.cellSize = n;
+    commitEditTransaction(e);
+    edit.dirty = true;
+    requestRender();
+  }
+};
+$("editOriginX").onchange = () => {
+  const e = ed(), n = parseFloat($("editOriginX").value);
+  if (e && !isNaN(n)) {
+    beginEditTransaction(e, true);
+    e.origin[0] = n;
+    commitEditTransaction(e);
+    edit.dirty = true;
+    requestRender();
+  }
+};
+$("editOriginZ").onchange = () => {
+  const e = ed(), n = parseFloat($("editOriginZ").value);
+  if (e && !isNaN(n)) {
+    beginEditTransaction(e, true);
+    e.origin[1] = n;
+    commitEditTransaction(e);
+    edit.dirty = true;
+    requestRender();
+  }
+};
 $("editBrush").onchange = () => setBrushSize($("editBrush").value);
 
 // ---------------- 总图拖动 / 缩放 / 涂色 交互 ----------------
@@ -2259,6 +2601,8 @@ canvasWrap.addEventListener("pointerdown", (e) => {
       } else {
         // 左键：涂格子（拖动连线）；开始新涂刷时清除旧选择
         clearSelection();
+        const grid = ed();
+        if (grid) beginEditTransaction(grid);
         edit.painting = { id: e.pointerId };
         canvasWrap.setPointerCapture(e.pointerId);
         const p = canvasPixelOfEvent(e);
@@ -2336,6 +2680,8 @@ const endDrag = (e) => {
   if (edit.mode && edit.painting && e.pointerId === edit.painting.id) {
     edit.painting = false;
     edit.lastCell = null;
+    const grid = ed();
+    if (grid) commitEditTransaction(grid);
     // 收笔时重算边界盒：涂出去或擦掉都会改变保存范围（也是"未知"计数的准头）
     updateEditStats();
     requestRender();
@@ -2365,6 +2711,7 @@ canvasWrap.addEventListener("pointerleave", () => { if (heldBrushKeys.size) hide
 
 window.addEventListener("resize", () => { clampPan(); applyView(); });
 window.addEventListener("load", () => {
+  setSidePanel(!window.matchMedia("(max-width: 1100px)").matches);
   syncModeChrome();      // 初始状态：浏览模式，只显示它的动作组与侧栏面板
   syncButtons();
   loadMarksStatus();

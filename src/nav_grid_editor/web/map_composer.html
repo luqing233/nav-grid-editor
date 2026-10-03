@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#0b0f13">
+<meta name="theme-color" content="#111411">
 <title>终末地地图采集 / 标定 / 网格编辑</title>
 <link rel="stylesheet" href="/static/css/map_composer.css">
 <script src="/static/js/map_composer.js" defer></script>
@@ -16,34 +16,43 @@
     <div class="app-brand" aria-label="终末地导航网格编辑器">
       <span class="brand-mark" aria-hidden="true"></span>
       <span class="brand-copy">
-        <strong>地图编辑器</strong>
-        <small>终末地导航网格</small>
+        <strong>终末地地图编辑器</strong>
+        <small>NAVIGATION GRID SYSTEM</small>
       </span>
+      <span class="brand-code" aria-hidden="true">NG-02</span>
     </div>
 
     <button id="btnPanel" class="panel-toggle" type="button"
-            aria-controls="side" aria-expanded="false">面板</button>
+            aria-controls="side" aria-expanded="false" title="打开检查器">检查器</button>
 
     <div class="tb-context">
       <label class="compact-field">
-        <span>地图</span>
+        <span>MAP / 地图</span>
         <select id="selMap" aria-label="选择地图"></select>
       </label>
       <label class="compact-field">
-        <span>层级</span>
+        <span>LAYER / 层级</span>
         <select id="selZoom" aria-label="选择地图层级"></select>
       </label>
     </div>
 
     <div class="tb-modes" role="group" aria-label="编辑模式">
       <button id="btnBrowse" class="mode-button" aria-pressed="false"
-              title="浏览模式：拖动平移、滚轮缩放、双击适应窗口">浏览</button>
+              title="浏览模式：拖动平移、滚轮缩放、双击适应窗口">
+        <span class="mode-index">01</span><span>浏览</span>
+      </button>
       <button id="btnCalib" class="mode-button" aria-pressed="false"
-              title="标定模式：点击特征点并输入游戏坐标">标定</button>
+              title="标定模式：点击特征点并输入游戏坐标">
+        <span class="mode-index">02</span><span>标定</span>
+      </button>
       <button id="btnEdit" class="mode-button" aria-pressed="false"
-              title="网格模式：在地图上编辑 Free / Blocked 格子">网格</button>
+              title="网格模式：在地图上编辑 Free / Blocked 格子">
+        <span class="mode-index">03</span><span>网格</span>
+      </button>
       <button id="btnPick" class="mode-button" aria-pressed="false"
-              title="取坐标模式：显示游戏坐标与格子坐标">取坐标</button>
+              title="取坐标模式：显示游戏坐标与格子坐标">
+        <span class="mode-index">04</span><span>取坐标</span>
+      </button>
     </div>
 
     <div class="tb-fetch">
@@ -51,13 +60,14 @@
       <span id="fetchState">空闲</span>
       <button id="btnFetch" class="button-primary"
               title="用 Playwright 打开游戏地图页面并抓取瓦片">开始抓取</button>
-      <button id="btnFetchStop" disabled>停止抓取</button>
+      <button id="btnFetchStop" class="button-quiet" disabled>停止</button>
       <label class="toggle"><input type="checkbox" id="chkHeadless"><span>无头</span></label>
     </div>
 
   </div>
 
   <div id="actionbar">
+    <span class="actionbar-label" aria-hidden="true">ACTIONS</span>
     <div class="tb-act" data-mode="browse">
       <button id="btnCompose" title="把当前地图/zoom 的已有瓦片逐张贴上总图">合成总图</button>
       <button id="btnSim" title="不落盘的模拟抓取，用来演示实时贴图">模拟抓取</button>
@@ -71,9 +81,9 @@
       <label class="toggle"><input type="checkbox" id="chkFollow" checked><span>自动跟随</span></label>
     </div>
     <div class="tb-act" data-mode="calib">
-      <button id="btnCalibSave" disabled>计算并保存标定</button>
+      <button id="btnCalibSave" disabled title="计算并保存标定（Ctrl+S）">计算并保存标定</button>
       <button id="btnCalibClear">清空控制点</button>
-      <span class="tb-act-hint">点击地图添加控制点，至少 3 个</span>
+      <span class="tb-act-hint">控制点至少 3 个</span>
     </div>
     <div class="tb-act" data-mode="edit">
       <button class="brushBtn on" data-brush="free"
@@ -92,7 +102,7 @@
       <button id="btnSelBlocked" title="把选中的格子填成 Blocked">填充 Blocked</button>
       <button id="btnSelErase" title="把选中的格子擦成未知">填充未知</button>
       <button id="btnSelClear" title="取消框选（快捷键 Esc）">取消选择</button>
-      <span class="tb-act-hint">1 / 2 / 3 选画笔 · 框选后可批量填充</span>
+      <span class="tb-act-hint">框选后可批量填充</span>
     </div>
     <div class="tb-act" data-mode="pick">
       <span class="tb-act-hint">点击地图任意位置取坐标</span>
@@ -101,11 +111,11 @@
 </header>
 
 <div id="curBar">
-  <span class="cur-item">地图 <b id="curMap">-</b></span>
-  <span class="barSep"></span>层级 <b id="curZoom" class="mono">-</b>
-  <span class="barSep"></span>已贴瓦片: <b id="curCount" class="mono">0</b>
-  <span class="barSep"></span>X <b id="curX" class="mono">-</b>
-  <span class="barSep"></span>Y <b id="curY" class="mono">-</b>
+  <span class="cur-cell"><small>MAP</small><b id="curMap">-</b></span>
+  <span class="cur-cell"><small>LAYER</small><b id="curZoom" class="mono">-</b></span>
+  <span class="cur-cell"><small>TILES</small><b id="curCount" class="mono">0</b></span>
+  <span class="cur-cell wide"><small>RANGE X</small><b id="curX" class="mono">-</b></span>
+  <span class="cur-cell wide"><small>RANGE Y</small><b id="curY" class="mono">-</b></span>
   <span class="modeTag" id="modeTag">浏览</span>
 </div>
 
@@ -116,8 +126,26 @@
       <canvas id="editCanvas"></canvas>
       <canvas id="selCanvas"></canvas>
       <canvas id="pathCanvas"></canvas>
-      <div id="playerMarker"></div>
       <div id="pickMarker"></div>
+    </div>
+    <div id="playerMarker"><span id="playerMarkerLabel"></span></div>
+    <div class="viewport-frame" aria-hidden="true">
+      <span class="vf-corner tl"></span>
+      <span class="vf-corner tr"></span>
+      <span class="vf-corner bl"></span>
+      <span class="vf-corner br"></span>
+      <span class="vf-axis vf-axis-x">X</span>
+      <span class="vf-axis vf-axis-y">Y</span>
+    </div>
+    <div class="viewport-hud" aria-hidden="true">
+      <div class="viewport-hud-main">
+        <span>ACTIVE LAYER</span>
+        <strong id="canvasViewLabel">NO MAP</strong>
+      </div>
+      <div class="viewport-hud-mode">
+        <span>MODE</span>
+        <strong id="canvasModeLabel">浏览</strong>
+      </div>
     </div>
     <div id="markTip"></div>
     <div id="brushHud"></div>
@@ -128,15 +156,21 @@
   <aside id="side" aria-label="检查器面板">
     <div id="sideHeader">
       <div>
-        <span class="side-kicker">当前模式</span>
-        <strong id="sideModeLabel">浏览</strong>
+        <span class="side-kicker">CONTROL / CURRENT MODE</span>
+        <strong><span id="sideModeCode">01</span><span id="sideModeLabel">浏览</span></strong>
       </div>
-      <button id="btnPanelClose" type="button" aria-label="关闭检查器">关闭</button>
+      <button id="btnPanelClose" class="button-quiet" type="button"
+              aria-label="收起检查器" title="收起检查器">&lsaquo;</button>
+    </div>
+
+    <div class="side-telemetry">
+      <span><small>VIEW</small><b id="sideViewLabel">-</b></span>
+      <span><small>LINK</small><b id="sideLinkState">LOCAL</b></span>
     </div>
 
     <div id="sideContent">
     <section class="side-sec" data-mode="browse">
-      <h3>采集状态</h3>
+      <h3><span>采集状态</span><small>CAPTURE STATUS</small></h3>
       <div class="panel" id="servicePanel">-</div>
       <div class="panel">
         <div class="counts">
@@ -153,7 +187,7 @@
 
     <!-- 标定模式隐藏标记，避免标记徽章干扰控制点选取。 -->
     <section class="side-sec" data-mode="browse edit pick">
-      <h3>地图标记</h3>
+      <h3><span>地图标记</span><small>MAP MARKERS</small></h3>
       <div class="panel">
         <div class="panel-note"
              title="认证口径包含玩家自建的滑索、暗管、供电桩等；凭证只从本机文件读取。">
@@ -170,7 +204,7 @@
           <div class="mp-foot">
             <button id="mpAll">全选</button>
             <button id="mpNone">取消全选</button>
-            <button id="mpReset">重置</button>
+            <button id="mpReset" title="恢复默认：base01 显示全部，其它地图仅显示地图探索里的三类点位">重置</button>
           </div>
           <div class="mp-sub" id="mpTip">点图标可筛选地图上显示哪些设备</div>
         </div>
@@ -179,12 +213,12 @@
     </section>
 
     <section class="side-sec" data-mode="calib">
-      <h3>地图标定</h3>
+      <h3><span>地图标定</span><small>CALIBRATION</small></h3>
       <div class="panel">
         <div id="calibStatus">未标定（开标定模式后点击地图添加控制点）</div>
         <div id="calibList"></div>
       </div>
-      <h3>路径标记</h3>
+      <h3><span>路径标记</span><small>PATH TRACE</small></h3>
       <div class="panel">
         <textarea id="pathInput" class="path-input" rows="4"
           placeholder="粘贴路径坐标，例如：&#10;(-97.2,6.0) -> (-91.2,6.0) -> ...&#10;括号坐标或 x,z 对均可"></textarea>
@@ -197,7 +231,7 @@
     </section>
 
     <section class="side-sec" data-mode="edit">
-      <h3>网格编辑（无高度 2D）</h3>
+      <h3><span>网格编辑（无高度 2D）</span><small>GRID EDIT</small></h3>
       <div class="panel">
         <div id="editStatus">需先标定该地图才能编辑</div>
         <div id="editStats">Free: 0 / Blocked: 0</div>
@@ -208,13 +242,13 @@
         </div>
         <div class="button-row">
           <button id="btnEditLoad">载入</button>
-          <button id="btnEditSave">保存网格（npz）</button>
+          <button id="btnEditSave" title="保存网格（Ctrl+S）">保存网格（npz）</button>
         </div>
       </div>
     </section>
 
     <section class="side-sec" data-mode="pick">
-      <h3>取坐标</h3>
+      <h3><span>取坐标</span><small>COORDINATE READ</small></h3>
       <div class="panel">
         <div>最近坐标: <span id="coordsReadout">-</span></div>
         <div>点击坐标: <span id="pickReadout">-</span></div>
@@ -222,14 +256,54 @@
     </section>
 
     <section class="side-log">
-      <h3>日志</h3>
+      <h3><span>日志</span><small>EVENT STREAM</small></h3>
       <div id="logBox" aria-live="polite"></div>
     </section>
+    </div>
+
+    <div id="sideRail" aria-label="侧边栏快捷入口">
+      <button id="btnSideToggle" class="rail-toggle" type="button"
+              aria-label="展开检查器" title="展开检查器">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="m9 6 6 6-6 6"></path>
+        </svg>
+      </button>
+      <div class="rail-tools">
+        <button class="rail-mode is-active" type="button" data-rail-mode="browse"
+                aria-label="浏览" title="浏览">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 5.5 9 3l6 2.5L20 3v15.5L15 21l-6-2.5L4 21Z"></path>
+            <path d="M9 3v15.5M15 5.5V21"></path>
+          </svg>
+        </button>
+        <button class="rail-mode" type="button" data-rail-mode="calib"
+                aria-label="标定" title="标定">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="6"></circle>
+            <path d="M12 2v4M12 18v4M2 12h4M18 12h4"></path>
+          </svg>
+        </button>
+        <button class="rail-mode" type="button" data-rail-mode="edit"
+                aria-label="网格" title="网格">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="4" y="4" width="16" height="16" rx="2"></rect>
+            <path d="M4 10h16M10 4v16M16 4v16"></path>
+          </svg>
+        </button>
+        <button class="rail-mode" type="button" data-rail-mode="pick"
+                aria-label="取坐标" title="取坐标">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M12 2v5M12 17v5M2 12h5M17 12h5"></path>
+          </svg>
+        </button>
+      </div>
+      <span class="rail-status" aria-hidden="true"></span>
     </div>
   </aside>
 </main>
 
-<footer id="status" role="status">正在连接服务器…</footer>
+<footer id="status" role="status" data-state="connecting"><span id="statusIndicator" aria-hidden="true"></span><span id="statusText">正在连接服务器…</span></footer>
 
 <div id="calibDlg" role="dialog" aria-modal="true" aria-labelledby="calibTitle">
   <strong id="calibTitle">添加标定控制点</strong>
