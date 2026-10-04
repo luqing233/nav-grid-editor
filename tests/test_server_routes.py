@@ -194,8 +194,10 @@ class StaticAssetsTest(_ServerMixin, unittest.TestCase):
         self.assertIn("/static/js/map_composer.js", html)
         self.assertNotIn("<style>", html)
         self.assertNotIn("<script>", html)
-        self.assertIn('<script src="/static/js/map_composer.js" defer></script>', html)
-        self.assertIn('data-mode="browse edit pick"', html)
+        self.assertIn('<script type="module" src="/static/js/map_composer.js"></script>', html)
+        self.assertIn('data-mode="edit"', html)
+        self.assertIn('id="sideTabs"', html)
+        self.assertIn('id="layerGrid"', html)
 
     def test_css_and_javascript_are_served(self):
         status, css, headers = self._request("/static/css/map_composer.css")
@@ -204,9 +206,15 @@ class StaticAssetsTest(_ServerMixin, unittest.TestCase):
         self.assertIn("no-cache", headers.get("Cache-Control", ""))
         self.assertIn(b":root", css)
 
-        status, js, _ = self._request("/static/js/map_composer.js")
+        status, js, headers = self._request("/static/js/map_composer.js")
         self.assertEqual(status, 200)
+        self.assertIn("text/javascript", headers.get_content_type())
         self.assertIn(b"use strict", js)
+
+        status, module, headers = self._request("/static/js/grid/grid-document.js")
+        self.assertEqual(status, 200)
+        self.assertIn("text/javascript", headers.get_content_type())
+        self.assertIn(b"export class GridDocument", module)
 
 
 if __name__ == "__main__":

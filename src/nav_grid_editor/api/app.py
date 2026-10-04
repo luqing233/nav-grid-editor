@@ -129,6 +129,10 @@ async def _static_cache_policy(request: Request, call_next):
     if request.url.path.startswith("/static/"):
         # ETag 负责内容一致性；no-cache 表示允许缓存但每次先向本机服务重验。
         response.headers.setdefault("Cache-Control", "private, no-cache")
+        # Windows 的 mimetypes 注册表有时把 .js 报成 text/plain；ES module
+        # 会被浏览器按严格 MIME 拒绝，所以静态脚本必须显式声明类型。
+        if request.url.path.endswith(".js"):
+            response.headers["Content-Type"] = "text/javascript; charset=utf-8"
     return response
 
 

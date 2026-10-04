@@ -1,5 +1,10 @@
 "use strict";
 
+import { CELL_BLOCKED, CELL_FREE, CELL_UNKNOWN, GridDocument } from "./grid/grid-document.js";
+import { GridRasterCache } from "./grid/grid-raster-cache.js";
+import { loadGridDocument, saveGridDocument } from "./grid/grid-transport.js";
+import { RENDER_LAYERS, RenderScheduler } from "./render/render-scheduler.js";
+
 // ---------------- 状态 ----------------
 const TILE = 256;
 const state = {
@@ -19,6 +24,14 @@ const state = {
   mpCats: [],       // [[大类, [条目]]]，打开选择器时算一次
   markersPromise: null,  // 正在进行的标记请求（并发调用共享它）
   markersKey: null,
+  layers: {
+    base: true,
+    markers: true,
+    grid: true,
+    selection: true,
+    path: true,
+  },
+  gridOpacity: 0.82,
 };
 
 const $ = id => document.getElementById(id);
@@ -27,6 +40,11 @@ const logBox = $("logBox");
 const canvasWrap = $("canvasWrap");
 const canvasHolder = $("canvasHolder");
 const canvas = $("composeCanvas");
+const gridRasterCache = new GridRasterCache();
+const gridLayerState = { valid: false, key: "", width: 0, height: 0 };
+const gridBoundsEl = $("gridBounds");
+const brushCursor = $("brushCursor");
+const brushCursorLabel = $("brushCursorLabel");
 
 function setStatus(text, state = "idle") {
   $("statusText").textContent = text;
@@ -67,13 +85,19 @@ function growForTile(map, zoom, x, y) {
 // 瓦片到达：原来这里要 fetch + 解码 + 画进"整张地图尺寸"的画布，一趟抓取
 // 跑几千次；现在只记账，渲染时按可见范围取图。
 function noteTile(map, zoom, x, y, kind) {
+  const key = viewKey(map, zoom);
+  const before = state.views.get(key);
+  const oldBounds = hasBounds(before)
+    ? [before.minX, before.maxX, before.minY, before.maxY].join(",")
+    : "";
   const v = growForTile(map, zoom, x, y);
+  const newBounds = [v.minX, v.maxX, v.minY, v.maxY].join(",");
   const tKey = x + "," + y;
   if (v.pasted.has(tKey)) return;
   v.pasted.add(tKey);
-  if (viewKey(map, zoom) === state.activeKey) {
+  if (key === state.activeKey) {
     updateCurBar();
-    requestRender();
+    requestRender(oldBounds === newBounds ? RENDER_LAYERS.BASE : RENDER_LAYERS.ALL);
     if (kind === "new") flashTile(map, zoom, x, y);
   }
 }
@@ -138,6 +162,16 @@ const mapView = { scale: 1, panX: 0, panY: 0,
   // 瓦片按到它的距离排序后再发请求，见 render()。
   focus: null };
 let dragState = null;
+let brushCursorMinPx = 7;
+
+function refreshUiMetrics() {
+  const rootStyle = getComputedStyle(document.documentElement);
+  const value = parseFloat(rootStyle.getPropertyValue("--ui-scale"));
+  const scale = Number.isFinite(value) && value > 0 ? value : 1;
+  const configured = parseFloat(rootStyle.getPropertyValue("--brush-cursor-min"));
+  const base = Number.isFinite(configured) && configured > 0 ? configured : 7;
+  brushCursorMinPx = base * scale;
+}
 
 function focusHolder() {
   if (mapView.focus) return mapView.focus;
@@ -153,12 +187,10 @@ const DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
 const TILE_CACHE_MAX = 1200;
 const MAX_TILES_PER_FRAME = 600; // 视野内瓦片过多时只画缩略图，不逐张请求
 const tileCache = new Map();     // "map/zoom/x_y" -> ImageBitmap | "loading" | {missing:true}
-let renderQueued = false;
+const renderScheduler = new RenderScheduler((layers) => render(layers));
 
-function requestRender() {
-  if (renderQueued) return;
-  renderQueued = true;
-  requestAnimationFrame(() => { renderQueued = false; render(); });
+function requestRender(layers = RENDER_LAYERS.ALL) {
+  renderScheduler.request(layers);
 }
 
 // 可见区域（holder 坐标系：1 单位 = 总图像素）
@@ -219,7 +251,10 @@ const TILE_KEY = (map, zoom, x, y) => map + "/" + zoom + "/" + x + "_" + y;
 // 单张：SSE tile 事件说 map/zoom/x/y 有了，只作废那一格
 function forgetMissingTile(map, zoom, x, y) {
   const k = TILE_KEY(map, zoom, x, y);
-  if (isMissing(tileCache.get(k))) { tileCache.delete(k); requestRender(); }
+  if (isMissing(tileCache.get(k))) {
+    tileCache.delete(k);
+    requestRender(RENDER_LAYERS.BASE);
+  }
 }
 
 // 批量：抓取结束 / 合并到 latest 之后，整批瓦片可能都变了，一次性作废
@@ -228,7 +263,7 @@ function forgetAllMissing() {
   for (const [k, v] of [...tileCache]) {
     if (isMissing(v)) { tileCache.delete(k); hit = true; }
   }
-  if (hit) requestRender();
+  if (hit) requestRender(RENDER_LAYERS.BASE);
 }
 
 function requestTileBitmap(map, zoom, x, y) {
@@ -242,7 +277,7 @@ function requestTileBitmap(map, zoom, x, y) {
     .then(blob => window.createImageBitmap ? createImageBitmap(blob) : loadImageFromBlob(blob))
     .then(bmp => {
       cachePut(key, bmp);
-      if (state.activeKey === viewKey(map, zoom)) requestRender();
+      if (state.activeKey === viewKey(map, zoom)) requestRender(RENDER_LAYERS.BASE);
     })
     .catch(() => { cachePut(key, { missing: true }); });
 }
@@ -261,97 +296,114 @@ async function loadOverview(map, zoom) {
     const v = state.views.get(key);
     if (!v) return;
     v.overview = bmp;
-    if (state.activeKey === key) requestRender();
+    if (state.activeKey === key) requestRender(RENDER_LAYERS.BASE);
   } catch (e) {
     addLog("缩略总图加载失败: " + e.message, "t-warn");
   }
 }
 
-function render() {
+function render(layers = RENDER_LAYERS.ALL) {
   const s = mapView.scale;
   const vis = visibleRect();
   const v = state.views.get(state.activeKey);
 
-  const g = layoutLayer(canvas, canvas.getContext("2d"), vis, s);
-  g.fillStyle = "#080808";
-  g.fillRect(vis.x, vis.y, vis.w, vis.h);
+  if (layers & RENDER_LAYERS.BASE) {
+    const g = layoutLayer(canvas, canvas.getContext("2d"), vis, s);
+    g.fillStyle = "#080808";
+    g.fillRect(vis.x, vis.y, vis.w, vis.h);
 
-  if (hasBounds(v)) {
-    const size = viewSize(v);
-    // 1) 缩略总图打底：秒出图，缩着看时不用几千张瓦片
-    if (v.overview) {
-      g.imageSmoothingEnabled = true;
-      g.drawImage(v.overview, 0, 0, size.w, size.h);
-    }
-    // 2) 瓦片层：只画可见范围，缺图的按需取，取回后自动重画
-    // 可见矩形是 holder 坐标（(瓦片- minX)*TILE），要加上 minX 才是瓦片下标
-    const x0 = Math.max(v.minX, Math.floor(vis.x / TILE) + v.minX);
-    const y0 = Math.max(v.minY, Math.floor(vis.y / TILE) + v.minY);
-    const x1 = Math.min(v.maxX, Math.ceil((vis.x + vis.w) / TILE) - 1 + v.minX);
-    const y1 = Math.min(v.maxY, Math.ceil((vis.y + vis.h) / TILE) - 1 + v.minY);
-    const need = Math.max(0, x1 - x0 + 1) * Math.max(0, y1 - y0 + 1);
-    if (need > 0 && need <= MAX_TILES_PER_FRAME) {
-      const [map, zoom] = state.activeKey.split("@");
-      const pending = [];
-      for (let y = y0; y <= y1; y++) {
-        for (let x = x0; x <= x1; x++) {
-          const key = TILE_KEY(map, zoom, x, y);
-          const bmp = cacheGet(key);
-          if (isBitmap(bmp)) {
-            g.drawImage(bmp, (x - v.minX) * TILE, (y - v.minY) * TILE, TILE, TILE);
-          } else if (bmp !== "loading") {
-            pending.push([x, y]);
+    if (state.layers.base && hasBounds(v)) {
+      const size = viewSize(v);
+      // 1) 缩略总图打底：秒出图，缩着看时不用几千张瓦片
+      if (v.overview) {
+        g.imageSmoothingEnabled = true;
+        g.drawImage(v.overview, 0, 0, size.w, size.h);
+      }
+      // 2) 瓦片层：只画可见范围，缺图的按需取，取回后自动重画
+      // 可见矩形是 holder 坐标（(瓦片- minX)*TILE），要加上 minX 才是瓦片下标
+      const x0 = Math.max(v.minX, Math.floor(vis.x / TILE) + v.minX);
+      const y0 = Math.max(v.minY, Math.floor(vis.y / TILE) + v.minY);
+      const x1 = Math.min(v.maxX, Math.ceil((vis.x + vis.w) / TILE) - 1 + v.minX);
+      const y1 = Math.min(v.maxY, Math.ceil((vis.y + vis.h) / TILE) - 1 + v.minY);
+      const need = Math.max(0, x1 - x0 + 1) * Math.max(0, y1 - y0 + 1);
+      if (need > 0 && need <= MAX_TILES_PER_FRAME) {
+        const [map, zoom] = state.activeKey.split("@");
+        const pending = [];
+        for (let y = y0; y <= y1; y++) {
+          for (let x = x0; x <= x1; x++) {
+            const key = TILE_KEY(map, zoom, x, y);
+            const bmp = cacheGet(key);
+            if (isBitmap(bmp)) {
+              g.drawImage(bmp, (x - v.minX) * TILE, (y - v.minY) * TILE, TILE, TILE);
+            } else if (bmp !== "loading") {
+              pending.push([x, y]);
+            }
           }
         }
+        // 按到"焦点"的距离排序后再发请求。浏览器对同一主机的并发约 6 路、且
+        // 基本按发出顺序服务，所以先发≈先到；排完序就等于"我盯着的那块先清晰"。
+        // 只对还没发出过的格子排序（发出去的会被标成 loading，下一帧就不在这里了），
+        // 所以不会每帧重复排。
+        if (pending.length) {
+          const f = focusHolder();
+          pending.sort((a, b) => {
+            const ax = (a[0] - v.minX + 0.5) * TILE - f.x;
+            const ay = (a[1] - v.minY + 0.5) * TILE - f.y;
+            const bx = (b[0] - v.minX + 0.5) * TILE - f.x;
+            const by = (b[1] - v.minY + 0.5) * TILE - f.y;
+            return (ax * ax + ay * ay) - (bx * bx + by * by);
+          });
+          for (const [x, y] of pending) requestTileBitmap(map, zoom, x, y);
+        }
+        // 瓦片接缝
+        g.strokeStyle = "rgba(150,165,185,0.045)";
+        g.lineWidth = 1 / s;
+        g.beginPath();
+        for (let x = x0; x <= x1 + 1; x++) {
+          const px = (x - v.minX) * TILE;
+          g.moveTo(px, (y0 - v.minY) * TILE);
+          g.lineTo(px, (y1 - v.minY + 1) * TILE);
+        }
+        for (let y = y0; y <= y1 + 1; y++) {
+          const py = (y - v.minY) * TILE;
+          g.moveTo((x0 - v.minX) * TILE, py);
+          g.lineTo((x1 - v.minX + 1) * TILE, py);
+        }
+        g.stroke();
       }
-      // 按到"焦点"的距离排序后再发请求。浏览器对同一主机的并发约 6 路、且
-      // 基本按发出顺序服务，所以先发≈先到；排完序就等于"我盯着的那块先清晰"。
-      // 只对还没发出过的格子排序（发出去的会被标成 loading，下一帧就不在这里了），
-      // 所以不会每帧重复排。
-      if (pending.length) {
-        const f = focusHolder();
-        pending.sort((a, b) => {
-          const ax = (a[0] - v.minX + 0.5) * TILE - f.x, ay = (a[1] - v.minY + 0.5) * TILE - f.y;
-          const bx = (b[0] - v.minX + 0.5) * TILE - f.x, by = (b[1] - v.minY + 0.5) * TILE - f.y;
-          return (ax * ax + ay * ay) - (bx * bx + by * by);
-        });
-        for (const [x, y] of pending) requestTileBitmap(map, zoom, x, y);
-      }
-      // 瓦片接缝
-      g.strokeStyle = "rgba(150,165,185,0.045)";
-      g.lineWidth = 1 / s;
-      g.beginPath();
-      for (let x = x0; x <= x1 + 1; x++) {
-        const px = (x - v.minX) * TILE;
-        g.moveTo(px, (y0 - v.minY) * TILE); g.lineTo(px, (y1 - v.minY + 1) * TILE);
-      }
-      for (let y = y0; y <= y1 + 1; y++) {
-        const py = (y - v.minY) * TILE;
-        g.moveTo((x0 - v.minX) * TILE, py); g.lineTo((x1 - v.minX + 1) * TILE, py);
-      }
-      g.stroke();
     }
-  }
 
-  // 2.5) 地图标记层：画在瓦片之上、网格/路径之下
-  drawMarkers(g);
+    // 2.5) 地图标记层：画在瓦片之上、网格/路径之下
+    if (state.layers.markers) drawMarkers(g);
+  }
 
   // 3) 网格编辑层与选择层（只在编辑模式画）
-  if (edit.mode) {
+  if (edit.mode && (layers & RENDER_LAYERS.GRID)) {
     const ge = layoutLayer(editCanvasEl, ectx, vis, s);
-    drawAllCells(ge);
+    if (state.layers.grid) drawAllCells(ge);
+    else {
+      ge.clearRect(vis.x, vis.y, vis.w, vis.h);
+      gridBoundsEl.style.display = "none";
+    }
+  }
+  if (edit.mode && (layers & RENDER_LAYERS.SELECTION)) {
     const gs = layoutLayer(selCanvasEl, sctx, vis, s);
-    drawSelLayer(gs);
+    if (state.layers.selection) drawSelLayer(gs);
+    else gs.clearRect(vis.x, vis.y, vis.w, vis.h);
   }
   // 4) 路径层
-  const gp = layoutLayer(pathCanvasEl, pctx, vis, s);
-  drawPath(gp);
+  if (layers & RENDER_LAYERS.PATH) {
+    const gp = layoutLayer(pathCanvasEl, pctx, vis, s);
+    if (state.layers.path) drawPath(gp);
+    else gp.clearRect(vis.x, vis.y, vis.w, vis.h);
+  }
 }
 
 function applyView() {
   canvasHolder.style.transform =
     "translate(" + mapView.panX + "px," + mapView.panY + "px) scale(" + mapView.scale + ")";
   updatePlayerMarker(lastPos);
+  if (edit.mode && edit.cursorCell) updateBrushCursor(edit.cursorCell[0], edit.cursorCell[1]);
   requestRender();
 }
 
@@ -471,6 +523,7 @@ function pushCalibHistory() {
   calibHistory.undo.push(calibSnapshot());
   if (calibHistory.undo.length > 100) calibHistory.undo.shift();
   calibHistory.redo.length = 0;
+  syncHistoryButtons();
 }
 
 function applyCalibSnapshot(snapshot) {
@@ -485,7 +538,7 @@ function applyCalibSnapshot(snapshot) {
   renderCalibList();
   renderCalibMarks();
   updatePlayerMarker(lastPos);
-  syncPathCanvas();
+  requestRender();
 }
 
 function undoCalibEdit() {
@@ -496,6 +549,7 @@ function undoCalibEdit() {
   }
   calibHistory.redo.push(calibSnapshot());
   applyCalibSnapshot(snapshot);
+  syncHistoryButtons();
   setStatus("已撤销标定操作", "ready");
   return true;
 }
@@ -508,6 +562,7 @@ function redoCalibEdit() {
   }
   calibHistory.undo.push(calibSnapshot());
   applyCalibSnapshot(snapshot);
+  syncHistoryButtons();
   setStatus("已重做标定操作", "ready");
   return true;
 }
@@ -568,6 +623,7 @@ function renderCalibList() {
 
 function updateCalibSaveBtn() {
   $("btnCalibSave").disabled = calib.points.filter(p => p.enabled).length < 3;
+  syncHistoryButtons();
 }
 
 // ---------------- 模式：浏览 / 标定 / 网格 / 取坐标 ----------------
@@ -576,10 +632,12 @@ function updateCalibSaveBtn() {
 // 所以指示器永远反映真实状态——比如未标定时进网格会被拒，指示器不会骗人。
 const MODES = {
   browse: { label: "浏览",   color: "#c3fd43" },
-  calib:  { label: "标定",   color: "#ffd56a" },
-  edit:   { label: "网格",   color: "#80f0a5" },
-  pick:   { label: "取坐标", color: "#74dcf5" },
+  calib:  { label: "标定",   color: "#c3fd43" },
+  edit:   { label: "网格",   color: "#c3fd43" },
+  pick:   { label: "取坐标", color: "#c3fd43" },
 };
+const DEFAULT_SIDE_TAB = { browse: "capture", calib: "calib", edit: "grid", pick: "coords" };
+let activeSideTab = null;
 
 function currentMode() {
   if (edit.mode) return "edit";
@@ -602,11 +660,10 @@ function syncModeChrome() {
     btn.classList.toggle("on", active);
     btn.setAttribute("aria-pressed", String(active));
   });
-  // data-mode 可以是**空格分隔的多个模式**（如 "browse calib"）：侧栏有些面板
-  // 在两个模式下都得能用——地图标记就是，标定时要拿它当参照物对齐。
+  // 上下文工具组仍按模式显示；侧栏由 Tab 管理，不再把所有面板纵向堆在一起。
   const inMode = el => (el.dataset.mode || "").split(/\s+/).includes(m);
   document.querySelectorAll(".tb-act").forEach(el => { el.hidden = !inMode(el); });
-  document.querySelectorAll(".side-sec").forEach(el => { el.hidden = !inMode(el); });
+  if (!activeSideTab) setSideTab(DEFAULT_SIDE_TAB[m]);
   $("modeTag").textContent = MODES[m].label;
   $("canvasModeLabel").textContent = MODES[m].label;
   $("sideModeCode").textContent = modeOrder[m];
@@ -614,6 +671,7 @@ function syncModeChrome() {
   document.querySelectorAll(".rail-mode").forEach(btn => {
     btn.classList.toggle("is-active", btn.dataset.railMode === m);
   });
+  syncHistoryButtons();
   requestRender();   // 编辑层只在 edit 模式画，切换后要重画
 }
 
@@ -625,10 +683,23 @@ function setSidePanel(open) {
   const toggle = $("btnSideToggle");
   toggle.setAttribute("aria-label", open ? "收起检查器" : "展开检查器");
   toggle.title = open ? "收起检查器" : "展开检查器";
+  if (open && !activeSideTab) setSideTab(DEFAULT_SIDE_TAB[currentMode()]);
 }
 
 function isSidePanelOpen() {
   return !document.body.classList.contains("side-collapsed");
+}
+
+function setSideTab(name) {
+  activeSideTab = name;
+  document.querySelectorAll("[data-side-tab]").forEach(button => {
+    const active = button.dataset.sideTab === name;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  document.querySelectorAll(".side-panel").forEach(panel => {
+    panel.hidden = panel.dataset.panel !== name;
+  });
 }
 
 function setMode(name) {
@@ -664,11 +735,16 @@ function setCalibMode(on) {
 
 // 点击位置 → holder 坐标（即总图像素）。画布只覆盖可见区域，
 // 所以这里直接用 view 变换反算，不再依赖画布尺寸。
-function canvasPixelOfEvent(e) {
-  const rect = canvasWrap.getBoundingClientRect();
+let gestureRect = null;
+
+function canvasPixelOfClient(clientX, clientY, rect = gestureRect || canvasWrap.getBoundingClientRect()) {
   if (!rect.width || !rect.height) return null;
-  return [(e.clientX - rect.left - mapView.panX) / mapView.scale,
-          (e.clientY - rect.top - mapView.panY) / mapView.scale];
+  return [(clientX - rect.left - mapView.panX) / mapView.scale,
+          (clientY - rect.top - mapView.panY) / mapView.scale];
+}
+
+function canvasPixelOfEvent(e) {
+  return canvasPixelOfClient(e.clientX, e.clientY);
 }
 
 function openCalibDialog(px, py) {
@@ -730,7 +806,7 @@ async function saveCalib() {
       "已标定 ✅ 平均误差 <b>" + res.average_error + "</b> 最大 <b>" + res.max_error + "</b><br>已保存: <b>" + res.saved + "</b>";
     addLog("标定已保存: " + res.saved + "（平均误差 " + res.average_error + "）", "t-ok");
     updatePlayerMarker(lastPos);
-    syncPathCanvas();
+    requestRender();
   } catch (e) { addLog("标定请求失败: " + e.message, "t-err"); }
 }
 
@@ -776,7 +852,7 @@ async function loadMappingForCurrent() {
   }
   renderCalibList(); renderCalibMarks();
   updatePlayerMarker(lastPos);
-  syncPathCanvas();
+  requestRender();
   updateMarksHint();   // 标定状态决定标记能不能画
 }
 
@@ -822,6 +898,10 @@ const edit = {
   marquee: null,
   v: null, dirty: false,
   pointer: null,   // 光标在 canvasWrap 内的位置，按住画笔键时 HUD 用它定位
+  cursorCell: null,
+  pendingPaint: null,
+  paintFrameQueued: false,
+  paintDirty: false,
 };
 const editCanvasEl = $("editCanvas");
 const ectx = editCanvasEl.getContext("2d");
@@ -857,23 +937,6 @@ function cellCornerPx(ix, iz, out) {
   return out;
 }
 
-//: 逐格调用的复用暂存，避免每格分配
-const _rectScratch = { x: 0, y: 0, w: 0, h: 0 };
-
-// 格子 → 画布像素矩形，写进 out
-function cellRectPxInto(ix, iz, out) {
-  const e = ed(), m = calib.mapping.inverse_matrix, s = e.cellSize;
-  const wx0 = e.origin[0] + ix * s, wz0 = e.origin[1] + iz * s;
-  const wx1 = wx0 + s, wz1 = wz0 + s;
-  const a0 = m[0][0] * wx0 + m[0][1] * wz0 + m[0][2];
-  const b0 = m[1][0] * wx0 + m[1][1] * wz0 + m[1][2];
-  const a1 = m[0][0] * wx1 + m[0][1] * wz1 + m[0][2];
-  const b1 = m[1][0] * wx1 + m[1][1] * wz1 + m[1][2];
-  out.x = Math.min(a0, a1); out.y = Math.min(b0, b1);
-  out.w = Math.abs(a1 - a0); out.h = Math.abs(b1 - b0);
-  return out;
-}
-
 // 格子空间的矩形 [x0..x1]×[z0..z1] → 画布像素包围盒。
 // 必须四个角都变换再取包围盒：标定可能翻转某个轴，只取两个 min 角点会缺一条边。
 function cellRangeRectPx(x0, z0, x1, z1) {
@@ -885,125 +948,88 @@ function cellRangeRectPx(x0, z0, x1, z1) {
            h: Math.max(a[1], b[1], c[1], d[1]) - by };
 }
 
-function drawCell(ix, iz) {
-  if (editCanvasEl.width <= 1 || !calib.mapping) return;   // 未标定就没有像素↔格子换算
-  const e = ed();
-  const r = cellRectPxInto(ix, iz, _rectScratch);
-  ectx.fillStyle = e.blocked.has(editCellKey(ix, iz)) ? "rgba(255,85,85,0.24)"
-                                                       : "rgba(5,212,210,0.22)";
-  ectx.fillRect(r.x, r.y, Math.max(1, r.w + 1), Math.max(1, r.h + 1));
-}
-
-// 已触碰格子的边界盒 —— 决定保存后 npz 的实际范围：盒内没涂色的格子会存成"未知"。
-// 保存格式是稠密的，所以这个范围直接决定文件大小，必须让用户看得见。
-function growBBox(b, k) {
-  const p = k.split(","), ix = +p[0], iz = +p[1];
-  if (!b) return { x0: ix, x1: ix, z0: iz, z1: iz };
-  if (ix < b.x0) b.x0 = ix;
-  if (ix > b.x1) b.x1 = ix;
-  if (iz < b.z0) b.z0 = iz;
-  if (iz > b.z1) b.z1 = iz;
-  return b;
-}
-
-function computeBBox(e) {
-  let b = null;
-  for (const k of e.free) b = growBBox(b, k);
-  for (const k of e.blocked) b = growBBox(b, k);
-  return b;
-}
-
-function inBBox(b, ix, iz) {
-  return !!b && ix >= b.x0 && ix <= b.x1 && iz >= b.z0 && iz <= b.z1;
-}
-
 // 保存后文件的真实范围：有 shape 时是 [0,W)×[0,H)（读文件时带回来的原范围），
 // 再把涂到范围外的格子并进来。没有 shape（新建网格）才退回已涂格子的边界盒。
 // 这张黄框也是连通性判定的边界——规划器把数组外一律当阻挡。
 function savedBounds(e) {
-  const bb = e.bbox || computeBBox(e);
-  if (!e.shape) return bb;
-  const x1 = e.shape[1] - 1, z1 = e.shape[0] - 1;
-  if (!bb) return { x0: 0, x1: x1, z0: 0, z1: z1 };
-  return { x0: Math.min(0, bb.x0), x1: Math.max(x1, bb.x1),
-           z0: Math.min(0, bb.z0), z1: Math.max(z1, bb.z1) };
+  return e.savedBounds();
 }
 
-// 可见矩形 → 格子下标范围。标定矩阵可能带旋转，所以取四个角的包围盒，再外扩一格。
-function visibleCellRange(e, vis) {
-  const m = calib.mapping.matrix, s = e.cellSize;
-  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
-  for (const [px, py] of [[vis.x, vis.y], [vis.x + vis.w, vis.y],
-                          [vis.x, vis.y + vis.h], [vis.x + vis.w, vis.y + vis.h]]) {
-    const wx = m[0][0] * px + m[0][1] * py + m[0][2];
-    const wz = m[1][0] * px + m[1][1] * py + m[1][2];
-    const ix = Math.floor((wx - e.origin[0]) / s);
-    const iz = Math.floor((wz - e.origin[1]) / s);
-    if (ix < x0) x0 = ix;
-    if (ix > x1) x1 = ix;
-    if (iz < z0) z0 = iz;
-    if (iz > z1) z1 = iz;
+function gridCellToPixelTransform(e) {
+  const inv = calib.mapping.inverse_matrix;
+  const scale = e.cellSize;
+  const ox = e.origin[0];
+  const oz = e.origin[1];
+  return {
+    a00: inv[0][0] * scale,
+    a01: inv[0][1] * scale,
+    a02: inv[0][0] * ox + inv[0][1] * oz + inv[0][2],
+    a10: inv[1][0] * scale,
+    a11: inv[1][1] * scale,
+    a12: inv[1][0] * ox + inv[1][1] * oz + inv[1][2],
+  };
+}
+
+function invalidateGridLayer() {
+  gridLayerState.valid = false;
+}
+
+function updateGridBoundsOverlay(e) {
+  const bb = e ? savedBounds(e) : null;
+  if (!bb || !calib.mapping || !edit.mode || !state.layers.grid) {
+    gridBoundsEl.style.display = "none";
+    return;
   }
-  return { x0: x0 - 1, x1: x1 + 1, z0: z0 - 1, z1: z1 + 1 };
+  const rect = cellRangeRectPx(bb.x0, bb.z0, bb.x1 + 1, bb.z1 + 1);
+  gridBoundsEl.style.left = rect.x + "px";
+  gridBoundsEl.style.top = rect.y + "px";
+  gridBoundsEl.style.width = rect.w + "px";
+  gridBoundsEl.style.height = rect.h + "px";
+  gridBoundsEl.style.borderWidth = Math.max(0.5, 1 / mapView.scale) + "px";
+  gridBoundsEl.style.display = "block";
 }
 
 function drawAllCells() {
   const vis = visibleRect();
-  ectx.clearRect(vis.x, vis.y, vis.w, vis.h);
   const e = ed();
-  if (!e || !calib.mapping) return;   // 未标定就没有像素↔格子换算，直接不画
-  e.bbox = computeBBox(e);
-  // 这里重算完 bbox 要顺手刷一下统计面板：涂/擦格子是"先 updateEditStats 再
-  // requestRender"，而擦除时 bbox 故意不缩（增量缩边界是 O(n)，每格都缩会变成
-  // O(n²)），所以那一刻面板读到的还是旧的边界盒；等这一帧重算完才能显示对。
-  // 少了这一句，擦除后「范围/未知」会一直停在旧值，直到下一次别的动作偶然刷新。
-  updateEditStats();
-  const bb = savedBounds(e);
-  if (!bb) return;
-  // 保存范围整块铺一层淡色（单次 fillRect，不逐格循环 —— 范围可能很大）
-  const p = cellRangeRectPx(bb.x0, bb.z0, bb.x1 + 1, bb.z1 + 1);
-  ectx.fillStyle = "rgba(120,120,140,0.055)";
-  ectx.fillRect(p.x, p.y, p.w, p.h);
-  if (e.bbox) {
-    // 只画可见格子：开销跟"屏幕上能看到多少格"走，而不是跟整张网格（可能几万格）走
-    const r = visibleCellRange(e, vis);
-    const w = r.x1 - r.x0 + 1, h = r.z1 - r.z0 + 1;
-    if (w > 0 && h > 0 && w * h <= 400000) {
-      for (let ix = r.x0; ix <= r.x1; ix++) {
-        for (let iz = r.z0; iz <= r.z1; iz++) {
-          const k = ix + "," + iz;
-          if (e.free.has(k) || e.blocked.has(k)) drawCell(ix, iz);
-        }
-      }
-    } else {
-      // 视野覆盖整张网格时的兜底：按集合遍历（此时没有更好的索引）
-      for (const k of e.free) { drawCell(parseInt(k, 10), +k.slice(k.indexOf(",") + 1)); }
-      for (const k of e.blocked) { drawCell(parseInt(k, 10), +k.slice(k.indexOf(",") + 1)); }
-    }
+  if (!e || !calib.mapping) return;
+  const transform = gridCellToPixelTransform(e);
+  const layerKey = [
+    state.activeKey,
+    vis.x, vis.y, vis.w, vis.h,
+    transform.a00, transform.a01, transform.a02,
+    transform.a10, transform.a11, transform.a12,
+    editCanvasEl.width, editCanvasEl.height,
+  ].join("|");
+  const fullRedraw = !gridLayerState.valid ||
+    gridLayerState.key !== layerKey ||
+    gridLayerState.width !== editCanvasEl.width ||
+    gridLayerState.height !== editCanvasEl.height;
+  const changed = gridRasterCache.sync(e);
+  updateGridBoundsOverlay(e);
+
+  if (fullRedraw) {
+    ectx.clearRect(vis.x, vis.y, vis.w, vis.h);
+    ectx.save();
+    ectx.globalAlpha = state.gridOpacity;
+    gridRasterCache.drawAll(ectx, transform, vis);
+    ectx.restore();
+    gridLayerState.valid = true;
+    gridLayerState.key = layerKey;
+    gridLayerState.width = editCanvasEl.width;
+    gridLayerState.height = editCanvasEl.height;
+    return;
   }
-  ectx.strokeStyle = "rgba(255,220,120,0.68)";
-  ectx.lineWidth = 1 / mapView.scale;
-  ectx.strokeRect(p.x, p.y, p.w, p.h);
+
+  if (changed.length) {
+    ectx.save();
+    ectx.globalAlpha = state.gridOpacity;
+    gridRasterCache.drawChanged(ectx, transform, vis, changed);
+    ectx.restore();
+  }
 }
 
 // ---------------- 框选（Shift+左键拖动） ----------------
-function rectCellKeys(a, b) {
-  const x0 = Math.min(a[0], b[0]), x1 = Math.max(a[0], b[0]);
-  const z0 = Math.min(a[1], b[1]), z1 = Math.max(a[1], b[1]);
-  const total = (x1 - x0 + 1) * (z1 - z0 + 1);
-  if (total > 300000) return null;
-  const out = [];
-  for (let ix = x0; ix <= x1; ix++)
-    for (let iz = z0; iz <= z1; iz++)
-      out.push(ix + "," + iz);
-  return out;
-}
-
-function currentSelection() {
-  const v = state.views.get(state.activeKey);
-  return (v && v.edit && v.edit.selection) || null;
-}
-
 // 选中层画在**独立画布**（selCanvas）上：框选时每次鼠标移动只需重画这一个矩形，
 // 不必把成千上万个格子整屏重绘一遍。选择只可能由矩形框选产生，所以永远是个矩形。
 function selRectOf() {
@@ -1033,53 +1059,53 @@ function drawSelLayer() {
 
 function updateSelBar() {
   const r = selRectOf();
-  // 框选过程中按面积直接算（O(1)），不为了显示个数字去建几十万个键的 Set
+  // 选择只可能是矩形，面积 O(1) 算出，不需要展开为逐格集合。
   $("selCount").textContent = r ? (r.x1 - r.x0 + 1) * (r.z1 - r.z0 + 1) : 0;
 }
 
 function clearSelection() {
-  const sel = currentSelection();
-  if (sel) sel.clear();
   const v = state.views.get(state.activeKey);
   if (v && v.edit) v.edit.selRect = null;
-  requestRender();
+  requestRender(RENDER_LAYERS.SELECTION);
   updateSelBar();
 }
 
 // 当前是否框选着格子（网格模式的快捷键要靠它决定"做事"还是"选工具"）
 function hasSelection() {
   const v = state.views.get(state.activeKey);
-  return !!(v && v.edit && v.edit.selection && v.edit.selection.size);
+  return !!(v && v.edit && v.edit.selRect);
 }
 
 // 对选中的格子批量执行画笔操作
 function applySelection(brush) {
   const v = state.views.get(state.activeKey);
-  const sel = v && v.edit && v.edit.selection;
-  if (!sel || !sel.size) { addLog("没有选中的格子", "t-err"); return; }
   const e = v.edit;
+  const rect = e && e.selRect;
+  if (!rect) { addLog("没有选中的格子", "t-err"); return; }
+  const total = (rect.x1 - rect.x0 + 1) * (rect.z1 - rect.z0 + 1);
   beginEditTransaction(e);
-  for (const k of sel) {
-    recordGridCellBefore(e, k);
-    if (brush === "free") { e.blocked.delete(k); e.free.add(k); }
-    else if (brush === "blocked") { e.free.delete(k); e.blocked.add(k); }
-    else { e.free.delete(k); e.blocked.delete(k); }
+  const stateValue = brush === "free" ? CELL_FREE
+    : brush === "blocked" ? CELL_BLOCKED
+      : CELL_UNKNOWN;
+  for (let ix = rect.x0; ix <= rect.x1; ix++) {
+    for (let iz = rect.z0; iz <= rect.z1; iz++) {
+      e.setCell(ix, iz, stateValue);
+    }
   }
   commitEditTransaction(e);
-  edit.dirty = true;
+  setGridDirty(true);
   e.selRect = null;
   updateEditStats();
-  requestRender();
+  requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
   const label = brush === "free" ? "填充 Free" : brush === "blocked" ? "填充 Blocked" : "填充 未知";
-  addLog("已对选中的 " + sel.size + " 格执行: " + label, "t-ok");
-  sel.clear();
+  addLog("已对选中的 " + total + " 格执行: " + label, "t-ok");
   updateSelBar();
 }
 
 // 框选开始：以 (ax,az) 为锚点
 function startMarquee(ix, iz, id) {
   edit.marquee = { id: id, ax: ix, az: iz, cur: [ix, iz] };
-  requestRender();
+  requestRender(RENDER_LAYERS.SELECTION);
   updateSelBar();
 }
 
@@ -1087,7 +1113,7 @@ function updateMarquee(ix, iz) {
   const m = edit.marquee;
   if (!m || (m.cur[0] === ix && m.cur[1] === iz)) return;
   m.cur = [ix, iz];
-  requestRender();      // rAF 合并：一次拖动最多每帧重画一次
+  requestRender(RENDER_LAYERS.SELECTION);      // rAF 合并：一次拖动最多每帧重画一次
   updateSelBar();
 }
 
@@ -1096,19 +1122,18 @@ function finishMarquee() {
   const v = state.views.get(state.activeKey);
   edit.marquee = null;
   if (m && m.cur && v && v.edit) {
-    const keys = rectCellKeys([m.ax, m.az], m.cur);   // 只在收手时建这一次 Set
-    if (keys) {
-      v.edit.selection = new Set(keys);
-      v.edit.selRect = { x0: Math.min(m.ax, m.cur[0]), x1: Math.max(m.ax, m.cur[0]),
-                         z0: Math.min(m.az, m.cur[1]), z1: Math.max(m.az, m.cur[1]) };
-      addLog("已框选 " + keys.length + " 格，可填充 Free/Blocked/未知", "t-ok");
+    const rect = { x0: Math.min(m.ax, m.cur[0]), x1: Math.max(m.ax, m.cur[0]),
+                   z0: Math.min(m.az, m.cur[1]), z1: Math.max(m.az, m.cur[1]) };
+    const total = (rect.x1 - rect.x0 + 1) * (rect.z1 - rect.z0 + 1);
+    if (total <= 300000) {
+      v.edit.selRect = rect;
+      addLog("已框选 " + total + " 格，可填充 Free/Blocked/未知", "t-ok");
     } else {
-      v.edit.selection = new Set();
       v.edit.selRect = null;
       addLog("框选区域过大（超过 30 万格），已取消", "t-err");
     }
   }
-  requestRender();
+  requestRender(RENDER_LAYERS.SELECTION);
   updateSelBar();
 }
 
@@ -1120,108 +1145,35 @@ function syncEditCanvas() {
     editCanvasEl.width = 1; editCanvasEl.height = 1;
     selCanvasEl.width = 1; selCanvasEl.height = 1;
   }
-  requestRender();
-}
-
-// 网格编辑历史使用逐格差分，避免每个笔画复制整份 free/blocked 集合。
-// 一次拖动只在第一次碰到某格时记录旧状态，收笔时再一次性入栈。
-function gridCellState(e, key) {
-  return e.free.has(key) ? 1 : (e.blocked.has(key) ? 2 : 0);
-}
-
-function setGridCellState(e, key, value) {
-  e.free.delete(key);
-  e.blocked.delete(key);
-  if (value === 1) e.free.add(key);
-  else if (value === 2) e.blocked.add(key);
-}
-
-function gridMetaSnapshot(e) {
-  return {
-    origin: [e.origin[0], e.origin[1]],
-    shape: e.shape ? [e.shape[0], e.shape[1]] : null,
-    cellSize: e.cellSize,
-  };
-}
-
-function historyOf(e) {
-  if (!e.history) e.history = { undo: [], redo: [], active: null };
-  return e.history;
+  requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
 }
 
 function beginEditTransaction(e, withMeta = false) {
-  const h = historyOf(e);
-  if (h.active) return;
-  h.active = {
-    cells: new Map(),
-    metaBefore: withMeta ? gridMetaSnapshot(e) : null,
-  };
-}
-
-function recordGridCellBefore(e, key) {
-  const h = historyOf(e);
-  if (!h.active) beginEditTransaction(e);
-  if (!h.active.cells.has(key)) {
-    h.active.cells.set(key, gridCellState(e, key));
-  }
+  e.beginTransaction(withMeta ? e.metadataSnapshot() : null);
 }
 
 function commitEditTransaction(e) {
-  const h = historyOf(e);
-  const active = h.active;
-  h.active = null;
-  if (!active) return;
-  const cells = [];
-  for (const [key, before] of active.cells) {
-    const after = gridCellState(e, key);
-    if (before !== after) cells.push([key, before, after]);
-  }
-  const metaBefore = active.metaBefore;
-  const metaAfter = metaBefore ? gridMetaSnapshot(e) : null;
-  const metaChanged = !!metaBefore &&
-    JSON.stringify(metaBefore) !== JSON.stringify(metaAfter);
-  if (!cells.length && !metaChanged) return;
-  h.undo.push({ cells, metaBefore: metaChanged ? metaBefore : null,
-                metaAfter: metaChanged ? metaAfter : null });
-  if (h.undo.length > 100) h.undo.shift();
-  h.redo.length = 0;
-}
-
-function applyGridHistoryState(e, op, direction) {
-  if (op.metaBefore) {
-    const meta = direction === "undo" ? op.metaBefore : op.metaAfter;
-    e.origin = [meta.origin[0], meta.origin[1]];
-    e.shape = meta.shape ? [meta.shape[0], meta.shape[1]] : null;
-    e.cellSize = meta.cellSize;
-  }
-  for (const [key, before, after] of op.cells) {
-    setGridCellState(e, key, direction === "undo" ? before : after);
-  }
-  e.bbox = null;
-  e.selection = new Set();
-  e.selRect = null;
-  edit.dirty = true;
+  const active = e.history.active;
+  const metaAfter = active && active.metaBefore ? e.metadataSnapshot() : null;
+  return e.commitTransaction(metaAfter);
 }
 
 function refreshAfterGridHistory() {
   adoptViewEdit(edit.v);
   updateEditStats();
   updateSelBar();
-  requestRender();
+  requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
 }
 
 function undoGridEdit() {
   const e = ed();
   if (!e) return false;
-  const h = historyOf(e);
-  if (h.active) commitEditTransaction(e);
-  const op = h.undo.pop();
-  if (!op) {
+  if (!e.undo()) {
     setStatus("没有可撤销的网格操作", "idle");
     return false;
   }
-  h.redo.push(op);
-  applyGridHistoryState(e, op, "undo");
+  e.selRect = null;
+  setGridDirty(true);
   refreshAfterGridHistory();
   setStatus("已撤销网格操作", "ready");
   return true;
@@ -1230,53 +1182,47 @@ function undoGridEdit() {
 function redoGridEdit() {
   const e = ed();
   if (!e) return false;
-  const h = historyOf(e);
-  const op = h.redo.pop();
-  if (!op) {
+  if (!e.redo()) {
     setStatus("没有可重做的网格操作", "idle");
     return false;
   }
-  h.undo.push(op);
-  applyGridHistoryState(e, op, "redo");
+  e.selRect = null;
+  setGridDirty(true);
   refreshAfterGridHistory();
   setStatus("已重做网格操作", "ready");
   return true;
 }
 
-function paintCell(ix, iz) {
-  const e = ed();
-  if (!e) return;
-  const k = editCellKey(ix, iz);
-  recordGridCellBefore(e, k);
-  if (edit.brush === "free") { e.blocked.delete(k); e.free.add(k); }
-  else if (edit.brush === "blocked") { e.free.delete(k); e.blocked.add(k); }
-  else { e.free.delete(k); e.blocked.delete(k); }
-  edit.dirty = true;
-  // 增量扩边界盒（O(1)），免得每涂一格就全量重扫；擦除时不缩，交给收笔时的 drawAllCells 重算
-  if (edit.brush !== "erase") e.bbox = growBBox(e.bbox, k);
-  requestRender();
-  updateEditStats();
-}
-
 // 画笔宽度：以目标格为中心的 w×w 方块（w=1 即单格）
-function paintBlock(ix, iz) {
+function paintBlock(e, ix, iz, value) {
   const w = edit.brushSize || 1;
   const half = Math.floor((w - 1) / 2);
+  let changed = false;
   for (let dx = -half; dx < w - half; dx++)
     for (let dy = -half; dy < w - half; dy++)
-      paintCell(ix + dx, iz + dy);
+      if (e.setCell(ix + dx, iz + dy, value)) changed = true;
+  return changed;
 }
 
 // 拖动涂色：从上一个格子到当前格子连一条线（Bresenham），每步按画笔宽度涂方块
 function paintLineTo(ix, iz) {
-  if (!edit.lastCell) { paintBlock(ix, iz); edit.lastCell = [ix, iz]; return; }
+  const e = ed();
+  if (!e) return;
+  const value = edit.brush === "free" ? CELL_FREE
+    : edit.brush === "blocked" ? CELL_BLOCKED
+      : CELL_UNKNOWN;
+  if (!edit.lastCell) {
+    if (paintBlock(e, ix, iz, value)) edit.paintDirty = true;
+    edit.lastCell = [ix, iz];
+    return;
+  }
   let [lx, lz] = edit.lastCell;
   const dx = Math.abs(ix - lx), dy = Math.abs(iz - lz);
   const sx = ix > lx ? 1 : -1, sy = iz > lz ? 1 : -1;
   let err = dx - dy;
   let n = 0;
   while (n++ < 100000) {
-    paintBlock(lx, lz);
+    if (paintBlock(e, lx, lz, value)) edit.paintDirty = true;
     if (lx === ix && lz === iz) break;
     const e2 = 2 * err;
     if (e2 > -dy) { err -= dy; lx += sx; }
@@ -1287,23 +1233,77 @@ function paintLineTo(ix, iz) {
 
 function updateEditStats() {
   const e = ed();
-  if (!e) { $("editStats").textContent = "-"; return; }
-  // 还没画过（视图未合成总图时 drawAllCells 不会跑）就先自己算一次，统计不依赖画布
-  if (!e.bbox && (e.free.size || e.blocked.size)) e.bbox = computeBBox(e);
+  if (!e) {
+    $("editStats").textContent = "-";
+    syncHistoryButtons();
+    return;
+  }
   // 未知格数 = 保存范围面积 − 已涂格数（范围内没涂色的都会被存成未知）
   const bb = savedBounds(e);
   const area = bb ? (bb.x1 - bb.x0 + 1) * (bb.z1 - bb.z0 + 1) : 0;
-  const unknown = Math.max(0, area - e.free.size - e.blocked.size);
-  $("editStats").textContent = "Free: " + e.free.size + " / Blocked: " + e.blocked.size +
+  const unknown = Math.max(0, area - e.size);
+  $("editStats").textContent = "Free: " + e.freeCount + " / Blocked: " + e.blockedCount +
     (bb ? " / 未知: " + unknown + "　范围 " + (bb.x1 - bb.x0 + 1) + "×" + (bb.z1 - bb.z0 + 1)
         : "　（尚无格子）");
+  syncHistoryButtons();
+}
+
+function setGridDirty(value) {
+  edit.dirty = value;
+  const chip = $("dirtyState");
+  chip.dataset.dirty = String(value);
+  chip.textContent = value ? "未保存" : "已保存";
+}
+
+function syncHistoryButtons() {
+  let undo = false;
+  let redo = false;
+  if (edit.mode) {
+    const history = ed() && ed().history;
+    undo = !!(history && history.undo.length);
+    redo = !!(history && history.redo.length);
+  } else if (calib.mode) {
+    undo = calibHistory.undo.length > 0;
+    redo = calibHistory.redo.length > 0;
+  }
+  $("btnUndo").disabled = !undo;
+  $("btnRedo").disabled = !redo;
+}
+
+function processPendingPaint() {
+  const pending = edit.pendingPaint;
+  edit.pendingPaint = null;
+  if (!pending || !edit.painting || pending.id !== edit.painting.id) return false;
+  const point = canvasPixelOfClient(pending.clientX, pending.clientY);
+  if (!point) return false;
+  const cell = cellAtPixel(point[0], point[1]);
+  if (!cell) return false;
+  paintLineTo(cell[0], cell[1]);
+  return true;
+}
+
+function flushPaintFrame() {
+  edit.paintFrameQueued = false;
+  processPendingPaint();
+  if (!edit.paintDirty) return;
+  edit.paintDirty = false;
+  setGridDirty(true);
+  updateEditStats();
+  render(RENDER_LAYERS.GRID);
+}
+
+function queuePaintFrame() {
+  if (edit.paintFrameQueued) return;
+  edit.paintFrameQueued = true;
+  requestAnimationFrame(flushPaintFrame);
 }
 
 function adoptViewEdit(v) {
   edit.v = v;
-  $("editOriginX").value = v.edit.origin[0];
-  $("editOriginZ").value = v.edit.origin[1];
-  $("editCellSize").value = v.edit.cellSize;
+  const document = v.edit;
+  $("editOriginX").value = document.origin[0];
+  $("editOriginZ").value = document.origin[1];
+  $("editCellSize").value = document.cellSize;
   updateEditStats();
   updateSelBar();
   syncEditCanvas();
@@ -1315,21 +1315,13 @@ async function loadGrid2D(force) {
   const v = state.views.get(state.activeKey);
   if (!map || !zoom || !v) return;
   if (!v.edit) {
-    v.edit = { origin: [0, 0], shape: null, cellSize: 1, free: new Set(), blocked: new Set(),
-               selection: new Set(), selRect: null, bbox: null, loaded: false };
+    v.edit = new GridDocument();
   }
   if (v.edit.loaded && !force) { adoptViewEdit(v); return; }
   try {
-    const resp = await fetch("/api/grid2d?map=" + encodeURIComponent(map) + "&zoom=" + encodeURIComponent(zoom));
-    const res = await resp.json();
-    if (res.data) {
-      const o = res.data.origin || [0, 0, 0];
-      v.edit.origin = [o[0], o[2]];
-      v.edit.shape = res.data.shape ? [res.data.shape[0], res.data.shape[1]] : null;
-      v.edit.cellSize = res.data.cell_size || 1;
-      v.edit.free = new Set((res.data.cells || []).map(c => c.join(",")));
-      v.edit.blocked = new Set((res.data.blocked || []).map(c => c.join(",")));
-      v.edit.bbox = null;   // 交给 drawAllCells 重算
+    const { document, response: res } = await loadGridDocument(map, zoom);
+    if (document) {
+      v.edit = document;
       $("editStatus").innerHTML = "已载入: <b>" + res.data.cells.length + "</b> Free / <b>" +
         res.data.blocked.length + "</b> Blocked" +
         (v.edit.shape ? "，保存范围 <b>" + v.edit.shape[0] + "×" + v.edit.shape[1] +
@@ -1340,23 +1332,21 @@ async function loadGrid2D(force) {
     } else if (res.error) {
       $("editStatus").innerHTML = '<span style="color:#ff9977">网格读取失败: ' + res.error + '</span>';
     } else {
-      v.edit.origin = [0, 0];
-      v.edit.cellSize = 1;
+      v.edit = new GridDocument();
       $("editStatus").innerHTML = "无已存网格（origin=[0,0], cell_size=1；保存时按已涂格子的范围定 origin）";
     }
     v.edit.loaded = true;
+    gridRasterCache.clear();
+    invalidateGridLayer();
     // origin 可能变了，取坐标用的基准与统计都得跟着失效重算
     v.pickRef = null;
     v.pickRefPending = null;
   } catch (e) {
     $("editStatus").textContent = "网格加载失败: " + e.message;
   }
-  const history = historyOf(v.edit);
-  history.undo.length = 0;
-  history.redo.length = 0;
-  history.active = null;
+  v.edit.clearHistory();
   adoptViewEdit(v);
-  edit.dirty = false;
+  setGridDirty(false);
 }
 
 function setEditMode(on) {
@@ -1375,6 +1365,8 @@ function setEditMode(on) {
   } else {
     edit.painting = false;
     edit.marquee = null;
+    hideBrushCursor();
+    gridBoundsEl.style.display = "none";
     clearSelection();
     editCanvasEl.width = 1; editCanvasEl.height = 1;   // 清掉覆盖层
     selCanvasEl.width = 1; selCanvasEl.height = 1;
@@ -1390,18 +1382,19 @@ const D8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]
 // 两条正交邻格都必须非阻挡（否则算穿墙角），越界视为阻挡——与 grid_io.neighbors
 // 和对端校验器 verify_grid.py 完全一致，这样两边报出来的块数才永远是同一个数。
 function walkableComponents(e) {
-  const free = e.free;
-  if (!free.size) return [];
+  if (!e.freeCount) return [];
   const bb = savedBounds(e);
   if (!bb) return [];
-  const blk = e.blocked;
   // 规划器口径的"阻挡"：被标为阻挡，或落在保存范围之外（越界格 grid_io 一律当阻挡）
   const blockedAt = (x, z) =>
-    (x < bb.x0 || x > bb.x1 || z < bb.z0 || z > bb.z1) || blk.has(x + "," + z);
+    (x < bb.x0 || x > bb.x1 || z < bb.z0 || z > bb.z1) ||
+    e.getCell(x, z) === CELL_BLOCKED;
   const seen = new Set();
   const comps = [];
-  for (const start of free) {
-    if (seen.has(start)) continue;
+  e.forEachCell((ix, iz, value) => {
+    if (value !== CELL_FREE) return;
+    const start = ix + "," + iz;
+    if (seen.has(start)) return;
     seen.add(start);
     const stack = [start];
     let n = 0;
@@ -1413,14 +1406,14 @@ function walkableComponents(e) {
       for (const d of D8) {
         const dx = d[0], dz = d[1], nx = ix + dx, nz = iz + dz;
         const nk = nx + "," + nz;
-        if (!free.has(nk) || seen.has(nk)) continue;
+        if (e.getCell(nx, nz) !== CELL_FREE || seen.has(nk)) continue;
         if (dx && dz && (blockedAt(ix + dx, iz) || blockedAt(ix, iz + dz))) continue;
         seen.add(nk);
         stack.push(nk);
       }
     }
     comps.push(n);
-  }
+  });
   comps.sort((a, b) => b - a);
   return comps;
 }
@@ -1437,22 +1430,21 @@ function walkableComponents(e) {
 function walkableAnomalies(e) {
   const bb = savedBounds(e);
   if (!bb) return { lone: [], trapped: [] };
-  const blk = e.blocked;
   const lone = [], trapped = [];
-  for (const k of e.free) {
-    const c = k.indexOf(",");
-    const ix = parseInt(k, 10), iz = +k.slice(c + 1);
+  e.forEachCell((ix, iz, value) => {
+    if (value !== CELL_FREE) return;
     let hasFreeNb = false, allBlocked = true;
     for (const d of D8) {
       const nx = ix + d[0], nz = iz + d[1];
-      if (e.free.has(nx + "," + nz)) hasFreeNb = true;
+      const neighbor = e.getCell(nx, nz);
+      if (neighbor === CELL_FREE) hasFreeNb = true;
       if (nx < bb.x0 || nx > bb.x1 || nz < bb.z0 || nz > bb.z1) continue;  // 越界当阻挡
-      if (!blk.has(nx + "," + nz)) allBlocked = false;
+      if (neighbor !== CELL_BLOCKED) allBlocked = false;
     }
     // 被困优先：八邻全是阻挡才是可靠的"误点"判据（邻里有未知格就还能冒险连出去）
     if (allBlocked) trapped.push([ix, iz]);
     else if (!hasFreeNb) lone.push([ix, iz]);
-  }
+  });
   return { lone, trapped };
 }
 
@@ -1477,42 +1469,22 @@ async function saveGrid2D() {
   const [map, zoom] = (state.activeKey || "").split("@");
   const e = ed();
   if (!map || !zoom || !e) { addLog("没有可保存的网格数据", "t-err"); return; }
-  const toArr = set => [...set].map(k => k.split(",").map(Number))
-    .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
   try {
-    const resp = await fetch("/api/grid2d", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ map, zoom,
-        data: { origin: [e.origin[0], 0, e.origin[1]], shape: e.shape, cell_size: e.cellSize,
-                cells: toArr(e.free), blocked: toArr(e.blocked) } }),
-    });
-    const res = await resp.json();
+    const res = await saveGridDocument(map, zoom, e);
     if (!res.ok) { addLog("保存网格失败: " + res.error, "t-err"); return; }
     // 服务端按"原范围 ∪ 已涂格子"定最终范围，可能平移了下标基准；
     // 把内存模型同步过去，连续保存才不会漂移、也不会把范围缩回去
     const dx = res.shift ? res.shift[0] : 0, dz = res.shift ? res.shift[1] : 0;
     if (dx || dz) {
-      const rebase = set => new Set([...set].map(k => {
-        const i = k.indexOf(",");
-        return (+k.slice(0, i) - dx) + "," + (+k.slice(i + 1) - dz);
-      }));
-      e.free = rebase(e.free);
-      e.blocked = rebase(e.blocked);
-      e.selection = new Set();
+      e.rebase(dx, dz);
       e.selRect = null;
-      // bbox 是按下标缓存的边界盒，下标已经整体回移了，必须作废重算：
-      // 留着旧的会让 savedBounds()（优先用 e.bbox）返回一个横跨新旧基准的
-      // 巨大范围，面板上的"范围 WxH / 未知 N"和连通性检查全都不对
-      e.bbox = null;
+      gridRasterCache.clear();
+      invalidateGridLayer();
     }
     if (res.origin) e.origin = [res.origin[0], res.origin[2]];
     if (res.shape) e.shape = [res.shape[0], res.shape[1]];
-    const history = historyOf(e);
-    history.undo.length = 0;
-    history.redo.length = 0;
-    history.active = null;
-    edit.dirty = false;
+    e.clearHistory();
+    setGridDirty(false);
     const cw = connectivityWarning(e);
     $("editStatus").innerHTML = "已保存: <b>" + res.path + "</b>" +
       (res.shape ? "（" + res.shape[0] + "×" + res.shape[1] + " 格）" : "") +
@@ -1522,7 +1494,7 @@ async function saveGrid2D() {
     if (cw) addLog("连通性提醒: " + cw, "t-warn");
     updateEditStats();
     updateSelBar();
-    requestRender();
+    requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
   } catch (e) { addLog("保存失败: " + e.message, "t-err"); }
 }
 
@@ -1588,7 +1560,7 @@ function drawPath() {
 
 // 路径层由 render() 统一摆放，这里只要触发一次重画
 function syncPathCanvas() {
-  requestRender();
+  requestRender(RENDER_LAYERS.PATH);
 }
 
 function markPath() {
@@ -1808,7 +1780,7 @@ function markIcon(file) {
   if (cur !== undefined) return cur;
   markIcons.set(file, "loading");
   const img = new Image();
-  img.onload = () => { markIcons.set(file, img); requestRender(); };
+  img.onload = () => { markIcons.set(file, img); requestRender(RENDER_LAYERS.BASE); };
   img.onerror = () => { markIcons.set(file, "missing"); };
   img.src = "/api/marks/icon?f=" + encodeURIComponent(file);
   return "loading";
@@ -1867,7 +1839,7 @@ async function loadMarkers() {
     renderMarksPanel();
     buildMarkPicker();   // 数据到位后才填筛选器（失败时它会显示占位文案）
     updateMarksHint();
-    requestRender();
+    requestRender(RENDER_LAYERS.BASE);
   })();
   return state.markersPromise;
 }
@@ -2007,7 +1979,7 @@ function toggleMarkItem(tid) {
   else state.markHidden.add(tid);
   renderMpItems();
   updateMarksHint();
-  requestRender();
+  requestRender(RENDER_LAYERS.BASE);
 }
 
 // 全选 / 取消全选：作用在**整张图的所有图标**上（不只是当前这个大类的）
@@ -2018,7 +1990,7 @@ function setAllMarkItems(visible) {
   else { state.markHidden.clear(); for (const t of tids) state.markHidden.add(t); }
   renderMpItems();
   updateMarksHint();
-  requestRender();
+  requestRender(RENDER_LAYERS.BASE);
 }
 
 function resetMarkFilter() {
@@ -2027,7 +1999,7 @@ function resetMarkFilter() {
     : new Set();
   renderMpItems();
   updateMarksHint();
-  requestRender();
+  requestRender(RENDER_LAYERS.BASE);
 }
 
 function updateMarksHint() {
@@ -2397,18 +2369,25 @@ $("mpAll").onclick = () => setAllMarkItems(true);
 $("mpNone").onclick = () => setAllMarkItems(false);
 $("mpReset").onclick = resetMarkFilter;
 $("btnFit").onclick = fitView;
-// 模式段：点当前模式回到"浏览"，点别的切过去
-$("btnBrowse").onclick = () => setMode("browse");
-$("btnCalib").onclick = () => setMode(calib.mode ? "browse" : "calib");
-$("btnEdit").onclick = () => setMode(edit.mode ? "browse" : "edit");
-$("btnPick").onclick = () => setMode(pick.mode ? "browse" : "pick");
 $("btnPanel").onclick = () => setSidePanel(!isSidePanelOpen());
 $("btnSideToggle").onclick = () => setSidePanel(!isSidePanelOpen());
+$("btnUndo").onclick = () => {
+  if (edit.mode) undoGridEdit();
+  else if (calib.mode) undoCalibEdit();
+};
+$("btnRedo").onclick = () => {
+  if (edit.mode) redoGridEdit();
+  else if (calib.mode) redoCalibEdit();
+};
 document.querySelectorAll(".rail-mode").forEach(btn => {
   btn.onclick = () => {
-    if (!isSidePanelOpen()) setSidePanel(true);
-    setMode(btn.dataset.railMode);
+    const mode = btn.dataset.railMode;
+    setMode(mode);
+    setSideTab(DEFAULT_SIDE_TAB[currentMode()]);
   };
+});
+document.querySelectorAll("[data-side-tab]").forEach(btn => {
+  btn.onclick = () => setSideTab(btn.dataset.sideTab);
 });
 $("btnPanelClose").onclick = () => setSidePanel(false);
 $("sideBackdrop").onclick = () => setSidePanel(false);
@@ -2513,6 +2492,7 @@ function setBrush(name) {
   document.querySelectorAll(".brushBtn").forEach(x =>
     x.classList.toggle("on", x.dataset.brush === name));
   if (heldBrushKeys.size) showBrushHud();   // 按住时改画笔，HUD 跟着换
+  if (edit.cursorCell) updateBrushCursor(edit.cursorCell[0], edit.cursorCell[1]);
 }
 
 // 粗细只有一个来源（edit.brushSize），输入框只是它的一个视图
@@ -2520,6 +2500,7 @@ function setBrushSize(n) {
   edit.brushSize = Math.max(1, Math.min(50, parseInt(n, 10) || 1));
   $("editBrush").value = edit.brushSize;
   if (heldBrushKeys.size) showBrushHud();
+  if (edit.cursorCell) updateBrushCursor(edit.cursorCell[0], edit.cursorCell[1]);
 }
 
 // 按住画笔键时贴着光标显示"当前画笔 + 粗细"。和 markTip 一样是屏幕空间定位，
@@ -2544,6 +2525,40 @@ function showBrushHud() {
 }
 function hideBrushHud() { const el = $("brushHud"); if (el) el.style.display = "none"; }
 
+function hideBrushCursor() {
+  brushCursor.style.display = "none";
+  edit.cursorCell = null;
+}
+
+function updateBrushCursor(ix, iz) {
+  edit.cursorCell = [ix, iz];
+  if (!edit.mode || !state.layers.grid || !calib.mapping) {
+    hideBrushCursor();
+    return;
+  }
+  const width = edit.brushSize;
+  const half = Math.floor((width - 1) / 2);
+  const startX = ix - half;
+  const startZ = iz - half;
+  const rect = cellRangeRectPx(startX, startZ, startX + width, startZ + width);
+  let left = rect.x * mapView.scale + mapView.panX;
+  let top = rect.y * mapView.scale + mapView.panY;
+  const minCursor = brushCursorMinPx;
+  const rawW = rect.w * mapView.scale;
+  const rawH = rect.h * mapView.scale;
+  let screenW = Math.max(minCursor, rawW);
+  let screenH = Math.max(minCursor, rawH);
+  if (screenW === minCursor) left -= (screenW - rawW) / 2;
+  if (screenH === minCursor) top -= (screenH - rawH) / 2;
+  brushCursor.dataset.brush = edit.brush;
+  brushCursorLabel.textContent = width > 1 ? String(width) : "";
+  brushCursor.style.left = left + "px";
+  brushCursor.style.top = top + "px";
+  brushCursor.style.width = screenW + "px";
+  brushCursor.style.height = screenH + "px";
+  brushCursor.style.display = "block";
+}
+
 document.querySelectorAll(".brushBtn").forEach(b => {
   b.onclick = () => setBrush(b.dataset.brush);
 });
@@ -2562,8 +2577,9 @@ $("editCellSize").onchange = () => {
     beginEditTransaction(e, true);
     e.cellSize = n;
     commitEditTransaction(e);
-    edit.dirty = true;
-    requestRender();
+    setGridDirty(true);
+    updateEditStats();
+    requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
   }
 };
 $("editOriginX").onchange = () => {
@@ -2572,8 +2588,9 @@ $("editOriginX").onchange = () => {
     beginEditTransaction(e, true);
     e.origin[0] = n;
     commitEditTransaction(e);
-    edit.dirty = true;
-    requestRender();
+    setGridDirty(true);
+    updateEditStats();
+    requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
   }
 };
 $("editOriginZ").onchange = () => {
@@ -2582,14 +2599,56 @@ $("editOriginZ").onchange = () => {
     beginEditTransaction(e, true);
     e.origin[1] = n;
     commitEditTransaction(e);
-    edit.dirty = true;
-    requestRender();
+    setGridDirty(true);
+    updateEditStats();
+    requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
   }
 };
 $("editBrush").onchange = () => setBrushSize($("editBrush").value);
 
+const layerControls = {
+  layerBase: "base",
+  layerMarkers: "markers",
+  layerGrid: "grid",
+  layerSelection: "selection",
+  layerPath: "path",
+};
+
+Object.entries(layerControls).forEach(([id, layer]) => {
+  $(id).checked = state.layers[layer];
+  $(id).onchange = () => {
+    state.layers[layer] = $(id).checked;
+    if (layer === "base" || layer === "markers") requestRender(RENDER_LAYERS.BASE);
+    else if (layer === "grid") {
+      if ($(id).checked) invalidateGridLayer();
+      requestRender(RENDER_LAYERS.GRID);
+    }
+    else if (layer === "selection") requestRender(RENDER_LAYERS.SELECTION);
+    else requestRender(RENDER_LAYERS.PATH);
+  };
+});
+
+$("gridOpacity").value = String(state.gridOpacity);
+editCanvasEl.style.opacity = "";
+$("gridOpacity").oninput = () => {
+  state.gridOpacity = Number($("gridOpacity").value);
+  invalidateGridLayer();
+  requestRender(RENDER_LAYERS.GRID);
+};
+
+// 画布浮层中的交互控件不能把 pointerdown 冒泡给 canvasWrap，否则点击
+// 图层开关或底部工具栏会同时开始涂色、框选或平移。
+["canvasToolbar", "layerPanel"].forEach(id => {
+  const overlay = $(id);
+  ["pointerdown", "pointermove", "pointerup", "pointercancel", "wheel",
+   "dblclick", "contextmenu"].forEach(type => {
+    overlay.addEventListener(type, event => event.stopPropagation());
+  });
+});
+
 // ---------------- 总图拖动 / 缩放 / 涂色 交互 ----------------
 canvasWrap.addEventListener("pointerdown", (e) => {
+  gestureRect = canvasWrap.getBoundingClientRect();
   if (edit.mode) {
     if (e.button === 0) {
       if (e.shiftKey) {
@@ -2604,9 +2663,10 @@ canvasWrap.addEventListener("pointerdown", (e) => {
         const grid = ed();
         if (grid) beginEditTransaction(grid);
         edit.painting = { id: e.pointerId };
+        edit.pendingPaint = { id: e.pointerId, clientX: e.clientX, clientY: e.clientY };
         canvasWrap.setPointerCapture(e.pointerId);
-        const p = canvasPixelOfEvent(e);
-        if (p) { const c = cellAtPixel(p[0], p[1]); if (c) { edit.lastCell = null; paintLineTo(c[0], c[1]); } }
+        edit.lastCell = null;
+        queuePaintFrame();
         e.preventDefault();
       }
     } else if (e.button === 2) {
@@ -2614,6 +2674,7 @@ canvasWrap.addEventListener("pointerdown", (e) => {
       dragState = { id: e.pointerId, sx: e.clientX, sy: e.clientY, px: mapView.panX, py: mapView.panY, moved: false };
       canvasWrap.setPointerCapture(e.pointerId);
       canvasWrap.classList.add("dragging");
+      hideBrushCursor();
       e.preventDefault();
     }
     return;
@@ -2626,11 +2687,16 @@ canvasWrap.addEventListener("pointerdown", (e) => {
   e.preventDefault();
 });
 canvasWrap.addEventListener("pointermove", (e) => {
-  // 只在按住画笔键时才取 rect / 记录位置——这是每次移动都会跑的热路径
-  if (heldBrushKeys.size) {
-    const rect = canvasWrap.getBoundingClientRect();
+  if (edit.mode) {
+    const rect = gestureRect || canvasWrap.getBoundingClientRect();
     edit.pointer = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    showBrushHud();
+    const point = canvasPixelOfClient(e.clientX, e.clientY, rect);
+    if (point) {
+      const cell = cellAtPixel(point[0], point[1]);
+      if (cell) updateBrushCursor(cell[0], cell[1]);
+      else hideBrushCursor();
+    }
+    if (heldBrushKeys.size) showBrushHud();
   }
   if (dragState && e.pointerId === dragState.id) {
     if (!dragState.moved &&
@@ -2652,8 +2718,8 @@ canvasWrap.addEventListener("pointermove", (e) => {
     return;
   }
   if (edit.mode && edit.painting && e.pointerId === edit.painting.id) {
-    const p = canvasPixelOfEvent(e);
-    if (p) { const c = cellAtPixel(p[0], p[1]); if (c) paintLineTo(c[0], c[1]); }
+    edit.pendingPaint = { id: e.pointerId, clientX: e.clientX, clientY: e.clientY };
+    queuePaintFrame();
     e.preventDefault();
     return;
   }
@@ -2678,17 +2744,19 @@ const endDrag = (e) => {
     }
   }
   if (edit.mode && edit.painting && e.pointerId === edit.painting.id) {
+    processPendingPaint();
     edit.painting = false;
     edit.lastCell = null;
     const grid = ed();
     if (grid) commitEditTransaction(grid);
     // 收笔时重算边界盒：涂出去或擦掉都会改变保存范围（也是"未知"计数的准头）
     updateEditStats();
-    requestRender();
+    requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
   }
   if (edit.mode && edit.marquee && e.pointerId === edit.marquee.id) {
     finishMarquee();
   }
+  gestureRect = null;
 };
 canvasWrap.addEventListener("pointerup", endDrag);
 canvasWrap.addEventListener("pointercancel", endDrag);
@@ -2707,13 +2775,32 @@ canvasWrap.addEventListener("wheel", (e) => {
 canvasWrap.addEventListener("dblclick", () => { if (!calib.mode && !edit.mode) fitView(); });
 canvasWrap.addEventListener("contextmenu", (e) => { if (edit.mode) e.preventDefault(); });
 // HUD 是相对 canvasWrap 定位的，光标移出去就该收起来（移回来 pointermove 会再开）
-canvasWrap.addEventListener("pointerleave", () => { if (heldBrushKeys.size) hideBrushHud(); });
+canvasWrap.addEventListener("pointerleave", () => {
+  if (heldBrushKeys.size) hideBrushHud();
+  hideBrushCursor();
+});
 
-window.addEventListener("resize", () => { clampPan(); applyView(); });
+window.addEventListener("resize", () => {
+  refreshUiMetrics();
+  clampPan();
+  applyView();
+});
+window.__NAV_GRID_EDITOR__ = {
+  get document() { return ed(); },
+  get editor() { return edit; },
+  get view() { return state.views.get(state.activeKey) || null; },
+  undo: undoGridEdit,
+  redo: redoGridEdit,
+  render: requestRender,
+  layers: RENDER_LAYERS,
+};
+
 window.addEventListener("load", () => {
-  setSidePanel(!window.matchMedia("(max-width: 1100px)").matches);
+  refreshUiMetrics();
+  setSidePanel(false);   // 画布优先：检查器默认收起，模式轨始终保留
   syncModeChrome();      // 初始状态：浏览模式，只显示它的动作组与侧栏面板
   syncButtons();
+  syncHistoryButtons();
   loadMarksStatus();
   loadTileMaps();
   connect();

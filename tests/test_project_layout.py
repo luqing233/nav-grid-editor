@@ -21,6 +21,18 @@ class PackageLayoutTest(unittest.TestCase):
         self.assertTrue(
             (PACKAGE_DIR / "web" / "static" / "js" / "map_composer.js").is_file()
         )
+        self.assertTrue(
+            (PACKAGE_DIR / "web" / "static" / "js" / "grid" / "grid-document.js").is_file()
+        )
+        self.assertTrue(
+            (PACKAGE_DIR / "web" / "static" / "js" / "grid" / "grid-raster-cache.js").is_file()
+        )
+        self.assertTrue(
+            (PACKAGE_DIR / "web" / "static" / "js" / "grid" / "grid-transport.js").is_file()
+        )
+        self.assertTrue(
+            (PACKAGE_DIR / "web" / "static" / "js" / "render" / "render-scheduler.js").is_file()
+        )
         self.assertTrue(device_id._RUNNER_PATH.is_file())
 
 

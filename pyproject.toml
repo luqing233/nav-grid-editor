@@ -39,5 +39,7 @@ where = ["src"]
     "web/*.html",
     "web/static/css/*.css",
     "web/static/js/*.js",
+    "web/static/js/grid/*.js",
+    "web/static/js/render/*.js",
 ]
 "nav_grid_editor.integrations.smsdk" = ["resources/*.mjs"]

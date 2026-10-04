@@ -169,7 +169,12 @@ src/nav_grid_editor/
 ├── integrations/smsdk/          设备 ID、指纹与 SMSdk 运行资源
 └── web/
     ├── map_composer.html        页面结构
-    └── static/                  CSS 与 JavaScript
+    └── static/
+        ├── css/                 页面样式
+        └── js/
+            ├── map_composer.js  应用入口与业务编排
+            ├── grid/            分块网格文档与位图缓存
+            └── render/          栅格图层调度
 ```
 
 依赖方向为 `cli -> api -> services -> integrations`。服务层不依赖 FastAPI，
