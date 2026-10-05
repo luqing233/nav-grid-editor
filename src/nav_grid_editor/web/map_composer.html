@@ -49,10 +49,6 @@
       <button id="btnRedo" class="icon-button" type="button" title="重做（Ctrl+Y / Ctrl+Shift+Z）" disabled>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 7 5 5-5 5m4-5h-9a6 6 0 0 0-6 6"></path></svg>
       </button>
-      <button id="btnPanel" class="icon-button" type="button"
-              aria-controls="side" aria-expanded="false" title="打开检查器">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"></rect><path d="M14 4v16"></path></svg>
-      </button>
     </div>
 
     <div class="tb-fetch">
@@ -78,6 +74,7 @@
       <div id="gridBounds" aria-hidden="true"></div>
       <div id="pickMarker"></div>
     </div>
+    <div id="calibOverlay" aria-hidden="true"></div>
     <div id="playerMarker"><span id="playerMarkerLabel"></span></div>
     <div class="viewport-frame" aria-hidden="true">
       <span class="vf-corner tl"></span>
@@ -162,8 +159,6 @@
         <span class="side-kicker">CONTROL / CURRENT MODE</span>
         <strong><span id="sideModeCode">01</span><span id="sideModeLabel">浏览</span></strong>
       </div>
-      <button id="btnPanelClose" class="button-quiet" type="button"
-              aria-label="收起检查器" title="收起检查器">&lsaquo;</button>
     </div>
 
     <div class="side-telemetry">

@@ -39,20 +39,31 @@ function chunkCorners(cx, cz, transform) {
 
 export class GridRasterCache {
   constructor() {
-    this.chunks = new Map();
+    this.caches = new Map();
   }
 
-  clear() {
-    this.chunks.clear();
+  clear(document) {
+    if (document) this.caches.delete(document);
+    else this.caches.clear();
+  }
+
+  cacheFor(document) {
+    let chunks = this.caches.get(document);
+    if (!chunks) {
+      chunks = new Map();
+      this.caches.set(document, chunks);
+    }
+    return chunks;
   }
 
   sync(document) {
+    const chunks = this.cacheFor(document);
     const changed = [];
     for (const key of document.consumeDirtyChunks()) {
       const [cx, cz] = parseChunkKey(key);
       const chunk = document.chunks.get(key);
       if (!chunk || !chunk.filled.size) {
-        this.chunks.delete(key);
+        chunks.delete(key);
         changed.push({
           key,
           cx,
@@ -64,7 +75,7 @@ export class GridRasterCache {
         continue;
       }
       const built = this.buildChunk(cx, cz, chunk);
-      this.chunks.set(key, built);
+      chunks.set(key, built);
       changed.push({ key, ...built });
     }
     return changed;
@@ -117,8 +128,8 @@ export class GridRasterCache {
     context.restore();
   }
 
-  drawAll(context, transform, visible) {
-    for (const chunk of this.chunks.values()) {
+  drawAll(context, document, transform, visible) {
+    for (const chunk of this.cacheFor(document).values()) {
       const bounds = chunkCorners(chunk.cx, chunk.cz, transform);
       if (bounds.maxX < visible.x || bounds.minX > visible.x + visible.w) continue;
       if (bounds.maxY < visible.y || bounds.minY > visible.y + visible.h) continue;
@@ -126,7 +137,7 @@ export class GridRasterCache {
     }
   }
 
-  drawChanged(context, transform, visible, changed) {
+  drawChanged(context, document, transform, visible, changed) {
     for (const chunk of changed) {
       const bounds = chunkCorners(chunk.cx, chunk.cz, transform);
       if (bounds.maxX < visible.x || bounds.minX > visible.x + visible.w) continue;

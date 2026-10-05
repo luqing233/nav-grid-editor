@@ -40,6 +40,7 @@ const logBox = $("logBox");
 const canvasWrap = $("canvasWrap");
 const canvasHolder = $("canvasHolder");
 const canvas = $("composeCanvas");
+const calibOverlay = $("calibOverlay");
 const gridRasterCache = new GridRasterCache();
 const gridLayerState = { valid: false, key: "", width: 0, height: 0 };
 const gridBoundsEl = $("gridBounds");
@@ -402,6 +403,7 @@ function render(layers = RENDER_LAYERS.ALL) {
 function applyView() {
   canvasHolder.style.transform =
     "translate(" + mapView.panX + "px," + mapView.panY + "px) scale(" + mapView.scale + ")";
+  if (calib.mode) renderCalibMarks();
   updatePlayerMarker(lastPos);
   if (edit.mode && edit.cursorCell) updateBrushCursor(edit.cursorCell[0], edit.cursorCell[1]);
   requestRender();
@@ -568,22 +570,24 @@ function redoCalibEdit() {
 }
 
 function renderCalibMarks() {
-  canvasHolder.querySelectorAll(".calibMark, .calibNum").forEach(el => el.remove());
+  calibOverlay.replaceChildren();
   // 定位点**只在标定模式显示**：浏览/网格/取坐标时它们会压在地图上挡视线
   // （标定时它们才是"我点了哪几个点"的参照）
   if (!calib.mode) return;
   if (!calib.key || calib.key !== state.activeKey) return;
   calib.points.forEach((p, i) => {
     const [px, py] = p.pixel;
+    const point = document.createElement("div");
+    point.className = "calibPoint" + (p.enabled ? "" : " is-disabled");
+    point.style.left = (px * mapView.scale + mapView.panX) + "px";
+    point.style.top = (py * mapView.scale + mapView.panY) + "px";
     const d = document.createElement("div");
-    d.className = "calibMark" + (p.enabled ? "" : " off");
-    d.style.left = px + "px"; d.style.top = py + "px";
-    canvasHolder.appendChild(d);
+    d.className = "calibMark";
     const n = document.createElement("div");
-    n.className = "calibNum" + (p.enabled ? "" : " off");
+    n.className = "calibNum";
     n.textContent = "#" + (i + 1) + (p.world ? " (" + p.world[0].toFixed(1) + "," + p.world[1].toFixed(1) + ")" : "");
-    n.style.left = px + "px"; n.style.top = py + "px";
-    canvasHolder.appendChild(n);
+    point.append(d, n);
+    calibOverlay.appendChild(point);
   });
 }
 
@@ -637,6 +641,7 @@ const MODES = {
   pick:   { label: "取坐标", color: "#c3fd43" },
 };
 const DEFAULT_SIDE_TAB = { browse: "capture", calib: "calib", edit: "grid", pick: "coords" };
+const MODE_BY_SIDE_TAB = { capture: "browse", calib: "calib", grid: "edit", coords: "pick" };
 let activeSideTab = null;
 
 function currentMode() {
@@ -663,7 +668,10 @@ function syncModeChrome() {
   // 上下文工具组仍按模式显示；侧栏由 Tab 管理，不再把所有面板纵向堆在一起。
   const inMode = el => (el.dataset.mode || "").split(/\s+/).includes(m);
   document.querySelectorAll(".tb-act").forEach(el => { el.hidden = !inMode(el); });
-  if (!activeSideTab) setSideTab(DEFAULT_SIDE_TAB[m]);
+  const tabMode = activeSideTab && MODE_BY_SIDE_TAB[activeSideTab];
+  if (!activeSideTab || (tabMode && tabMode !== m)) {
+    setSideTab(DEFAULT_SIDE_TAB[m], { syncMode: false });
+  }
   $("modeTag").textContent = MODES[m].label;
   $("canvasModeLabel").textContent = MODES[m].label;
   $("sideModeCode").textContent = modeOrder[m];
@@ -679,10 +687,10 @@ function setSidePanel(open) {
   document.body.classList.toggle("side-open", open);
   document.body.classList.toggle("side-collapsed", !open);
   document.body.classList.remove("side-closed");
-  $("btnPanel").setAttribute("aria-expanded", String(open));
   const toggle = $("btnSideToggle");
   toggle.setAttribute("aria-label", open ? "收起检查器" : "展开检查器");
   toggle.title = open ? "收起检查器" : "展开检查器";
+  toggle.setAttribute("aria-expanded", String(open));
   if (open && !activeSideTab) setSideTab(DEFAULT_SIDE_TAB[currentMode()]);
 }
 
@@ -690,15 +698,21 @@ function isSidePanelOpen() {
   return !document.body.classList.contains("side-collapsed");
 }
 
-function setSideTab(name) {
-  activeSideTab = name;
+function setSideTab(name, { syncMode = true } = {}) {
+  let target = name;
+  const mode = MODE_BY_SIDE_TAB[name];
+  if (syncMode && mode && currentMode() !== mode) {
+    setMode(mode);
+    if (currentMode() !== mode) target = DEFAULT_SIDE_TAB[currentMode()];
+  }
+  activeSideTab = target;
   document.querySelectorAll("[data-side-tab]").forEach(button => {
-    const active = button.dataset.sideTab === name;
+    const active = button.dataset.sideTab === target;
     button.classList.toggle("is-active", active);
     button.setAttribute("aria-selected", String(active));
   });
   document.querySelectorAll(".side-panel").forEach(panel => {
-    panel.hidden = panel.dataset.panel !== name;
+    panel.hidden = panel.dataset.panel !== target;
   });
 }
 
@@ -1012,7 +1026,7 @@ function drawAllCells() {
     ectx.clearRect(vis.x, vis.y, vis.w, vis.h);
     ectx.save();
     ectx.globalAlpha = state.gridOpacity;
-    gridRasterCache.drawAll(ectx, transform, vis);
+    gridRasterCache.drawAll(ectx, e, transform, vis);
     ectx.restore();
     gridLayerState.valid = true;
     gridLayerState.key = layerKey;
@@ -1024,7 +1038,7 @@ function drawAllCells() {
   if (changed.length) {
     ectx.save();
     ectx.globalAlpha = state.gridOpacity;
-    gridRasterCache.drawChanged(ectx, transform, vis, changed);
+    gridRasterCache.drawChanged(ectx, e, transform, vis, changed);
     ectx.restore();
   }
 }
@@ -1311,6 +1325,7 @@ function adoptViewEdit(v) {
 
 // 载入该视图的 2D 网格（force=重新读文件）
 async function loadGrid2D(force) {
+  const wantKey = state.activeKey;
   const [map, zoom] = (state.activeKey || "").split("@");
   const v = state.views.get(state.activeKey);
   if (!map || !zoom || !v) return;
@@ -1318,35 +1333,47 @@ async function loadGrid2D(force) {
     v.edit = new GridDocument();
   }
   if (v.edit.loaded && !force) { adoptViewEdit(v); return; }
+  const previousDocument = v.edit;
   try {
     const { document, response: res } = await loadGridDocument(map, zoom);
     if (document) {
+      gridRasterCache.clear(previousDocument);
       v.edit = document;
-      $("editStatus").innerHTML = "已载入: <b>" + res.data.cells.length + "</b> Free / <b>" +
-        res.data.blocked.length + "</b> Blocked" +
-        (v.edit.shape ? "，保存范围 <b>" + v.edit.shape[0] + "×" + v.edit.shape[1] +
-                        "</b> 格（含未涂色的未知格）" : "") +
-        (res.source ? "<br>来源: <b>" + res.source + "</b>" : "") +
-        (res.warnings && res.warnings.length
-          ? '<br><span style="color:#ffcc55">⚠ ' + res.warnings.join("；") + '</span>' : "");
+      if (state.activeKey === wantKey) {
+        $("editStatus").innerHTML = "已载入: <b>" + res.data.cells.length + "</b> Free / <b>" +
+          res.data.blocked.length + "</b> Blocked" +
+          (v.edit.shape ? "，保存范围 <b>" + v.edit.shape[0] + "×" + v.edit.shape[1] +
+                          "</b> 格（含未涂色的未知格）" : "") +
+          (res.source ? "<br>来源: <b>" + res.source + "</b>" : "") +
+          (res.warnings && res.warnings.length
+            ? '<br><span style="color:#ffcc55">⚠ ' + res.warnings.join("；") + '</span>' : "");
+      }
     } else if (res.error) {
-      $("editStatus").innerHTML = '<span style="color:#ff9977">网格读取失败: ' + res.error + '</span>';
+      if (state.activeKey === wantKey) {
+        $("editStatus").innerHTML = '<span style="color:#ff9977">网格读取失败: ' + res.error + '</span>';
+      }
     } else {
+      gridRasterCache.clear(previousDocument);
       v.edit = new GridDocument();
-      $("editStatus").innerHTML = "无已存网格（origin=[0,0], cell_size=1；保存时按已涂格子的范围定 origin）";
+      if (state.activeKey === wantKey) {
+        $("editStatus").innerHTML = "无已存网格（origin=[0,0], cell_size=1；保存时按已涂格子的范围定 origin）";
+      }
     }
     v.edit.loaded = true;
-    gridRasterCache.clear();
     invalidateGridLayer();
     // origin 可能变了，取坐标用的基准与统计都得跟着失效重算
     v.pickRef = null;
     v.pickRefPending = null;
   } catch (e) {
-    $("editStatus").textContent = "网格加载失败: " + e.message;
+    if (state.activeKey === wantKey) {
+      $("editStatus").textContent = "网格加载失败: " + e.message;
+    }
   }
   v.edit.clearHistory();
-  adoptViewEdit(v);
-  setGridDirty(false);
+  if (state.activeKey === wantKey) {
+    adoptViewEdit(v);
+    setGridDirty(false);
+  }
 }
 
 function setEditMode(on) {
@@ -1478,7 +1505,7 @@ async function saveGrid2D() {
     if (dx || dz) {
       e.rebase(dx, dz);
       e.selRect = null;
-      gridRasterCache.clear();
+      gridRasterCache.clear(e);
       invalidateGridLayer();
     }
     if (res.origin) e.origin = [res.origin[0], res.origin[2]];
@@ -2369,7 +2396,6 @@ $("mpAll").onclick = () => setAllMarkItems(true);
 $("mpNone").onclick = () => setAllMarkItems(false);
 $("mpReset").onclick = resetMarkFilter;
 $("btnFit").onclick = fitView;
-$("btnPanel").onclick = () => setSidePanel(!isSidePanelOpen());
 $("btnSideToggle").onclick = () => setSidePanel(!isSidePanelOpen());
 $("btnUndo").onclick = () => {
   if (edit.mode) undoGridEdit();
@@ -2389,7 +2415,6 @@ document.querySelectorAll(".rail-mode").forEach(btn => {
 document.querySelectorAll("[data-side-tab]").forEach(btn => {
   btn.onclick = () => setSideTab(btn.dataset.sideTab);
 });
-$("btnPanelClose").onclick = () => setSidePanel(false);
 $("sideBackdrop").onclick = () => setSidePanel(false);
 $("calibOk").onclick = submitCalibPoint;
 $("calibCancel").onclick = closeCalibDialog;

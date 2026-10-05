@@ -4961,10 +4961,20 @@ body.side-collapsed #sidePanel {
 .viewport-hud-mode {
   min-height: calc(34px * var(--ui-scale));
   padding: var(--space-sm) var(--space-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
 }
 
 .viewport-hud strong {
   font-size: var(--font-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 1em;
+  line-height: 1;
 }
 
 .canvas-toolbar {
@@ -5141,4 +5151,100 @@ body.side-collapsed #sidePanel {
   font-size: 11px;
   white-space: nowrap;
   text-shadow: 0 1px 3px #000;
+}
+
+/* Calibration controls stay in screen space and do not scale with map zoom. */
+#calibOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 14;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.calibPoint {
+  position: absolute;
+  width: 0;
+  height: 0;
+  will-change: left, top;
+}
+
+.calibPoint .calibMark {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: calc(32px * var(--ui-scale));
+  height: calc(32px * var(--ui-scale));
+  margin: 0;
+  border: calc(1.5px * var(--ui-scale)) solid #ffd86a;
+  border-radius: 50%;
+  background:
+    radial-gradient(
+      circle at 36% 32%,
+      rgba(255, 240, 170, 0.34),
+      rgba(255, 190, 55, 0.12) 48%,
+      rgba(20, 16, 6, 0.2) 72%
+    );
+  box-shadow:
+    0 0 0 calc(1px * var(--ui-scale)) rgba(0, 0, 0, 0.78),
+    0 0 calc(12px * var(--ui-scale)) rgba(255, 208, 88, 0.32),
+    inset 0 0 calc(8px * var(--ui-scale)) rgba(255, 226, 122, 0.16);
+  transform: translate(-50%, -50%);
+}
+
+.calibPoint .calibMark::before {
+  left: 50%;
+  top: 50%;
+  width: calc(2px * var(--ui-scale));
+  height: calc(12px * var(--ui-scale));
+  border-radius: 999px;
+  background: #ffe18a;
+  transform: translate(-50%, -50%);
+}
+
+.calibPoint .calibMark::after {
+  left: 50%;
+  top: 50%;
+  width: calc(12px * var(--ui-scale));
+  height: calc(2px * var(--ui-scale));
+  border-radius: 999px;
+  background: #ffe18a;
+  transform: translate(-50%, -50%);
+}
+
+.calibPoint .calibNum {
+  position: absolute;
+  left: calc(23px * var(--ui-scale));
+  top: calc(-30px * var(--ui-scale));
+  min-height: calc(24px * var(--ui-scale));
+  margin: 0;
+  padding:
+    calc(4px * var(--ui-scale))
+    calc(8px * var(--ui-scale));
+  border: 1px solid rgba(255, 216, 106, 0.36);
+  border-radius: calc(7px * var(--ui-scale));
+  background: rgba(10, 10, 10, 0.9);
+  color: #ffe39a;
+  font-size: calc(11px * var(--ui-scale));
+  line-height: 1;
+  box-shadow: 0 calc(8px * var(--ui-scale)) calc(24px * var(--ui-scale)) rgba(0, 0, 0, 0.34);
+  white-space: nowrap;
+}
+
+.calibPoint .calibNum::before {
+  content: "";
+  position: absolute;
+  left: calc(-5px * var(--ui-scale));
+  top: 50%;
+  width: calc(6px * var(--ui-scale));
+  height: calc(6px * var(--ui-scale));
+  border: 1px solid #ffd86a;
+  border-radius: 50%;
+  background: #0a0a0a;
+  transform: translateY(-50%);
+}
+
+.calibPoint.is-disabled {
+  opacity: 0.42;
+  filter: grayscale(0.45);
 }
