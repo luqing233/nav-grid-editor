@@ -38,7 +38,7 @@ uv run nav-grid-editor
 | `--data-root` | 数据根目录，默认当前工作目录 |
 | `--tiles-root` | 瓦片目录，默认 `<data-root>/assets/tiles` |
 | `--profile-dir` | Playwright 登录态目录，默认 `<data-root>/browser_profile` |
-| `--grid2d-dir` | 2D 网格输出目录，默认 `<data-root>/assets/grids2d` |
+| `--grid2d-dir` | 2D 网格输出目录，默认 `<data-root>/assets/maps` |
 
 示例：
 
@@ -90,7 +90,7 @@ uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 
 ```text
 assets/
-├── grids2d/             2D 网格，随仓库发布
+├── maps/                地图资产，随仓库发布
 ├── tiles/
 │   ├── latest/          最新合并瓦片，仅本地
 │   ├── run_<时间戳>/    抓取会话，仅本地
@@ -100,7 +100,7 @@ assets/
 
 GitHub 仓库只跟踪以下内容：
 
-- `assets/grids2d/`
+- `assets/maps/`
 - `assets/tiles/maps/`
 
 瓦片缓存、抓取会话、地图标记、图标和缩略图缓存均保留在本机。
@@ -136,7 +136,7 @@ GitHub 仓库只跟踪以下内容：
 ```python
 from src.nav.grid_io import load_grid
 
-g = load_grid("assets/grids2d/map01_4.grid.npz")
+g = load_grid("assets/maps/map01_4.grid.npz")
 print(g.shape, g.counts(), g.extent())
 ```
 

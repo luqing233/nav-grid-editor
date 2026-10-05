@@ -1,3 +1,3 @@
-[submodule "assets/grids2d"]
-	path = assets/grids2d
-	url = https://github.com/luqing233/nav-grids2d.git
+[submodule "assets/maps"]
+	path = assets/maps
+	url = https://github.com/luqing233/nav-map-assets.git

@@ -26,10 +26,10 @@ browser_profile/
 # 设备指纹与账号无关但属于本机标识，不进版本库（删掉会自动重新铸造）。
 configs/
 
-# 仅 2D 网格与拼接总图随项目发布；瓦片会话、标记和其他缓存保留在本地。
+# 仅地图资产与拼接总图随项目发布；瓦片会话、标记和其他缓存保留在本地。
 assets/*
-!assets/grids2d/
-!assets/grids2d/**
+!assets/maps/
+!assets/maps/**
 !assets/tiles/
 assets/tiles/*
 !assets/tiles/maps/

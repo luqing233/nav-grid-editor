@@ -170,7 +170,7 @@ class Grid2DReadValidationTest(unittest.TestCase):
         """读路径也必须校验地图名：grid2d_path 是拼字符串，`../x` 能读到目录外。
 
         写路径（save_grid2d）一直有这道校验，读路径漏了就成了「读任意同格式
-        npz」的路径穿越。这里用 grids2d/../ 下的合法 npz 固定住这个边界。
+        npz」的路径穿越。这里用 maps/../ 下的合法 npz 固定住这个边界。
         """
         np.savez_compressed(
             self.d / "secret_4.grid.npz",
