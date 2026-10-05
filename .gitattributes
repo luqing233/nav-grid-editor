@@ -1,2 +1,0 @@
-assets/grids2d/** filter=lfs diff=lfs merge=lfs -text
-assets/grids2d/.gitattributes !filter !diff !merge text
