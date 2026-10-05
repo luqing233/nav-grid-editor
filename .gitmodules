@@ -1,3 +1,3 @@
-[submodule "assets/maps"]
-	path = assets/maps
-	url = https://github.com/luqing233/nav-map-assets.git
+[submodule "assets/nav-grid-data"]
+	path = assets/nav-grid-data
+	url = https://github.com/luqing233/nav-grid-data.git

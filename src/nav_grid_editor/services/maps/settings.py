@@ -61,7 +61,7 @@ GRID_STATES = frozenset((CELL_UNKNOWN, CELL_FREE, CELL_BLOCKED))
 #
 # 采集/编辑**产物**统一收在 assets/ 下，根目录只留源码与"凭证类"目录：
 #   assets/tiles/              瓦片数据（latest / run_* 会话 / maps 总图）
-#   assets/maps/               2D 导航网格 npz
+#   assets/nav-grid-data/      2D 导航网格 npz
 #   assets/items/map_auth/     地图标记数据（只此一份，公开口径已退场）
 #   browser_profile/           Playwright 持久化登录配置（是登录态，不是产物）
 #   configs/                   数美 dId 缓存（是设备标识，不是产物）

@@ -32,7 +32,7 @@
 - POST /api/coords                        坐标中继（可选 ws://127.0.0.1:3001 同功能）
 
 数据根目录默认取**当前工作目录**。采集/编辑产物统一收在它下面的 ``assets/``：
-``assets/tiles/``（瓦片与合成总图）、``assets/maps/``（2D 网格）、
+``assets/tiles/``（瓦片与合成总图）、``assets/nav-grid-data/``（2D 网格）、
 ``assets/items/``（地图标记数据）。``browser_profile/``（登录态）与
 ``configs/``（设备ID）是凭证类目录，刻意留在 ``assets/`` 外面。
 
@@ -123,7 +123,7 @@ def _run_server(argv: list[str] | None = None) -> int:
     ap.add_argument("--profile-dir", default="",
                     help="浏览器登录配置目录（默认 <data-root>/browser_profile）")
     ap.add_argument("--grid2d-dir", default="",
-                    help="2D 网格输出目录（默认 <data-root>/assets/maps，"
+                    help="2D 网格输出目录（默认 <data-root>/assets/nav-grid-data，"
                          "可用环境变量 NAV_GRID2D_DIR）")
     args = ap.parse_args(argv)
 

@@ -126,7 +126,7 @@ class MapService:
         env_dir = os.environ.get("NAV_GRID2D_DIR", "")
         self.grid2d_dir = (grid2d_dir
                            or (Path(env_dir) if env_dir else None)
-                           or default_assets_dir(self.data_root) / "maps")
+                           or default_assets_dir(self.data_root) / "nav-grid-data")
         self._lock = threading.Lock()
         self._fetch: FetchState | None = None
         self._fetch_thread: threading.Thread | None = None
@@ -1003,7 +1003,7 @@ class MapService:
         同级——读方会拒的文件这里也必须拒，不能静默按"未知格"画出来。
         """
         # 与 save_grid2d 同样的入参校验：grid2d_path 是拼字符串建路径，
-        # map_name 里带 / 或 .. 就能读到 maps/ 之外的同格式文件。
+        # map_name 里带 / 或 .. 就能读到 nav-grid-data/ 之外的同格式文件。
         if not valid_map_zoom(map_name, zoom):
             return {"data": None, "source": None, "error": "非法地图名/zoom"}
         p = self.grid2d_path(map_name, zoom)
@@ -1125,7 +1125,7 @@ class MapService:
         else:
             return {"ok": False,
                     "error": "网格是空的：既没有已涂格子也没有原范围（shape），无法确定写多大"
-                             "（要清空请直接删掉 maps/ 下的文件）"}
+                             "（要清空请直接删掉 nav-grid-data/ 下的文件）"}
         width = max_ix - min_ix + 1   # 列数 = x 方向
         height = max_iz - min_iz + 1  # 行数 = z 方向
         if width * height > DENSE_CELL_LIMIT:
