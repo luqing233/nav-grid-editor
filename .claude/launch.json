@@ -6,6 +6,12 @@
       "runtimeExecutable": "E:/LuQing/python/nav-grid-editor/.venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "nav_grid_editor"],
       "port": 8765
+    },
+    {
+      "name": "nav-grid-editor-alt",
+      "runtimeExecutable": "E:/LuQing/python/nav-grid-editor/.venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "nav_grid_editor", "--port", "8791"],
+      "port": 8791
     }
   ]
 }
