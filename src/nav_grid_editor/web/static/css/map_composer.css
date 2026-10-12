@@ -888,7 +888,7 @@ canvas#composeCanvas {
 
 .link-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
   padding: 7px 0;
@@ -903,6 +903,39 @@ canvas#composeCanvas {
 .link-row button {
   min-height: 28px;
   padding: 3px 8px;
+}
+
+/* 端点悬空的连接：规划器用不了，在列表里就要一眼看出来 */
+.link-row-invalid {
+  margin: 0 -6px;
+  padding: 7px 6px;
+  border-left: 2px solid var(--danger);
+  background: rgba(220, 68, 52, 0.10);
+}
+
+.link-row-invalid b {
+  color: var(--danger);
+}
+
+/* 正在编辑的那条：7 条里改一条，得看得出改的是哪条 */
+.link-row-editing {
+  margin: 0 -6px;
+  padding: 7px 6px;
+  border-left: 2px solid var(--accent);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.link-row-editing button.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.nav-blocker {
+  margin-top: 4px;
+  padding-left: 8px;
+  border-left: 2px solid var(--amber);
+  color: var(--text-muted);
+  font-size: var(--fs-detail);
 }
 
 /* Keep all map layers on the same composited surface. */

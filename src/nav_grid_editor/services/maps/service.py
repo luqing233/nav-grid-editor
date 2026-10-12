@@ -43,9 +43,11 @@ from .layers import (
     list_layers as list_layer_catalog,
 )
 from .links import (
+    LINK_SCHEMA_VERSION,
     delete_link,
     links_path,
     load_links,
+    normalize_link,
     upsert_link,
 )
 from .settings import (
@@ -82,6 +84,7 @@ from .tiles import TileStore, merge_tiles
 
 _MAX_FLOOR_REGIONS = 256
 _MAX_FLOOR_REGION_CELLS = 50_000
+_GRID_ARRAY_CACHE_MAX = 4
 MAIN_GRID_KEY = "__main__"
 _LAYER_HEADERS = {
     "Referer": MAP_URL,
@@ -290,6 +293,9 @@ class MapService:
         )
         self._layer_catalog_cache: tuple[int, list[dict]] | None = None
         self._floor_grid_cache: dict[Path, tuple[int, dict]] = {}
+        # 解开的网格数组（判连接端点是否落在可走格上要按格看内容，光有元数据不够）。
+        # npz 是整块压缩，读一次就得全解开，map02@4 是 5 MB 上下，所以只留最近几个。
+        self._grid_array_cache: dict[Path, tuple[int, tuple]] = {}
 
     # ---------- 状态快照 ----------
     def status(self) -> dict:
@@ -1079,24 +1085,145 @@ class MapService:
         return {"ok": True, "map": map_name, "zoom": zoom,
                 "level_id": level_id, "layers": out}
 
-    def _tier_grid_file(self, map_name: str, tier: str) -> Path | None:
+    def _tier_grid_candidates(self, map_name: str, tier: str) -> list[Path]:
+        """某层现有的全部网格文件，按文件名倒序（最新在前）。
+
+        按 zoom 分档，所以「这一层」可能有多个文件；`_tier_grid_file` 取最新那个，
+        而连接端点校验在没写 zoom 时必须能看出「不止一个档次」而拒绝猜。
+        """
         if not valid_map_zoom(map_name, "4") or (
                 tier != MAIN_GRID_KEY and not valid_grid_tier(tier)):
-            return None
+            return []
         if tier == MAIN_GRID_KEY:
-            paths = sorted(
-                (path for path in self.grid2d_dir.glob(f"{map_name}_*.grid.npz")
+            pattern = f"{map_name}_*.grid.npz"
+            return sorted(
+                (path for path in self.grid2d_dir.glob(pattern)
                  if "__" not in path.name),
                 key=lambda path: path.name,
                 reverse=True,
             )
-            return paths[0] if paths else None
-        paths = sorted(
+        return sorted(
             self.grid2d_dir.glob(f"{map_name}__{tier}_*.grid.npz"),
             key=lambda path: path.name,
             reverse=True,
         )
+
+    def _tier_grid_file(self, map_name: str, tier: str) -> Path | None:
+        paths = self._tier_grid_candidates(map_name, tier)
         return paths[0] if paths else None
+
+    def _cached_grid(self, path: Path) -> tuple | None:
+        """按 mtime 缓存解开的 (数组, meta)；读失败返回 None。"""
+        try:
+            mtime = path.stat().st_mtime_ns
+        except OSError:
+            return None
+        hit = self._grid_array_cache.get(path)
+        if hit and hit[0] == mtime:
+            return hit[1]
+        try:
+            arr, meta, _warnings = _load_grid_npz(path)
+        except Exception as e:
+            _log(f"读取网格失败 {path}: {e}")
+            return None
+        self._grid_array_cache[path] = (mtime, (arr, meta))
+        while len(self._grid_array_cache) > _GRID_ARRAY_CACHE_MAX:
+            self._grid_array_cache.pop(next(iter(self._grid_array_cache)))
+        return arr, meta
+
+    def _invalidate_grid_cache(self, path: Path) -> None:
+        self._grid_array_cache.pop(Path(path), None)
+
+    def _link_endpoint_grid(self, endpoint: dict,
+                            query_zoom: str = "") -> tuple[Path | None, str]:
+        """把连接端点解析到具体的网格文件，返回 (路径, 问题描述)。
+
+        ``query_zoom`` 是调用方的查询上下文：端点自己没写 zoom 时（v1 老数据），
+        优先按查询的 zoom 解析，只在完全没有上下文时才退化成「该层只有一个档次
+        就按它算」。不能一律按唯一候选解析 —— 那样一条 zoom=3 的连接会在 zoom=4
+        的查询里显示成有效。
+        """
+        map_name = str(endpoint.get("map") or "")
+        raw_tier = str(endpoint.get("tier") or "")
+        tier = raw_tier or MAIN_GRID_KEY
+        zoom = str(endpoint.get("zoom") or "") or str(query_zoom or "")
+        if zoom:
+            path = self.grid2d_path(
+                map_name, zoom, "" if tier == MAIN_GRID_KEY else tier)
+            if not path.is_file():
+                return None, f"网格不存在（{path.name}）"
+            return path, ""
+        candidates = self._tier_grid_candidates(map_name, tier)
+        if not candidates:
+            return None, "网格不存在"
+        if len(candidates) > 1:
+            names = "、".join(path.name for path in candidates[:3])
+            return None, f"该层有多个 zoom 网格（{names}…），端点必须写明 zoom"
+        return candidates[0], ""
+
+    def link_endpoint_report(self, endpoint: dict,
+                             query_zoom: str = "") -> dict:
+        """检查连接端点是否落在这层的可走格上。
+
+        端点存的是世界坐标矩形，而规划器只认「从可走格走到可走格」。矩形压在
+        未知格或整块落在网格外时，这条边就是通向虚空的转移 —— 编辑器里手框很容易
+        画成这样（实测 7 条连接里有 3 条），所以保存前必须挡住。
+        """
+        report = {
+            "map": str(endpoint.get("map") or ""),
+            "tier": str(endpoint.get("tier") or ""),
+            "zoom": str(endpoint.get("zoom") or ""),
+            "grid": "",
+            "rect": dict(endpoint.get("rect") or {}),
+            "free": 0, "blocked": 0, "unknown": 0,
+            "outside": False, "issue": "",
+        }
+        path, issue = self._link_endpoint_grid(endpoint, query_zoom)
+        if path is None:
+            report["issue"] = issue
+            return report
+        report["grid"] = path.name
+        cached = self._cached_grid(path)
+        if cached is None:
+            report["issue"] = "网格读取失败"
+            return report
+        arr, meta = cached
+        rect = endpoint.get("rect") or {}
+        try:
+            origin_x = float(meta["origin"][0])
+            origin_z = float(meta["origin"][2])
+            cell = float(meta["cell_size"])
+            x0, x1 = float(rect["x0"]), float(rect["x1"])
+            z0, z1 = float(rect["z0"]), float(rect["z1"])
+        except (KeyError, TypeError, ValueError):
+            report["issue"] = "端点或网格元数据非法"
+            return report
+        # 矩形覆盖到的格子下标范围（半开）。
+        jx0 = math.floor((x0 - origin_x) / cell)
+        jx1 = math.ceil((x1 - origin_x) / cell)
+        jz0 = math.floor((z0 - origin_z) / cell)
+        jz1 = math.ceil((z1 - origin_z) / cell)
+        height, width = arr.shape
+        cx0, cx1 = max(0, jx0), min(width, jx1)
+        cz0, cz1 = max(0, jz0), min(height, jz1)
+        report["outside"] = (cx1 <= cx0 or cz1 <= cz0)
+        if not report["outside"]:
+            sub = arr[cz0:cz1, cx0:cx1]
+            report["free"] = int((sub == CELL_FREE).sum())
+            report["blocked"] = int((sub == CELL_BLOCKED).sum())
+            report["unknown"] = int((sub == CELL_UNKNOWN).sum())
+        if report["outside"]:
+            report["issue"] = "矩形整块落在这层网格的范围之外"
+        elif not report["free"]:
+            report["issue"] = "该区域没有可走格（Free），只有未知或阻挡格"
+        return report
+
+    @staticmethod
+    def _endpoint_label(endpoint: dict) -> str:
+        tier = str(endpoint.get("tier") or "")
+        name = "大地图" if not tier else tier
+        zoom = str(endpoint.get("zoom") or "")
+        return f"{endpoint.get('map') or '?'}@{zoom or '?'}/{name}"
 
     @staticmethod
     def _regions_at(regions: list[dict], x: float, z: float) -> list[dict]:
@@ -1806,30 +1933,85 @@ class MapService:
         }
 
     # ---------- 跨层连接（网格 via） ----------
-    def get_grid_links(self, map_name: str = "") -> dict:
+    def get_grid_links(self, map_name: str = "", zoom: str = "") -> dict:
+        """读连接，并逐条附上端点校验结果。
+
+        校验是只读的、不改数据：文件里可能已经躺着端点悬空的连接（实测有过），
+        直接拒读或者静默丢掉都会让问题看不见，所以标出来交给编辑器和用户处理。
+        """
         path = links_path(self.grid2d_dir)
         try:
             data = load_links(path)
         except Exception as e:
             _log(f"读取分层连接失败 {path}: {e}")
-            return {"schema_version": 1, "links": [], "error": str(e)}
-        if map_name:
-            data = {
-                **data,
-                "links": [
-                    link for link in data["links"]
-                    if (link.get("from") or {}).get("map") == map_name
-                    or (link.get("to") or {}).get("map") == map_name
-                ],
-            }
-        return data
+            return {"schema_version": LINK_SCHEMA_VERSION, "links": [],
+                    "error": str(e)}
+        wanted_zoom = str(zoom or "")
+        links = []
+        for link in data["links"]:
+            if not isinstance(link, dict):
+                continue
+            if not self._link_matches(link, map_name, wanted_zoom):
+                continue
+            checks = {}
+            for side in ("from", "to"):
+                endpoint = link.get(side)
+                checks[side] = (
+                    self.link_endpoint_report(endpoint, wanted_zoom)
+                    if isinstance(endpoint, dict)
+                    else {"issue": "端点缺失"}
+                )
+            problems = [
+                f"{'起点' if side == 'from' else '终点'}：{checks[side]['issue']}"
+                for side in ("from", "to") if checks[side].get("issue")
+            ]
+            links.append({**link, "checks": {
+                "from": checks["from"], "to": checks["to"],
+                "valid": not problems, "issue": "；".join(problems),
+            }})
+        return {**data, "links": links}
+
+    @staticmethod
+    def _link_matches(link: dict, map_name: str, zoom: str) -> bool:
+        """连接是否属于某个 地图/zoom —— 任一端命中即可。
+
+        端点没写 zoom 时（v1 老数据）算命中：它会按查询的 zoom 解析，只要真的
+        不属于这一档，端点校验就会报出来，不该在这里被静默过滤掉。
+        """
+        if not map_name and not zoom:
+            return True
+        for side in ("from", "to"):
+            endpoint = link.get(side)
+            if not isinstance(endpoint, dict):
+                continue
+            if map_name and str(endpoint.get("map") or "") != map_name:
+                continue
+            endpoint_zoom = str(endpoint.get("zoom") or "")
+            if zoom and endpoint_zoom and endpoint_zoom != zoom:
+                continue
+            return True
+        return False
 
     def save_grid_link(self, raw: dict) -> dict:
+        """保存连接：两个端点都必须落在这层的可走格上，否则拒收。"""
         try:
-            link = upsert_link(links_path(self.grid2d_dir), raw)
+            link = normalize_link(raw, str(raw.get("id") or ""))
         except Exception as e:
             return {"ok": False, "error": str(e)}
-        return {"ok": True, "link": link}
+        problems = []
+        for side, label in (("from", "起点"), ("to", "终点")):
+            report = self.link_endpoint_report(link[side])
+            if report["issue"]:
+                problems.append(
+                    f"{label} {self._endpoint_label(link[side])}：{report['issue']}")
+        if problems:
+            return {"ok": False,
+                    "error": "连接端点无效，已拒绝保存（" + "；".join(problems) + "）"}
+        try:
+            saved = upsert_link(links_path(self.grid2d_dir), link)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "link": saved}
 
     def delete_grid_link(self, link_id: str) -> dict:
         try:
@@ -1837,6 +2019,203 @@ class MapService:
         except Exception as e:
             return {"ok": False, "error": str(e)}
         return {"ok": True, "deleted": changed}
+
+    # ---------- 分层导航图：把「能不能导航」变成可判定的东西 ----------
+    #
+    # 规则（消费方必须照这个来，编辑器这边负责产出的数据满足它）：
+    #   1. 相邻关系只在**同一层内**成立（每层各自的稠密网格）；
+    #   2. 跨层一律走 links.json 的显式边，任何「把两层按 X/Z 叠在一起」的做法
+    #      都是错的 —— 同一点在 X/Z 上同时属于地面和地下，叠起来等于凭空连边；
+    #   3. 主地图**不挖洞**：地表那一格是真实可走的，地下房间在它下面。把主图
+    #      挖成 Blocked 会删掉真实可走的表面。位置属于哪一层由 floor_regions 的
+    #      Y 区间判定（见 resolve_position_floor），不靠挖格子。
+    # 于是「可导航」= 端点都有效 + 每处与主图/其它层重合的区域都标了高度区间。
+    def nav_graph(self, map_name: str, zoom: str, summary: bool = False) -> dict:
+        """汇总一层地图的导航输入，并给出就绪判定。
+
+        ``summary=True`` 时不给逐格坐标、只给 ``free_count``：界面只想显示「能不能
+        导航」时没必要为此传几万个坐标（map02@4 约 4.3 万格）。
+        """
+        if not valid_map_zoom(map_name, zoom):
+            return {"ok": False, "error": "非法地图名/zoom"}
+
+        tiers = []
+        for tier_id in self._grid_tier_ids(map_name, zoom):
+            tier = "" if tier_id == MAIN_GRID_KEY else tier_id
+            path = self.grid2d_path(map_name, zoom, tier)
+            if not path.is_file():
+                continue
+            cached = self._cached_grid(path)
+            if cached is None:
+                continue
+            arr, meta = cached
+            try:
+                regions = _normalize_floor_regions(meta.get("floor_regions") or [])
+            except ValueError as e:
+                _log(f"网格楼层区间非法 {path.name}: {e}")
+                regions = []
+            rows, cols = np.nonzero(arr == CELL_FREE)
+            entry = {
+                "tier_id": tier or MAIN_GRID_KEY,
+                "grid": path.name,
+                "origin": [float(meta["origin"][0]), float(meta["origin"][2])],
+                "cell_size": float(meta["cell_size"]),
+                "shape": [int(arr.shape[0]), int(arr.shape[1])],
+                "floor_regions": regions,
+            }
+            if summary:
+                entry["free_count"] = int(rows.size)
+            else:
+                entry["free_cells"] = [[int(c), int(r)] for r, c in zip(rows, cols)]
+            tiers.append(entry)
+
+        if not tiers:
+            return {"ok": False, "error": "该地图/zoom 下没有任何网格文件"}
+
+        blockers = []
+        links = self.get_grid_links(map_name, zoom)["links"]
+        for link in links:
+            if not link["checks"]["valid"]:
+                blockers.append(f"连接 {link['id']} 端点无效：{link['checks']['issue']}")
+        # 每个有网格的层各算一次重合（连通区的下标是「当前层」的口径，换层要重算）。
+        # 同一处重合区会从多个视角报出来，格数和层名顺序都随视角变；但各层实际的
+        # 世界矩形是一致的，所以按「涉及层 + 缺哪层 + 世界包围盒」归并，取最大格数。
+        grouped: dict[tuple, list] = {}
+        for tier in self._grid_tier_ids(map_name, zoom):
+            result = self._compute_grid_overlaps(map_name, zoom, tier, "")
+            if not result.get("ok"):
+                continue
+            for component in result["components"]:
+                if component["severity"] == "three_d":
+                    continue
+                missing = []
+                for tier_id, name in zip(
+                        component["layers"], component["layer_names"]):
+                    regions = self._tier_regions(
+                        self._nav_tier_meta(map_name, zoom, tier_id))
+                    rects = component["_rects_by_tier"].get(tier_id) or []
+                    if not rects or not self._regions_cover_rects(regions, rects):
+                        missing.append(name)
+                if not missing:
+                    continue
+                key = (
+                    frozenset(component["layers"]),
+                    frozenset(missing),
+                    self._component_world_key(component),
+                )
+                entry = grouped.setdefault(
+                    key, [0, list(component["layer_names"]), list(missing)])
+                entry[0] = max(entry[0], len(component["cells"]))
+        for count, names, missing in grouped.values():
+            layers_text = " / ".join(self._sort_layer_names(names))
+            missing_text = " / ".join(self._sort_layer_names(missing))
+            blockers.append(
+                f"重合区 {count} 格（{layers_text}）在 X/Z 上重叠，"
+                f"{missing_text} 还没标高度区间 —— 导航会在这些格子上串楼层"
+            )
+        return {
+            "ok": True,
+            "map": map_name,
+            "zoom": zoom,
+            "ready": not blockers,
+            "blockers": blockers,
+            "tiers": tiers,
+            "links": links,
+            # 跨层边只可能来自 links —— 这里刻意不生成任何隐式跨层邻接。
+            "cross_tier_edges_from": "links",
+        }
+
+    @staticmethod
+    def _component_world_key(component: dict) -> tuple:
+        """重合区的世界包围盒（跨视角稳定的那一份身份标识）。
+
+        连通区的下标是「当前层」的口径，换层就变；但每层实际相交出来的世界矩形
+        是一样的，取全体矩形的并集做包围盒，就能把同一处重合区从不同视角对上。
+        """
+        rects = [
+            rect
+            for group in (component.get("_rects_by_tier") or {}).values()
+            for rect in group
+        ]
+        if not rects:
+            return ()
+        return (
+            round(min(rect[0] for rect in rects), 3),
+            round(min(rect[2] for rect in rects), 3),
+            round(max(rect[1] for rect in rects), 3),
+            round(max(rect[3] for rect in rects), 3),
+        )
+
+    @staticmethod
+    def _sort_layer_names(names) -> list[str]:
+        """层名排序：大地图优先，其余按名字，让同一处问题的措辞稳定下来。"""
+        unique = sorted(set(names), key=lambda text: (text != "大地图", text))
+        return unique
+
+    def _grid_tier_ids(self, map_name: str, zoom: str) -> list[str]:
+        """该地图在给定 zoom 下**确实有网格文件**的层，主地图用 __main__ 表示。
+
+        按文件枚举而不是按分层目录：目录里有几十层，没画过的层去算重合纯属浪费。
+        """
+        if not valid_map_zoom(map_name, zoom):
+            return []
+        ids = []
+        if self.grid2d_path(map_name, zoom, "").is_file():
+            ids.append(MAIN_GRID_KEY)
+        prefix = f"{map_name}__"
+        suffix = f"_{zoom}{GRID_SUFFIX}"
+        for path in sorted(self.grid2d_dir.glob(f"{map_name}__*{GRID_SUFFIX}")):
+            name = path.name
+            if not name.startswith(prefix) or not name.endswith(suffix):
+                continue
+            tier = name[len(prefix):-len(suffix)]
+            if tier and valid_grid_tier(tier):
+                ids.append(tier)
+        return ids
+
+    def _nav_tier_meta(self, map_name: str, zoom: str, tier_id: str) -> dict | None:
+        path = self.grid2d_path(
+            map_name, zoom, "" if tier_id == MAIN_GRID_KEY else tier_id)
+        cached = self._cached_grid(path) if path.is_file() else None
+        return cached[1] if cached else None
+
+    @staticmethod
+    def _tier_regions(meta: dict | None) -> list[dict]:
+        if not meta:
+            return []
+        try:
+            return _normalize_floor_regions(meta.get("floor_regions") or [])
+        except ValueError:
+            return []
+
+    @staticmethod
+    def _regions_cover_rects(regions: list[dict], rects: list[list[float]]) -> bool:
+        """这层的高度区间是否盖住了这些世界矩形。
+
+        连通区的下标是「当前层」的口径，跨层换算容易出错；重叠分析已经把每层
+        各自的矩形算好了（``_rects_by_tier``），所以这里只比世界坐标。
+        """
+        if not regions or not rects:
+            return False
+        for rect in rects:
+            cx = (float(rect[0]) + float(rect[1])) / 2.0
+            cz = (float(rect[2]) + float(rect[3])) / 2.0
+            hit = False
+            for region in regions:
+                if not (region["x0"] <= cx <= region["x1"]
+                        and region["z0"] <= cz <= region["z1"]):
+                    continue
+                cells = region.get("cells")
+                if cells:
+                    hit = any(cell[0] <= cx <= cell[1]
+                              and cell[2] <= cz <= cell[3] for cell in cells)
+                else:
+                    hit = True
+                if hit:
+                    break
+            if not hit:
+                return False
+        return True
 
     def save_grid2d(self, map_name: str, zoom: str, data: dict,
                     tier: str = "") -> dict:
@@ -2000,6 +2379,7 @@ class MapService:
                 tmp.unlink(missing_ok=True)
                 _log(f"2D 网格导出失败 {out}: {e}")
                 return {"ok": False, "error": f"导出失败（未覆盖原文件）: {e}"}
+        self._invalidate_grid_cache(out)
         return {"ok": True, "saved": out.name, "path": str(out),
                 "dir": str(out.parent), "overwrote": existed,
                 "shape": [height, width],
@@ -2042,6 +2422,7 @@ class MapService:
                 tmp.unlink(missing_ok=True)
                 return {"ok": False, "error": f"保存失败（未覆盖原文件）: {e}"}
         self._floor_grid_cache.pop(path, None)
+        self._invalidate_grid_cache(path)
         return {"ok": True, "path": str(path),
                 "floor_regions": floor_regions}
 

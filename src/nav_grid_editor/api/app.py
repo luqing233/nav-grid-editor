@@ -224,8 +224,17 @@ async def grid2d_overlap_component_height(request: Request) -> Response:
 
 
 @app.get("/api/grid-links")
-def grid_links_get(map: str = "") -> JSONResponse:
-    return JSONResponse({"ok": True, **_svc().get_grid_links(map)})
+def grid_links_get(map: str = "", zoom: str = "") -> JSONResponse:
+    return JSONResponse({"ok": True, **_svc().get_grid_links(map, zoom)})
+
+
+@app.get("/api/nav-graph")
+def nav_graph_get(map: str = "", zoom: str = "", summary: bool = False) -> JSONResponse:
+    """分层导航图：各层的可走格 + 只来自 links 的跨层边，附就绪判定。
+
+    ``summary=1`` 时用 free_count 代替逐格坐标，供界面只显示就绪状态用。
+    """
+    return JSONResponse(_svc().nav_graph(map, zoom, summary=summary))
 
 
 @app.post("/api/grid-links")

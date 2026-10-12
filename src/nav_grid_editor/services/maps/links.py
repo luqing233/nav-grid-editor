@@ -11,10 +11,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from .io import _path_lock, _replace_with_retry, _unique_tmp
-from .settings import valid_grid_tier, valid_map_name
+from .settings import valid_grid_tier, valid_map_name, valid_map_zoom
 
 
-LINK_SCHEMA_VERSION = 1
+# v2 起端点带 zoom：网格文件是按 <地图>__<tier>_<zoom>.grid.npz 分档的，缺了
+# zoom 消费方只能硬编码。v1 文件读进来时把 zoom 补成 ""（含义见 _endpoint）。
+LINK_SCHEMA_VERSION = 2
 LINK_KINDS = frozenset(("stairs", "elevator", "portal", "door", "rope", "other"))
 _links_guard = threading.RLock()
 
@@ -28,12 +30,26 @@ def empty_links() -> dict:
 
 
 def load_links(path: Path) -> dict:
+    """读连接，并把内存里的形状统一到当前 schema。
+
+    v1 的端点没有 zoom。补齐成 ""（含义：按查询的 zoom 解析，见
+    ``MapService._link_endpoint_grid``），schema_version 也报当前值 —— 调用方
+    拿到的永远是同一套形状，不用分两版分支。磁盘上的版本要等下一次写入才升上去。
+    """
     path = Path(path)
     if not path.is_file():
         return empty_links()
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or not isinstance(data.get("links"), list):
         raise ValueError("links.json 顶层必须是 {schema_version, links}")
+    for link in data["links"]:
+        if not isinstance(link, dict):
+            continue
+        for side in ("from", "to"):
+            endpoint = link.get(side)
+            if isinstance(endpoint, dict) and "zoom" not in endpoint:
+                link[side] = {**endpoint, "zoom": ""}
+    data["schema_version"] = LINK_SCHEMA_VERSION
     return data
 
 
@@ -59,7 +75,15 @@ def _endpoint(raw) -> dict:
     tier = str(raw.get("tier") or "")
     if not valid_map_name(map_name) or not valid_grid_tier(tier):
         raise ValueError("连接端点 map/tier 非法")
-    return {"map": map_name, "tier": tier, "rect": _finite_rect(raw.get("rect"))}
+    # zoom 允许为空，含义是「该层只有一个网格档次时按它解析」。为空时由
+    # MapService 决定怎么落文件；有多档就报错要求重存，不猜。
+    zoom = str(raw.get("zoom") or "")
+    if zoom and not valid_map_zoom(map_name, zoom):
+        raise ValueError("连接端点 zoom 非法")
+    return {
+        "map": map_name, "tier": tier, "zoom": zoom,
+        "rect": _finite_rect(raw.get("rect")),
+    }
 
 
 def normalize_link(raw: dict, link_id: str = "") -> dict:

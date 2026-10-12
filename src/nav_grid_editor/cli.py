@@ -25,9 +25,10 @@
 - POST /api/calib                         计算并保存标定
 - GET  /api/grid2d?map=&zoom=&tier=       读取某地图/分层的 2D 网格（无高度）
 - POST /api/grid2d                        保存某地图/分层的 2D 网格（稠密 uint8）
-- GET  /api/grid-links?map=               读取跨地图/分层连接
-- POST /api/grid-links                    新增或更新连接
+- GET  /api/grid-links?map=&zoom=         读取跨地图/分层连接（带端点校验结果）
+- POST /api/grid-links                    新增或更新连接（端点悬空会被拒绝）
 - DELETE /api/grid-links/<id>             删除连接
+- GET  /api/nav-graph?map=&zoom=          分层导航图 + 就绪判定（跨层边只来自连接）
 - GET  /api/events                        SSE 事件流（tile/stats/log/coords/hello）
 - GET  /tiles/<地图>/<zoom>/<x>_<y>.png   瓦片图片
 - GET  /maps/<地图>/<zoom>/<文件>.png     已拼接总图

@@ -253,13 +253,20 @@ class StaticAssetsTest(_ServerMixin, unittest.TestCase):
             data["layers"][3]["id"], "scene_map02_lv002_layer_tips_4")
 
     def test_grid_link_endpoints_roundtrip(self):
+        # 端点必须落在对应层的可走格上，所以先把两层网格真的建出来
+        for tier in ("tier_a", "tier_b"):
+            saved = self.svc.save_grid2d("map02", "4", {
+                "origin": [0, 0, 0], "cell_size": 1, "shape": [8, 8],
+                "cells": [[0, 0], [2, 2]], "blocked": [],
+            }, tier=tier)
+            self.assertTrue(saved["ok"], saved)
         payload = {
             "from": {
-                "map": "map02", "tier": "tier_a",
+                "map": "map02", "tier": "tier_a", "zoom": "4",
                 "rect": {"x0": 0, "z0": 0, "x1": 1, "z1": 1},
             },
             "to": {
-                "map": "map02", "tier": "tier_b",
+                "map": "map02", "tier": "tier_b", "zoom": "4",
                 "rect": {"x0": 2, "z0": 2, "x1": 3, "z1": 3},
             },
             "kind": "stairs",
@@ -270,9 +277,13 @@ class StaticAssetsTest(_ServerMixin, unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(saved["ok"], saved)
         link_id = saved["link"]["id"]
-        status, body, _ = self._request("/api/grid-links?map=map02")
+        status, body, _ = self._request("/api/grid-links?map=map02&zoom=4")
         self.assertEqual(status, 200)
-        self.assertEqual(len(json.loads(body.decode("utf-8"))["links"]), 1)
+        links = json.loads(body.decode("utf-8"))["links"]
+        self.assertEqual(len(links), 1)
+        # 读回来的连接要带上端点校验结果，供编辑器标红
+        self.assertTrue(links[0]["checks"]["valid"], links[0]["checks"])
+        self.assertEqual(links[0]["checks"]["from"]["free"], 1)
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}/api/grid-links/{link_id}",
             method="DELETE",
@@ -280,6 +291,60 @@ class StaticAssetsTest(_ServerMixin, unittest.TestCase):
         with urllib.request.urlopen(req, timeout=15) as r:
             deleted = json.loads(r.read().decode("utf-8"))
         self.assertTrue(deleted["ok"] and deleted["deleted"])
+
+    def test_dangling_grid_link_is_rejected_with_a_reason(self):
+        self.svc.save_grid2d("map02", "4", {
+            "origin": [0, 0, 0], "cell_size": 1, "shape": [8, 8],
+            "cells": [[0, 0]], "blocked": [],
+        }, tier="tier_a")
+        self.svc.save_grid2d("map02", "4", {
+            "origin": [0, 0, 0], "cell_size": 1, "shape": [8, 8],
+            "cells": [[0, 0]], "blocked": [],
+        }, tier="tier_b")
+        # 终点框在没涂过的格子上：HTTP 层要给出可读的原因，而不是静默存下来
+        status, res = self._post_json("/api/grid-links", {
+            "from": {
+                "map": "map02", "tier": "tier_a", "zoom": "4",
+                "rect": {"x0": 0, "z0": 0, "x1": 1, "z1": 1},
+            },
+            "to": {
+                "map": "map02", "tier": "tier_b", "zoom": "4",
+                "rect": {"x0": 5, "z0": 5, "x1": 6, "z1": 6},
+            },
+        })
+        self.assertEqual(status, 200)
+        self.assertFalse(res["ok"], res)
+        self.assertIn("没有可走格", res["error"])
+        self.assertIn("终点", res["error"])
+
+    def test_nav_graph_endpoint_reports_readiness(self):
+        self.svc.save_grid2d("map02", "4", {
+            "origin": [0, 0, 0], "cell_size": 1, "shape": [8, 8],
+            "cells": [[0, 0]], "blocked": [],
+        }, tier="tier_a")
+        status, body, _ = self._request("/api/nav-graph?map=map02&zoom=4")
+        self.assertEqual(status, 200)
+        graph = json.loads(body.decode("utf-8"))
+        self.assertTrue(graph["ok"], graph)
+        self.assertEqual(graph["cross_tier_edges_from"], "links")
+        self.assertEqual([t["tier_id"] for t in graph["tiers"]], ["tier_a"])
+        # 只有一层、没有重合也没有连接：没有可冲突的东西
+        self.assertTrue(graph["ready"], graph["blockers"])
+
+        # 再给主地图在同一 X/Z 放一个可走格，两层都没标高度 → 不能导航
+        self.svc.save_grid2d("map02", "4", {
+            "origin": [0, 0, 0], "cell_size": 1, "shape": [8, 8],
+            "cells": [[0, 0]], "blocked": [],
+        }, tier="")
+        status, body, _ = self._request("/api/nav-graph?map=map02&zoom=4")
+        graph = json.loads(body.decode("utf-8"))
+        self.assertFalse(graph["ready"])
+        self.assertTrue(
+            any("重合区" in text for text in graph["blockers"]), graph["blockers"])
+
+        status, body, _ = self._request("/api/nav-graph?map=map02&zoom=3")
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body.decode("utf-8"))["ok"])
 
 
 if __name__ == "__main__":

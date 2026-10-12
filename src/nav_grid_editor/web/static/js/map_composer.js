@@ -2163,6 +2163,7 @@ async function saveFloorRegion() {
     if (remaining) {
       addLog("仍有 " + remaining + " 个黄色重合连通区未定义高度区间", "t-warn");
     }
+    void loadNavReadiness();
   } catch (e) {
     $("floorRegionStatus").textContent = e.message;
   }
@@ -2200,6 +2201,7 @@ async function clearFloorRegions() {
     $("floorRegionStatus").textContent = target.kind === "marking"
       ? "已删除该已标记区间"
       : "已清除所选网格在此重合区的区间";
+    void loadNavReadiness();
   } catch (e) {
     $("floorRegionStatus").textContent = e.message;
   }
@@ -2247,6 +2249,76 @@ function linkKindLabel(kind) {
   }[kind] || kind;
 }
 
+// 连接箭头：单向只在终点一侧画，双向两端都画，一眼能分清能不能走回头路。
+// 尺寸按**屏幕像素**恒定（所以除以 mapView.scale）——连接通常只有一两格宽，
+// 缩放时跟着一起缩就看不见了。
+const LINK_ARROW_PX = 8;         // 箭头长度
+const LINK_ARROW_HALF = 4.5;     // 箭尾半宽
+const LINK_ARROW_SHAFT_PX = 20;  // 短连接时双向标记的杆长（两个箭头尖的间距）
+const LINK_ARROW_MIN_LINE = 26;  // 线短于此（屏幕像素）时改在中点画方向标记
+
+function drawLinkArrowHead(g, tipX, tipY, dirX, dirY, color, px = LINK_ARROW_PX) {
+  const scale = mapView.scale || 1;
+  const size = px / scale;
+  const half = (px * LINK_ARROW_HALF / LINK_ARROW_PX) / scale;
+  const baseX = tipX - dirX * size;
+  const baseY = tipY - dirY * size;
+  g.beginPath();
+  g.moveTo(tipX, tipY);
+  g.lineTo(baseX - dirY * half, baseY + dirX * half);
+  g.lineTo(baseX + dirY * half, baseY - dirX * half);
+  g.closePath();
+  g.fillStyle = color;
+  g.fill();
+}
+
+function drawLinkArrows(g, from, to, color, bidirectional) {
+  const dx = to[0] - from[0];
+  const dy = to[1] - from[1];
+  const len = Math.hypot(dx, dy);
+  if (!len) return;
+  const scale = mapView.scale || 1;
+  const ux = dx / len;
+  const uy = dy / len;
+  if (len * scale >= LINK_ARROW_MIN_LINE) {
+    // 够长：箭头贴在两端内侧，一端的头和两端的头隔着整条线，一眼能分清
+    const inset = (LINK_ARROW_PX * 0.7) / scale;
+    drawLinkArrowHead(g, to[0] - ux * inset, to[1] - uy * inset,
+                      ux, uy, color);
+    if (bidirectional) {
+      drawLinkArrowHead(g, from[0] + ux * inset, from[1] + uy * inset,
+                        -ux, -uy, color);
+    }
+    return;
+  }
+  // 短连接（一两格，绝大多数情况）：端点中心只隔几个像素，两个反向箭头会叠成
+  // 一个菱形，单向双向看起来一模一样。所以不按线长画，改成在中点画固定尺寸的
+  // 方向标记 —— 单向是一个实心箭头，双向是一条**两端带箭头的短线**（杆看得出来）。
+  const mx = (from[0] + to[0]) / 2;
+  const my = (from[1] + to[1]) / 2;
+  const head = LINK_ARROW_PX / scale;
+  const half = LINK_ARROW_SHAFT_PX / 2 / scale;
+  const tipA = [mx + ux * half, my + uy * half];
+  const tipB = [mx - ux * half, my - uy * half];
+  g.save();
+  g.setLineDash([]);
+  if (bidirectional) {
+    g.strokeStyle = color;
+    g.lineWidth = 1.5 / scale;
+    g.beginPath();
+    g.moveTo(tipA[0], tipA[1]);
+    g.lineTo(tipB[0], tipB[1]);
+    g.stroke();
+    drawLinkArrowHead(g, tipA[0], tipA[1], ux, uy, color, LINK_ARROW_PX);
+    drawLinkArrowHead(g, tipB[0], tipB[1], -ux, -uy, color, LINK_ARROW_PX);
+  } else {
+    drawLinkArrowHead(g, mx + ux * (LINK_ARROW_PX * 0.5) / scale,
+                      my + uy * (LINK_ARROW_PX * 0.5) / scale,
+                      ux, uy, color, LINK_ARROW_PX);
+  }
+  g.restore();
+}
+
 function drawLinkLayer() {
   if (!linkCanvasEl || linkCanvasEl.width <= 1 || !calib.mapping) return;
   const vis = visibleRect();
@@ -2270,6 +2342,7 @@ function drawLinkLayer() {
       pending.push([{
         map: state.activeKey.split("@")[0],
         tier: currentTierId(),
+        zoom: state.activeKey.split("@")[1] || "",
         rect,
       }, link.stage === "target" ? "#66baff" : "#76ff9f"]);
     }
@@ -2284,28 +2357,35 @@ function drawLinkLayer() {
     const fromCurrent = endpointIsCurrent(item.from);
     const toCurrent = endpointIsCurrent(item.to);
     if (!fromCurrent && !toCurrent) continue;
+    // 端点悬空的连接规划器用不了，画成红色实心，别和可用连接一个样子
+    const broken = !!(item.checks && !item.checks.valid);
     const fp = drawWorldRect(lctx, item.from.rect, inv,
-      fromCurrent ? "rgba(118,255,159,0.24)" : "rgba(102,186,255,0.08)",
-      fromCurrent ? "rgba(118,255,159,0.9)" : "rgba(102,186,255,0.35)");
+      broken ? "rgba(220,68,52,0.30)" : (fromCurrent ? "rgba(118,255,159,0.24)" : "rgba(102,186,255,0.08)"),
+      broken ? "rgba(220,68,52,0.95)" : (fromCurrent ? "rgba(118,255,159,0.9)" : "rgba(102,186,255,0.35)"));
     const tp = drawWorldRect(lctx, item.to.rect, inv,
-      toCurrent ? "rgba(102,186,255,0.24)" : "rgba(118,255,159,0.08)",
-      toCurrent ? "rgba(102,186,255,0.9)" : "rgba(118,255,159,0.35)");
+      broken ? "rgba(220,68,52,0.30)" : (toCurrent ? "rgba(102,186,255,0.24)" : "rgba(118,255,159,0.08)"),
+      broken ? "rgba(220,68,52,0.95)" : (toCurrent ? "rgba(102,186,255,0.9)" : "rgba(118,255,159,0.35)"));
     const fc = fp.reduce((a, p) => [a[0] + p[0] / 4, a[1] + p[1] / 4], [0, 0]);
     const tc = tp.reduce((a, p) => [a[0] + p[0] / 4, a[1] + p[1] / 4], [0, 0]);
     const rope = item.kind === "rope";
+    const lineColor = broken
+      ? "rgba(220,68,52,0.95)"
+      : rope
+        ? "rgba(255,150,64,0.96)"
+        : "rgba(255,214,92,0.9)";
     lctx.save();
-    lctx.setLineDash(rope
-      ? [2 / mapView.scale, 3 / mapView.scale]
-      : [6 / mapView.scale, 4 / mapView.scale]);
-    lctx.strokeStyle = rope
-      ? "rgba(255,150,64,0.96)"
-      : "rgba(255,214,92,0.9)";
+    lctx.setLineDash(broken
+      ? [1 / mapView.scale, 4 / mapView.scale]
+      : rope
+        ? [2 / mapView.scale, 3 / mapView.scale]
+        : [6 / mapView.scale, 4 / mapView.scale]);
+    lctx.strokeStyle = lineColor;
     lctx.lineWidth = (rope ? 2 : 1.5) / mapView.scale;
     lctx.beginPath();
     lctx.moveTo(fc[0], fc[1]);
     lctx.lineTo(tc[0], tc[1]);
     lctx.stroke();
-    if (rope) {
+    if (rope && !broken) {
       lctx.setLineDash([]);
       lctx.beginPath();
       lctx.arc(tc[0], tc[1], 5 / mapView.scale, 0, Math.PI * 2);
@@ -2315,8 +2395,42 @@ function drawLinkLayer() {
       lctx.fillStyle = "rgba(255,190,92,0.95)";
       lctx.fill();
     }
+    // 箭头画在最后，压在虚线和绳索圆圈之上
+    lctx.setLineDash([]);
+    drawLinkArrows(lctx, fc, tc, lineColor, !!item.bidirectional);
     lctx.restore();
   }
+}
+
+// 端点框选时的即时校验。用**当前已载入的这一层**网格数格子：分层网格共用同一套
+// origin/cell_size，而框这个端点时人正站在它所属的那层上，所以当前层的口径就是
+// 这个端点的口径 —— 不用额外请求。
+//
+// 之前只在保存后才由服务端报「端点悬空」，等于让人先画错再被打回；实测那份数据里
+// 7 条连接有 3 条就是这样来的。
+function linkEndpointLocalReport(endpoint) {
+  const e = ed();
+  if (!e || !endpoint || !endpoint.rect) return null;
+  const [map, zoom] = (state.activeKey || "@").split("@");
+  if (endpoint.map !== map) return null;
+  const zoomOf = String(endpoint.zoom || "");
+  if (zoomOf && zoomOf !== zoom) return null;
+  if (String(endpoint.tier || "") !== (currentTierId() || "")) return null;
+  const cs = e.cellSize || 1;
+  const range = {
+    x0: Math.floor((endpoint.rect.x0 - e.origin[0]) / cs),
+    x1: Math.ceil((endpoint.rect.x1 - e.origin[0]) / cs) - 1,
+    z0: Math.floor((endpoint.rect.z0 - e.origin[1]) / cs),
+    z1: Math.ceil((endpoint.rect.z1 - e.origin[1]) / cs) - 1,
+  };
+  let free = 0;
+  let blocked = 0;
+  e.forEachCell(range, (_ix, _iz, value) => {
+    if (value === CELL_FREE) free++;
+    else if (value === CELL_BLOCKED) blocked++;
+  });
+  const total = Math.max(0, (range.x1 - range.x0 + 1) * (range.z1 - range.z0 + 1));
+  return { free, blocked, unknown: Math.max(0, total - free - blocked) };
 }
 
 // 当前是否框选着格子（网格模式的快捷键要靠它决定"做事"还是"选工具"）
@@ -2651,21 +2765,29 @@ function setEditMode(on) {
 
 function endpointLabel(endpoint) {
   if (!endpoint) return "未选择";
-  if (!endpoint.tier) return `${mapDisplayName(endpoint.map)} / 大地图`;
+  const zoom = String(endpoint.zoom || "");
+  const [currentMap, currentZoom] = (state.activeKey || "@").split("@");
+  // 端点属于别的 zoom 时把档次标出来，否则「大地图 → 大地图」这种看着像自环
+  const suffix = zoom && (endpoint.map !== currentMap || zoom !== currentZoom)
+    ? "@" + zoom : "";
+  if (!endpoint.tier) {
+    return `${mapDisplayName(endpoint.map)}${suffix} / 大地图`;
+  }
   const layer = [...state.tierCatalogs.values()]
     .flat()
     .find(item => item.id === endpoint.tier);
   const tier = layer ? `${layer.level_name} · ${layer.name}` : endpoint.tier;
-  return `${mapDisplayName(endpoint.map)} / ${tier}`;
+  return `${mapDisplayName(endpoint.map)}${suffix} / ${tier}`;
 }
 
 function endpointFromRect(rect) {
   const e = ed();
-  const [map] = (state.activeKey || "@").split("@");
+  const [map, zoom] = (state.activeKey || "@").split("@");
   if (!e || !map) return null;
   return {
     map,
     tier: currentTierId(),
+    zoom: zoom || "",
     rect: {
       x0: e.origin[0] + rect.x0 * e.cellSize,
       z0: e.origin[1] + rect.z0 * e.cellSize,
@@ -2698,9 +2820,28 @@ function updateLinkEditorUi() {
   $("btnLinkSource").textContent = link.source ? "重选起点" : "选起点";
   $("btnLinkTarget").textContent = link.target ? "重选终点" : "选终点";
   $("btnLinkSave").disabled = !(link.source && link.target);
-  $("linkEditStatus").textContent =
-    "起点 " + endpointLabel(link.source) +
+  const hint = $("linkEditStatus");
+  let text = "起点 " + endpointLabel(link.source) +
     " · 终点 " + endpointLabel(link.target);
+  // 框完就能看出这一端压在没涂过的格子上，不用等保存被拒
+  const bad = [];
+  for (const [endpoint, label] of
+       [[link.source, "起点"], [link.target, "终点"]]) {
+    const report = linkEndpointLocalReport(endpoint);
+    if (!report) continue;
+    if (!report.free) {
+      bad.push(label + "没有可走格（Free 0 / 未知 " + report.unknown + "）");
+    } else if (report.unknown) {
+      text += " ｜ " + label + " Free " + report.free + " · 未知 " + report.unknown;
+    }
+  }
+  if (bad.length) {
+    hint.textContent = text + " ｜ " + bad.join("；") + "，保存会被拒绝";
+    hint.classList.add("t-err");
+  } else {
+    hint.textContent = text;
+    hint.classList.remove("t-err");
+  }
 }
 
 function setLinkMode(on) {
@@ -2744,15 +2885,68 @@ async function loadGridLinks() {
   try {
     const res = await fetch("/api/grid-links?map=" + encodeURIComponent(map)).then(r => r.json());
     state.gridLinks = res.ok ? (res.links || []) : [];
+    const broken = state.gridLinks.filter(item => item.checks && !item.checks.valid);
     $("linkListStatus").textContent = res.ok
-      ? `本图 ${state.gridLinks.length} 条连接`
+      ? (broken.length
+          ? `本图 ${state.gridLinks.length} 条连接，其中 ${broken.length} 条端点无效（已标红，需重选端点）`
+          : `本图 ${state.gridLinks.length} 条连接`)
       : ("读取失败: " + (res.error || "未知错误"));
+    $("linkListStatus").classList.toggle("t-err", broken.length > 0);
   } catch (e) {
     state.gridLinks = [];
     $("linkListStatus").textContent = "读取失败: " + e.message;
   }
   renderLinkList();
   requestRender(RENDER_LAYERS.LINK);
+  void loadNavReadiness();
+}
+
+// 「这张图现在能不能拿去导航」——就绪判定由服务端算（/api/nav-graph），这里只显示。
+// 之前这个判定只有 curl 能看，属于做了功能却没接上界面。
+async function loadNavReadiness() {
+  const el = $("navReadyStatus");
+  const list = $("navReadyList");
+  if (!el || !list) return;
+  const [map, zoom] = (state.activeKey || "@").split("@");
+  if (!map || !zoom) {
+    el.textContent = "分层导航：-";
+    el.classList.remove("t-ok", "t-warn");
+    list.innerHTML = "";
+    return;
+  }
+  try {
+    const res = await fetch(
+      "/api/nav-graph?map=" + encodeURIComponent(map) +
+      "&zoom=" + encodeURIComponent(zoom) + "&summary=1",
+    ).then(r => r.json());
+    if (!res.ok) {
+      el.textContent = "分层导航：" + (res.error || "无法判定");
+      el.classList.remove("t-ok");
+      el.classList.add("t-warn");
+      list.innerHTML = "";
+      return;
+    }
+    const tiers = res.tiers || [];
+    const counts = tiers
+      .map(t => (t.tier_id === "__main__" ? "大地图" : t.tier_id) +
+        " " + t.free_count + " 格")
+      .join(" · ");
+    if (res.ready) {
+      el.innerHTML = '<b class="t-ok">已就绪</b> —— ' + tiers.length +
+        " 层，" + counts;
+      el.classList.remove("t-warn");
+    } else {
+      el.innerHTML = '<b class="t-warn">' + res.blockers.length +
+        " 项待处理</b> —— " + tiers.length + " 层，" + counts;
+      el.classList.remove("t-ok");
+    }
+    list.innerHTML = (res.blockers || [])
+      .map(text => '<div class="nav-blocker">' + text + "</div>")
+      .join("");
+  } catch (e) {
+    el.textContent = "分层导航：读取失败 " + e.message;
+    list.innerHTML = "";
+  }
 }
 
 function renderLinkList() {
@@ -2760,20 +2954,102 @@ function renderLinkList() {
   if (!box) return;
   box.innerHTML = "";
   for (const item of state.gridLinks) {
+    const invalid = !!(item.checks && !item.checks.valid);
+    const editing = item.id === link.editingId;
     const row = document.createElement("div");
-    row.className = "link-row";
+    row.className = "link-row" + (invalid ? " link-row-invalid" : "") +
+      (editing ? " link-row-editing" : "");
     const text = document.createElement("div");
     text.innerHTML =
       "<b>" + endpointLabel(item.from) + "</b> → <b>" +
       endpointLabel(item.to) + "</b><br><small>" +
       linkKindLabel(item.kind) + " · " + (item.bidirectional ? "双向" : "单向") +
-      " · cost " + item.cost + "</small>";
+      " · cost " + item.cost +
+      (invalid ? '<br><span class="t-err">端点无效：' +
+        (item.checks.issue || "") + "</span>" : "") +
+      "</small>";
+    const edit = document.createElement("button");
+    edit.textContent = editing ? "编辑中" : "编辑";
+    if (editing) edit.classList.add("on");
+    edit.onclick = () => void editGridLink(item);
     const del = document.createElement("button");
     del.textContent = "删除";
     del.onclick = () => void deleteGridLink(item.id);
-    row.append(text, del);
+    row.append(text, edit, del);
     box.appendChild(row);
   }
+}
+
+// 点“编辑”后把视图挪到这条连接上。两端可能不同地图/不同分层（编辑器一次只显示
+// 一层），所以顺序是：切地图/层级 → 切分层 → 聚焦到两端范围。
+async function focusGridLink(item) {
+  const map = String(item.from.map || item.to.map || "");
+  const zoom = String(item.from.zoom || item.to.zoom || "");
+  if (!map) return false;
+  const [curMap, curZoom] = (state.activeKey || "@").split("@");
+  if (curMap !== map || (zoom && curZoom !== zoom)) {
+    const targetZoom = syncMapSelectors(
+      map, zoom || (curMap === map ? curZoom : ""));
+    if (!targetZoom) {
+      addLog("连接所在的地图不在本地列表中: " + map, "t-warn");
+      return false;
+    }
+    if (state.activeKey !== viewKey(map, targetZoom)) {
+      await openSelectedMap({ preserveFollow: true });
+    }
+    if (!(calib.mapping && calib.key === state.activeKey)) {
+      await loadMappingForCurrent();
+    }
+    await loadTierCatalog();
+  }
+
+  // 已经站在这条连接的任一端所在分层时就不动它，别把人从当前层里拽走
+  const current = currentTierId() || "";
+  const fromTier = String(item.from.tier || "");
+  const toTier = String(item.to.tier || "");
+  const wantTier = (current === fromTier || current === toTier) ? current : fromTier;
+  if (wantTier !== current) {
+    await setActiveTier(wantTier);
+    if ((currentTierId() || "") !== wantTier) {
+      addLog("未能切到连接所在的分层，只聚焦到位置（先保存当前层网格再试）", "t-warn");
+    }
+  }
+
+  // 两端离得远时 focusWorldBounds 只会放大到能看清的倍率、不会缩得比现在还小
+  focusWorldBounds({
+    x0: Math.min(Number(item.from.rect.x0), Number(item.to.rect.x0)),
+    x1: Math.max(Number(item.from.rect.x1), Number(item.to.rect.x1)),
+    z0: Math.min(Number(item.from.rect.z0), Number(item.to.rect.z0)),
+    z1: Math.max(Number(item.from.rect.z1), Number(item.to.rect.z1)),
+  });
+  return true;
+}
+
+// 把已有连接读回编辑器：端点悬空的连接只能靠重选端点修，没有这个入口就只能
+// 删掉重画。kind/双向/代价一并回填，避免修端点时把其它字段重置掉。
+async function editGridLink(item) {
+  if (!link.mode) setLinkMode(true);
+  link.editingId = item.id;
+  link.source = { ...item.from, rect: { ...item.from.rect } };
+  link.target = { ...item.to, rect: { ...item.to.rect } };
+  link.stage = "source";
+  link.drag = null;
+  if ($("linkKind")) $("linkKind").value = item.kind || "stairs";
+  if ($("linkBidirectional")) {
+    $("linkBidirectional").checked = !!item.bidirectional;
+  }
+  if ($("linkCost")) $("linkCost").value = item.cost;
+  updateLinkEditorUi();
+  requestRender(RENDER_LAYERS.LINK);
+  renderLinkList();
+  const broken = item.checks && !item.checks.valid;
+  setStatus(
+    broken
+      ? "正在修改连接（端点无效）—— 切到对应分层后点“重选起点/重选终点”重新框选"
+      : "正在修改连接 —— 点“重选起点/重选终点”可重新框选",
+    broken ? "warning" : "active",
+  );
+  await focusGridLink(item);
 }
 
 async function saveGridLink() {
@@ -2794,6 +3070,7 @@ async function saveGridLink() {
     }).then(r => r.json());
     if (!res.ok) throw new Error(res.error || "保存失败");
     addLog("已保存分层连接: " + res.link.id, "t-ok");
+    setStatus("已保存分层连接", "ok");
     link.source = null;
     link.target = null;
     link.editingId = null;
@@ -2801,7 +3078,9 @@ async function saveGridLink() {
     await loadGridLinks();
     updateLinkEditorUi();
   } catch (e) {
+    // 端点悬空是最常见的失败原因，光写日志容易看不见，状态栏也提示一次
     addLog("保存分层连接失败: " + e.message, "t-err");
+    setStatus("保存分层连接失败: " + e.message, "error");
   }
 }
 
@@ -2976,6 +3255,7 @@ async function saveGrid2D() {
     updateEditStats();
     updateSelBar();
     requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
+    void loadNavReadiness();
   } catch (e) { addLog("保存失败: " + e.message, "t-err"); }
 }
 
