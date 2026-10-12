@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import queue
 import threading
 import time
+import urllib.request
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -16,9 +18,10 @@ from pathlib import Path
 import numpy as np
 
 from .. import marks as marks_mod
+from ..endfield_ws import EndfieldPositionClient
 from .calibration import _fit_affine_ransac, _invert_affine, _mat_vec
 from .events import EventBus
-from .grid import _load_grid_npz
+from .grid import _load_grid_meta_npz, _load_grid_npz
 from .io import (
     OVERVIEW_SUFFIX,
     _as_int,
@@ -28,6 +31,22 @@ from .io import (
     _save_overview,
     _unique_tmp,
     solid_png,
+)
+from .layers import (
+    CATALOG_FILENAME,
+    MAX_LAYER_IMAGE_BYTES,
+    builtin_layer_entries,
+    find_layer,
+    layer_cache_relpath,
+    layer_source_url,
+    load_layer_catalog,
+    list_layers as list_layer_catalog,
+)
+from .links import (
+    delete_link,
+    links_path,
+    load_links,
+    upsert_link,
 )
 from .settings import (
     CELL_BLOCKED,
@@ -56,8 +75,132 @@ from .settings import (
     default_tiles_root,
     tile_pattern,
     valid_map_zoom,
+    valid_grid_tier,
 )
 from .tiles import TileStore, merge_tiles
+
+
+_MAX_FLOOR_REGIONS = 256
+_MAX_FLOOR_REGION_CELLS = 50_000
+MAIN_GRID_KEY = "__main__"
+_LAYER_HEADERS = {
+    "Referer": MAP_URL,
+    "User-Agent": "Mozilla/5.0 nav-grid-editor",
+}
+
+
+def _normalize_floor_regions(raw) -> list[dict]:
+    """Validate optional world-space 3D regions stored in a grid's metadata."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("floor_regions 必须是数组")
+    if len(raw) > _MAX_FLOOR_REGIONS:
+        raise ValueError(f"floor_regions 不能超过 {_MAX_FLOOR_REGIONS} 个")
+    out = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"floor_regions[{index}] 必须是对象")
+        try:
+            x0 = float(item["x0"])
+            x1 = float(item["x1"])
+            z0 = float(item["z0"])
+            z1 = float(item["z1"])
+            y_min = float(item["y_min"])
+            y_max = float(item["y_max"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise ValueError(
+                f"floor_regions[{index}] 需要 x0/x1/z0/z1/y_min/y_max") from None
+        values = (x0, x1, z0, z1, y_min, y_max)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError(f"floor_regions[{index}] 含有非有限数")
+        if x0 > x1 or z0 > z1 or y_min > y_max:
+            raise ValueError(f"floor_regions[{index}] 的最小值不能大于最大值")
+        region = {
+            "x0": x0, "x1": x1, "z0": z0, "z1": z1,
+            "y_min": y_min, "y_max": y_max,
+        }
+        component_id = str(item.get("component_id") or "").strip()
+        if component_id:
+            region["component_id"] = component_id
+        raw_cells = item.get("cells")
+        if raw_cells is not None:
+            if not isinstance(raw_cells, list):
+                raise ValueError(f"floor_regions[{index}].cells 必须是数组")
+            cells = []
+            for cell in raw_cells:
+                if not isinstance(cell, (list, tuple)) or len(cell) != 4:
+                    raise ValueError(
+                        f"floor_regions[{index}].cells 每项应为 [x0,x1,z0,z1]")
+                try:
+                    cell_values = [float(value) for value in cell]
+                except (TypeError, ValueError, OverflowError):
+                    raise ValueError(
+                        f"floor_regions[{index}].cells 含有非法数字") from None
+                if not all(math.isfinite(value) for value in cell_values):
+                    raise ValueError(
+                        f"floor_regions[{index}].cells 含有非有限数")
+                if cell_values[0] > cell_values[1] or cell_values[2] > cell_values[3]:
+                    raise ValueError(
+                        f"floor_regions[{index}].cells 的最小值不能大于最大值")
+                cells.append(cell_values)
+            if len(cells) > _MAX_FLOOR_REGION_CELLS:
+                raise ValueError(
+                    f"floor_regions[{index}].cells 不能超过 {_MAX_FLOOR_REGION_CELLS}")
+            if cells:
+                region["cells"] = cells
+        out.append(region)
+    return out
+
+
+def _region_overlap_ratio(region: dict, new_rects: list[list[float]]) -> float:
+    """How strongly an existing region overlaps the new component geometry."""
+    old_rects = region.get("cells")
+    if old_rects:
+        old_keys = {
+            (
+                round((float(rect[0]) + float(rect[1])) / 2.0, 3),
+                round((float(rect[2]) + float(rect[3])) / 2.0, 3),
+            )
+            for rect in old_rects
+            if isinstance(rect, (list, tuple)) and len(rect) == 4
+        }
+        new_keys = {
+            (
+                round((float(rect[0]) + float(rect[1])) / 2.0, 3),
+                round((float(rect[2]) + float(rect[3])) / 2.0, 3),
+            )
+            for rect in new_rects
+        }
+        if not old_keys or not new_keys:
+            return 0.0
+        return len(old_keys & new_keys) / min(len(old_keys), len(new_keys))
+    old_area = max(0.0, region["x1"] - region["x0"]) * max(
+        0.0, region["z1"] - region["z0"])
+    new_x0 = min(rect[0] for rect in new_rects)
+    new_x1 = max(rect[1] for rect in new_rects)
+    new_z0 = min(rect[2] for rect in new_rects)
+    new_z1 = max(rect[3] for rect in new_rects)
+    overlap_w = max(
+        0.0, min(region["x1"], new_x1) - max(region["x0"], new_x0))
+    overlap_h = max(
+        0.0, min(region["z1"], new_z1) - max(region["z0"], new_z0))
+    new_area = max(0.0, new_x1 - new_x0) * max(0.0, new_z1 - new_z0)
+    return (overlap_w * overlap_h) / max(1e-9, min(old_area, new_area))
+
+
+def _download_layer_image(url: str) -> bytes:
+    """Fetch one official layer PNG with a size guard."""
+    req = urllib.request.Request(url, headers=_LAYER_HEADERS)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        if getattr(resp, "status", 200) != 200:
+            raise OSError(f"HTTP {resp.status}")
+        data = resp.read(MAX_LAYER_IMAGE_BYTES + 1)
+    if len(data) > MAX_LAYER_IMAGE_BYTES:
+        raise OSError("分层图片超过大小上限")
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise OSError("分层资源不是 PNG")
+    return data
 
 
 class FetchState:
@@ -139,6 +282,14 @@ class MapService:
         # 地图标记抓取（认证口径）：{"running","stats","error"}
         self._marks: dict | None = None
         self._marks_thread: threading.Thread | None = None
+        # 官方地图 WS 位置流：直接连 wss://ws.skland.com/...，不再依赖本地 3001 中继
+        self._position = EndfieldPositionClient(
+            on_position=self._on_position,
+            on_state=self._on_position_state,
+            log=self._position_log,
+        )
+        self._layer_catalog_cache: tuple[int, list[dict]] | None = None
+        self._floor_grid_cache: dict[Path, tuple[int, dict]] = {}
 
     # ---------- 状态快照 ----------
     def status(self) -> dict:
@@ -158,6 +309,7 @@ class MapService:
             "compose": dict(self._compose) if self._compose else None,
             "simulate": dict(self._simulate) if self._simulate else None,
             "marks": dict(self._marks) if self._marks else None,
+            "position": self._position.status(),
         }
 
     # ---------- 事件 ----------
@@ -745,8 +897,557 @@ class MapService:
             self.bus.emit(type="log", text=f"标记抓取失败: {e}")
 
     # =========================================================
-    # 坐标中继（wsserver/main.py 功能的网页化）
+    # 玩家位置：官方地图 WS 客户端 + 坐标中继
     # =========================================================
+
+    def start_position_stream(self) -> dict:
+        """启动官方地图 WS 位置流（连 skland，不再依赖本地 ws 服务器）。"""
+        res = self._position.start()
+        if res.get("started"):
+            self.bus.emit(type="position_state", state=self._position.status())
+            self.bus.emit(type="log", text="位置流：官方地图 WebSocket 客户端已启动")
+        return res
+
+    def stop_position_stream(self) -> dict:
+        res = self._position.stop()
+        self.bus.emit(type="position_state", state=self._position.status())
+        self.bus.emit(type="log", text="位置流：官方地图 WebSocket 客户端已停止")
+        return res
+
+    def position_status(self) -> dict:
+        return self._position.status()
+
+    def _tier_grid_meta(self, map_name: str, tier: str) -> dict | None:
+        if not valid_map_zoom(map_name, "4") or (
+                tier != MAIN_GRID_KEY and not valid_grid_tier(tier)):
+            return None
+        if tier == MAIN_GRID_KEY:
+            paths = sorted(
+                (path for path in self.grid2d_dir.glob(f"{map_name}_*.grid.npz")
+                 if "__" not in path.name),
+                key=lambda path: path.name,
+                reverse=True,
+            )
+        else:
+            paths = sorted(
+                self.grid2d_dir.glob(f"{map_name}__{tier}_*.grid.npz"),
+                key=lambda path: path.name,
+                reverse=True,
+            )
+        for path in paths:
+            try:
+                mtime = path.stat().st_mtime_ns
+                cached = self._floor_grid_cache.get(path)
+                if cached and cached[0] == mtime:
+                    return cached[1]
+                meta = _load_grid_meta_npz(path)
+                if str(meta.get("map_name") or "") != map_name:
+                    continue
+                meta_tier = str(meta.get("tier") or "")
+                if tier == MAIN_GRID_KEY:
+                    if meta_tier:
+                        continue
+                elif meta_tier != tier:
+                    continue
+                self._floor_grid_cache[path] = (mtime, meta)
+                return meta
+            except Exception as e:
+                _log(f"读取楼层网格元数据失败 {path}: {e}")
+        return None
+
+    @staticmethod
+    def _region_contains(region: dict, x: float, y: float, z: float) -> bool:
+        cells = region.get("cells")
+        if cells:
+            inside = any(
+                cell[0] <= x <= cell[1] and cell[2] <= z <= cell[3]
+                for cell in cells
+            )
+            if not inside:
+                return False
+        return (
+            region["x0"] <= x <= region["x1"] and
+            region["z0"] <= z <= region["z1"] and
+            region["y_min"] <= y <= region["y_max"]
+        )
+
+    def resolve_position_floor(self, map_name: str, level_id: str,
+                               x: float, y: float, z: float) -> dict:
+        """Resolve a WS position to a tier using grid metadata height volumes."""
+        if not valid_map_zoom(map_name, "4"):
+            return {"status": "no_match", "tier_id": "", "matched": []}
+        try:
+            x, y, z = float(x), float(y), float(z)
+        except (TypeError, ValueError, OverflowError):
+            return {"status": "no_match", "tier_id": "", "matched": []}
+        if not all(math.isfinite(value) for value in (x, y, z)):
+            return {"status": "no_match", "tier_id": "", "matched": []}
+
+        wanted_level = str(level_id or "").strip()
+        layers = [
+            layer for layer in self._layer_entries()
+            if str(layer.get("map_name") or "") == map_name
+            and str(layer.get("level_id") or "") == wanted_level
+        ]
+        if self._tier_grid_file(map_name, MAIN_GRID_KEY):
+            layers.append({
+                "id": MAIN_GRID_KEY,
+                "map_name": map_name,
+                "level_id": "",
+                "name": "大地图",
+            })
+        if not wanted_level or wanted_level == map_name or not layers:
+            return {"status": "main", "tier_id": "", "matched": []}
+
+        entries = []
+        for layer in layers:
+            tier = str(layer.get("id") or "")
+            meta = self._tier_grid_meta(map_name, tier)
+            if not meta:
+                continue
+            regions = meta.get("floor_regions") or []
+            try:
+                regions = _normalize_floor_regions(regions)
+            except ValueError as e:
+                _log(f"网格楼层区间非法 {map_name}__{tier}: {e}")
+                regions = []
+            matched = any(self._region_contains(region, x, y, z)
+                          for region in regions)
+            entries.append({"tier_id": tier, "matched": matched})
+
+        if not entries:
+            return {"status": "no_grid", "tier_id": "", "matched": []}
+        if len(entries) == 1:
+            return {
+                "status": "unique",
+                "tier_id": entries[0]["tier_id"],
+                "matched": [entries[0]["tier_id"]],
+            }
+        matched = [entry["tier_id"] for entry in entries if entry["matched"]]
+        if len(matched) == 1:
+            return {"status": "unique", "tier_id": matched[0], "matched": matched}
+        if len(matched) > 1:
+            return {"status": "ambiguous", "tier_id": "", "matched": matched}
+        return {"status": "no_match", "tier_id": "", "matched": []}
+
+    def get_grid_floor_map(self, map_name: str, zoom: str,
+                           level_id: str) -> dict:
+        """Return floor metadata for every tier in one levelId."""
+        if not valid_map_zoom(map_name, zoom):
+            return {"ok": False, "error": "非法地图名/zoom"}
+        wanted_level = str(level_id or "")
+        layers = [
+            layer for layer in self.list_layers(map_name, zoom)
+            if not wanted_level
+            or str(layer.get("level_id") or "") == wanted_level
+        ]
+        out = []
+        main_meta = self._tier_grid_meta(map_name, MAIN_GRID_KEY)
+        if main_meta:
+            regions = []
+            try:
+                regions = _normalize_floor_regions(
+                    main_meta.get("floor_regions") or [])
+            except ValueError as e:
+                _log(f"网格楼层区间非法 {map_name}__main: {e}")
+            out.append({
+                "tier_id": MAIN_GRID_KEY,
+                "name": "大地图",
+                "group": "主地图",
+                "bounds": {},
+                "floor_regions": regions,
+                "has_grid": True,
+            })
+        for layer in layers:
+            tier = str(layer.get("id") or "")
+            meta = self._tier_grid_meta(map_name, tier)
+            regions = []
+            if meta:
+                try:
+                    regions = _normalize_floor_regions(
+                        meta.get("floor_regions") or [])
+                except ValueError as e:
+                    _log(f"网格楼层区间非法 {map_name}__{tier}: {e}")
+            out.append({
+                "tier_id": tier,
+                "name": layer.get("name") or tier,
+                "group": layer.get("group") or "",
+                "bounds": dict(layer.get("bounds") or {}),
+                "floor_regions": regions,
+                "has_grid": bool(meta),
+            })
+        return {"ok": True, "map": map_name, "zoom": zoom,
+                "level_id": level_id, "layers": out}
+
+    def _tier_grid_file(self, map_name: str, tier: str) -> Path | None:
+        if not valid_map_zoom(map_name, "4") or (
+                tier != MAIN_GRID_KEY and not valid_grid_tier(tier)):
+            return None
+        if tier == MAIN_GRID_KEY:
+            paths = sorted(
+                (path for path in self.grid2d_dir.glob(f"{map_name}_*.grid.npz")
+                 if "__" not in path.name),
+                key=lambda path: path.name,
+                reverse=True,
+            )
+            return paths[0] if paths else None
+        paths = sorted(
+            self.grid2d_dir.glob(f"{map_name}__{tier}_*.grid.npz"),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+        return paths[0] if paths else None
+
+    @staticmethod
+    def _regions_at(regions: list[dict], x: float, z: float) -> list[dict]:
+        return [
+            region for region in regions
+            if region["x0"] <= x <= region["x1"]
+            and region["z0"] <= z <= region["z1"]
+        ]
+
+    def _compute_grid_overlaps(self, map_name: str, zoom: str,
+                               tier_id: str, level_id: str) -> dict:
+        if not valid_map_zoom(map_name, zoom) or not valid_grid_tier(tier_id):
+            return {"ok": False, "error": "非法地图名/zoom/tier"}
+        current_path = self._tier_grid_file(map_name, tier_id)
+        if not current_path:
+            return {"ok": True, "components": [], "tier_id": tier_id}
+        try:
+            current, current_meta, _warnings = _load_grid_npz(current_path)
+            current_regions = _normalize_floor_regions(
+                current_meta.get("floor_regions") or [])
+        except Exception as e:
+            return {"ok": False, "error": f"读取当前网格失败: {e}"}
+
+        wanted_level = str(level_id or "").strip()
+        is_main_current = tier_id == MAIN_GRID_KEY
+        layers = [
+            layer for layer in self.list_layers(map_name, zoom)
+            if not wanted_level
+            or str(layer.get("level_id") or "") == wanted_level
+        ]
+        if not is_main_current and self._tier_grid_file(
+                map_name, MAIN_GRID_KEY):
+            layers.append({
+                "id": MAIN_GRID_KEY,
+                "map_name": map_name,
+                "level_id": "",
+                "name": "大地图",
+                "group": "主地图",
+            })
+        layer_names = {
+            str(layer.get("id") or ""): layer.get("name") or layer.get("id")
+            for layer in layers
+        }
+        layer_names[MAIN_GRID_KEY] = "大地图"
+        tier_meta = {tier_id: current_meta}
+        cell_sources: dict[tuple[int, int], set[str]] = {}
+        cell_y_overlap: dict[tuple[int, int], bool] = {}
+        cell_matches: dict[tuple[int, int], dict[str, tuple[int, int]]] = {}
+        for layer in layers:
+            other_tier = str(layer.get("id") or "")
+            if not other_tier or other_tier == tier_id:
+                continue
+            other_path = self._tier_grid_file(map_name, other_tier)
+            if not other_path:
+                continue
+            try:
+                other, other_meta, _warnings = _load_grid_npz(other_path)
+                other_regions = _normalize_floor_regions(
+                    other_meta.get("floor_regions") or [])
+                tier_meta[other_tier] = other_meta
+            except Exception as e:
+                _log(f"读取重合网格失败 {other_path}: {e}")
+                continue
+
+            current_origin = [float(v) for v in current_meta["origin"]]
+            other_origin = [float(v) for v in other_meta["origin"]]
+            current_size = float(current_meta["cell_size"])
+            other_size = float(other_meta["cell_size"])
+            aligned = (
+                current.shape == other.shape
+                and math.isclose(current_origin[0], other_origin[0], abs_tol=1e-6)
+                and math.isclose(current_origin[2], other_origin[2], abs_tol=1e-6)
+                and math.isclose(current_size, other_size, rel_tol=1e-6)
+            )
+            if aligned:
+                rows, cols = np.nonzero((current != CELL_UNKNOWN)
+                                        & (other != CELL_UNKNOWN))
+            else:
+                rows, cols = np.nonzero(current)
+            for iz, ix in zip(rows.tolist(), cols.tolist()):
+                wx = current_origin[0] + (ix + 0.5) * current_size
+                wz = current_origin[2] + (iz + 0.5) * current_size
+                if aligned:
+                    jx, jz = int(ix), int(iz)
+                else:
+                    jx = math.floor((wx - other_origin[0]) / other_size)
+                    jz = math.floor((wz - other_origin[2]) / other_size)
+                    if (jx < 0 or jz < 0 or
+                            jz >= other.shape[0] or jx >= other.shape[1]):
+                        continue
+                    if int(other[jz, jx]) == CELL_UNKNOWN:
+                        continue
+                key = (int(ix), int(iz))
+                mine = self._regions_at(current_regions, wx, wz)
+                theirs = self._regions_at(other_regions, wx, wz)
+                y_overlap = any(
+                    a["y_min"] <= b["y_max"] and b["y_min"] <= a["y_max"]
+                    for a in mine for b in theirs
+                )
+                cell_sources.setdefault(key, set()).add(other_tier)
+                cell_matches.setdefault(key, {})[other_tier] = (jx, jz)
+                if y_overlap:
+                    cell_y_overlap[key] = True
+
+        group_of = {
+            key: (frozenset(sources), bool(cell_y_overlap.get(key)))
+            for key, sources in cell_sources.items()
+        }
+        unvisited = set(cell_sources)
+        components = []
+        directions = [
+            (1, 0), (-1, 0), (0, 1), (0, -1),
+            (1, 1), (1, -1), (-1, 1), (-1, -1),
+        ]
+        while unvisited:
+            start = next(iter(unvisited))
+            group = group_of[start]
+            stack = [start]
+            unvisited.remove(start)
+            cells = []
+            while stack:
+                key = stack.pop()
+                cells.append(key)
+                ix, iz = key
+                for dx, dz in directions:
+                    neighbor = (ix + dx, iz + dz)
+                    if neighbor not in unvisited or group_of.get(neighbor) != group:
+                        continue
+                    unvisited.remove(neighbor)
+                    stack.append(neighbor)
+            cells.sort()
+            severity = "three_d" if group[1] else "xz_only"
+            component_layers = [
+                tier_id, *sorted(group[0])
+            ]
+            digest = hashlib.sha1(
+                (tier_id + "|" + ",".join(
+                    f"{ix}:{iz}" for ix, iz in cells)).encode("utf-8")
+            ).hexdigest()[:16]
+            x0 = min(ix for ix, _iz in cells)
+            x1 = max(ix for ix, _iz in cells) + 1
+            z0 = min(iz for _ix, iz in cells)
+            z1 = max(iz for _ix, iz in cells) + 1
+            rects_by_tier: dict[str, list[list[float]]] = {tier_id: []}
+            for ix, iz in cells:
+                wx0 = current_origin[0] + ix * current_size
+                wx1 = current_origin[0] + (ix + 1) * current_size
+                wz0 = current_origin[2] + iz * current_size
+                wz1 = current_origin[2] + (iz + 1) * current_size
+                rects_by_tier[tier_id].append([wx0, wx1, wz0, wz1])
+            for source_tier in group[0]:
+                source_meta = tier_meta.get(source_tier)
+                if not source_meta:
+                    continue
+                source_origin = [float(value) for value in source_meta["origin"]]
+                source_size = float(source_meta["cell_size"])
+                rects = []
+                for ix, iz in cells:
+                    match = cell_matches.get((ix, iz), {}).get(source_tier)
+                    if not match:
+                        continue
+                    jx, jz = match
+                    cx0 = current_origin[0] + ix * current_size
+                    cx1 = current_origin[0] + (ix + 1) * current_size
+                    cz0 = current_origin[2] + iz * current_size
+                    cz1 = current_origin[2] + (iz + 1) * current_size
+                    ox0 = source_origin[0] + jx * source_size
+                    ox1 = source_origin[0] + (jx + 1) * source_size
+                    oz0 = source_origin[2] + jz * source_size
+                    oz1 = source_origin[2] + (jz + 1) * source_size
+                    rect = [
+                        max(cx0, ox0), min(cx1, ox1),
+                        max(cz0, oz0), min(cz1, oz1),
+                    ]
+                    if rect[0] < rect[1] and rect[2] < rect[3]:
+                        rects.append(rect)
+                rects_by_tier[source_tier] = rects
+            current_rects = rects_by_tier[tier_id]
+            components.append({
+                "id": digest,
+                "severity": severity,
+                "cells": [[ix, iz] for ix, iz in cells],
+                "bounds": {"x0": x0, "x1": x1, "z0": z0, "z1": z1},
+                "world_bounds": {
+                    "x0": min(rect[0] for rect in current_rects),
+                    "x1": max(rect[1] for rect in current_rects),
+                    "z0": min(rect[2] for rect in current_rects),
+                    "z1": max(rect[3] for rect in current_rects),
+                },
+                "layers": component_layers,
+                "layer_names": [
+                    layer_names.get(value, value) for value in component_layers
+                ],
+                "_rects_by_tier": rects_by_tier,
+                "_cell_matches": {
+                    f"{ix}:{iz}": cell_matches.get((ix, iz), {})
+                    for ix, iz in cells
+                },
+            })
+        return {
+            "ok": True,
+            "tier_id": tier_id,
+            "components": components,
+        }
+
+    def get_grid_overlaps(self, map_name: str, zoom: str,
+                          tier_id: str, level_id: str) -> dict:
+        """Find connected overlap components shared by grid tiers."""
+        result = self._compute_grid_overlaps(
+            map_name, zoom, tier_id, level_id)
+        if not result.get("ok"):
+            return result
+        components = []
+        xz_only = []
+        three_d = []
+        for component in result["components"]:
+            public = {
+                key: value for key, value in component.items()
+                if not key.startswith("_")
+            }
+            components.append(public)
+            cells = component["cells"]
+            if component["severity"] == "three_d":
+                three_d.extend(cells)
+            else:
+                xz_only.extend(cells)
+        return {
+            "ok": True,
+            "tier_id": tier_id,
+            "components": components,
+            "xz_only": xz_only,
+            "three_d": three_d,
+        }
+
+    def save_overlap_component_height(
+            self, map_name: str, zoom: str, tier_id: str, level_id: str,
+            component_id: str, assignments: list[dict],
+            replace_component_ids: dict | None = None) -> dict:
+        """Define height intervals for one connected overlap component."""
+        result = self._compute_grid_overlaps(
+            map_name, zoom, tier_id, level_id)
+        if not result.get("ok"):
+            return result
+        component = next(
+            (item for item in result["components"]
+             if item["id"] == str(component_id or "")),
+            None,
+        )
+        if not component:
+            return {"ok": False, "error": "找不到指定的重合连通区"}
+        if not isinstance(assignments, list) or not assignments:
+            return {"ok": False, "error": "assignments 必须是非空数组"}
+
+        normalized = []
+        for index, item in enumerate(assignments):
+            if not isinstance(item, dict):
+                return {"ok": False, "error": f"assignments[{index}] 必须是对象"}
+            target_tier = str(item.get("tier_id") or "").strip()
+            if target_tier not in component["layers"]:
+                return {"ok": False,
+                        "error": f"层级 {target_tier} 不属于该重合连通区"}
+            try:
+                y_min = float(item["y_min"])
+                y_max = float(item["y_max"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return {"ok": False,
+                        "error": f"assignments[{index}] 需要 y_min/y_max"}
+            if not (math.isfinite(y_min) and math.isfinite(y_max)):
+                return {"ok": False, "error": "高度必须是有限数"}
+            if y_min > y_max:
+                return {"ok": False, "error": "y_min 不能大于 y_max"}
+            normalized.append((target_tier, y_min, y_max))
+
+        saved = []
+        replace_map: dict[str, set[str]] = {}
+        if isinstance(replace_component_ids, dict):
+            for key, values in replace_component_ids.items():
+                if not isinstance(values, list):
+                    continue
+                replace_map[str(key)] = {
+                    str(value) for value in values if str(value or "")
+                }
+        for target_tier, y_min, y_max in normalized:
+            path = self._tier_grid_file(map_name, target_tier)
+            if not path:
+                return {"ok": False, "error": f"层级网格不存在: {target_tier}"}
+            rects = component["_rects_by_tier"].get(target_tier) or []
+            if not rects:
+                return {"ok": False,
+                        "error": f"层级没有可用的重合格子: {target_tier}"}
+            x0 = min(rect[0] for rect in rects)
+            x1 = max(rect[1] for rect in rects)
+            z0 = min(rect[2] for rect in rects)
+            z1 = max(rect[3] for rect in rects)
+            try:
+                meta = _load_grid_meta_npz(path)
+                regions = _normalize_floor_regions(
+                    meta.get("floor_regions") or [])
+            except Exception as e:
+                return {"ok": False,
+                        "error": f"读取层级网格失败 {target_tier}: {e}"}
+            regions = [
+                region for region in regions
+                if region.get("component_id") != component["id"]
+                and region.get("component_id")
+                    not in replace_map.get(target_tier, set())
+                and _region_overlap_ratio(region, rects) < 0.8
+            ]
+            regions.append({
+                "component_id": component["id"],
+                "x0": x0, "x1": x1, "z0": z0, "z1": z1,
+                "cells": rects,
+                "y_min": y_min, "y_max": y_max,
+            })
+            write = self.save_grid_floor_regions(
+                map_name, zoom,
+                "" if target_tier == MAIN_GRID_KEY else target_tier,
+                regions)
+            if not write.get("ok"):
+                return write
+            saved.append({
+                "tier_id": target_tier,
+                "component_id": component["id"],
+                "y_min": y_min,
+                "y_max": y_max,
+                "cell_count": len(rects),
+            })
+        return {"ok": True, "component_id": component["id"], "saved": saved}
+
+    def _on_position(self, data: dict) -> None:
+        """官方 WS 收到位置 → 用网格判断楼层 → 广播 coords 事件。"""
+        enriched = dict(data) if isinstance(data, dict) else {"value": data}
+        pos = enriched.get("pos") if isinstance(enriched.get("pos"), dict) else enriched
+        map_name = str(enriched.get("mapId") or "").strip()
+        level_id = str(enriched.get("levelId") or "").strip()
+        if map_name and pos:
+            resolution = self.resolve_position_floor(
+                map_name, level_id,
+                pos.get("x"), pos.get("y"), pos.get("z"),
+            )
+            enriched["gridTierId"] = resolution["tier_id"]
+            enriched["gridFloorStatus"] = resolution["status"]
+            enriched["gridFloorCandidates"] = resolution["matched"]
+        self.bus.emit(type="coords", data=enriched)
+
+    def _on_position_state(self, state: dict) -> None:
+        self.bus.emit(type="position_state", state=state)
+
+    def _position_log(self, msg: str) -> None:
+        _log(f"[position] {msg}")
+        self.bus.emit(type="log", text=msg)
 
     def relay_coords(self, raw_body: bytes) -> dict:
         """POST /api/coords：把游戏/外部客户端上报的坐标广播给所有页面"""
@@ -757,8 +1458,71 @@ class MapService:
         # 兼容 {"data": {"pos": ...}} 与 {"pos": ...} 两种格式，拍平成一层
         if isinstance(data, dict) and "data" in data:
             data = data["data"]
-        self.bus.emit(type="coords", data=data)
+        self._on_position(data)
         return {"ok": True, "clients": self.bus.subscriber_count}
+
+    # ---------- 官方分层地图 ----------
+    def _layer_entries(self) -> list[dict]:
+        path = self.store.tiles_root / "layers" / CATALOG_FILENAME
+        try:
+            mtime = path.stat().st_mtime_ns
+        except OSError:
+            return builtin_layer_entries()
+        if self._layer_catalog_cache and self._layer_catalog_cache[0] == mtime:
+            return self._layer_catalog_cache[1]
+        try:
+            entries = load_layer_catalog(path)
+        except Exception as e:
+            _log(f"读取分层目录失败 {path}: {e}")
+            return builtin_layer_entries()
+        self._layer_catalog_cache = (mtime, entries)
+        return entries
+
+    def list_layers(self, map_name: str, zoom: str) -> list[dict]:
+        """列出当前底图可用的官方分层图片。"""
+        return list_layer_catalog(map_name, zoom, self._layer_entries())
+
+    def get_layer_image(self, map_name: str, zoom: str, layer_id: str) -> bytes | None:
+        """读取官方分层图片；首次访问时缓存到 tiles/layers/。"""
+        entry = find_layer(map_name, zoom, layer_id, self._layer_entries())
+        if not entry:
+            return None
+        dest = self.store.tiles_root / layer_cache_relpath(entry)
+        if dest.is_file():
+            try:
+                return dest.read_bytes()
+            except OSError as e:
+                _log(f"读取分层图片失败 {dest}: {e}")
+                return None
+
+        try:
+            data = _download_layer_image(layer_source_url(entry))
+        except Exception as e:
+            _log(f"下载分层图片失败 {entry['filename']}: {e}")
+            return None
+
+        if Image is not None:
+            try:
+                with Image.open(BytesIO(data)) as img:
+                    img.verify()
+            except Exception as e:
+                _log(f"分层图片校验失败 {entry['filename']}: {e}")
+                return None
+
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _unique_tmp(dest)
+            with _path_lock(dest):
+                try:
+                    tmp.write_bytes(data)
+                    _replace_with_retry(tmp, dest)
+                except Exception:
+                    tmp.unlink(missing_ok=True)
+                    raise
+        except OSError as e:
+            _log(f"写入分层图片缓存失败 {dest}: {e}")
+            return None
+        return data
 
     # ---------- 已保存总图信息（供前端下拉选择时瞬时显示整图） ----------
     def saved_map_info(self, map_name: str, zoom: str) -> dict | None:
@@ -981,15 +1745,17 @@ class MapService:
     # 2D 网格 —— 稠密 uint8 npz，供 ok-end-field 直接消费
     # =========================================================
 
-    def grid2d_path(self, map_name: str, zoom: str) -> Path:
+    def grid2d_path(self, map_name: str, zoom: str, tier: str = "") -> Path:
         """2D 网格的落盘位置。
 
         单一位置，不再有"读哪写哪"的旧位置兼容分支：新格式文件名是
         <地图>_<zoom>.grid.npz（没有 _2d 中缀）。
         """
+        if tier:
+            return self.grid2d_dir / f"{map_name}__{tier}_{zoom}{GRID_SUFFIX}"
         return self.grid2d_dir / f"{map_name}_{zoom}{GRID_SUFFIX}"
 
-    def get_grid2d(self, map_name: str, zoom: str) -> dict:
+    def get_grid2d(self, map_name: str, zoom: str, tier: str = "") -> dict:
         """读取 2D 网格 npz，把稠密数组转回**稀疏列表**交给前端。
 
         线格式：cells/blocked 两个 [ix,iz] 列表 + origin + cell_size + shape。
@@ -1004,9 +1770,9 @@ class MapService:
         """
         # 与 save_grid2d 同样的入参校验：grid2d_path 是拼字符串建路径，
         # map_name 里带 / 或 .. 就能读到 nav-grid-data/ 之外的同格式文件。
-        if not valid_map_zoom(map_name, zoom):
+        if not valid_map_zoom(map_name, zoom) or not valid_grid_tier(tier):
             return {"data": None, "source": None, "error": "非法地图名/zoom"}
-        p = self.grid2d_path(map_name, zoom)
+        p = self.grid2d_path(map_name, zoom, tier)
         if not p.is_file():
             return {"data": None, "source": None}
         try:
@@ -1030,14 +1796,50 @@ class MapService:
                 "origin": [float(v) for v in meta["origin"]],
                 "cell_size": float(meta["cell_size"]),
                 "shape": [int(arr.shape[0]), int(arr.shape[1])],
+                "tier": str(meta.get("tier") or ""),
                 "cells": cells,
                 "blocked": blocked,
+                "floor_regions": list(meta.get("floor_regions") or []),
             },
             "source": str(p),
             "warnings": warnings,
         }
 
-    def save_grid2d(self, map_name: str, zoom: str, data: dict) -> dict:
+    # ---------- 跨层连接（网格 via） ----------
+    def get_grid_links(self, map_name: str = "") -> dict:
+        path = links_path(self.grid2d_dir)
+        try:
+            data = load_links(path)
+        except Exception as e:
+            _log(f"读取分层连接失败 {path}: {e}")
+            return {"schema_version": 1, "links": [], "error": str(e)}
+        if map_name:
+            data = {
+                **data,
+                "links": [
+                    link for link in data["links"]
+                    if (link.get("from") or {}).get("map") == map_name
+                    or (link.get("to") or {}).get("map") == map_name
+                ],
+            }
+        return data
+
+    def save_grid_link(self, raw: dict) -> dict:
+        try:
+            link = upsert_link(links_path(self.grid2d_dir), raw)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "link": link}
+
+    def delete_grid_link(self, link_id: str) -> dict:
+        try:
+            changed = delete_link(links_path(self.grid2d_dir), link_id)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "deleted": changed}
+
+    def save_grid2d(self, map_name: str, zoom: str, data: dict,
+                    tier: str = "") -> dict:
         """把编辑器里稀疏的 free/blocked 落成稠密 uint8 npz。
 
         入参仍是稀疏列表（与前端线格式一致），这里做稠密化。最终范围取
@@ -1053,8 +1855,17 @@ class MapService:
                "cells": [[ix,iz]...], "blocked": [...]}
         origin[1]（y）只作格式占位，固定写 0：2D 网格不带高度。
         """
-        if not valid_map_zoom(map_name, zoom):
+        if not valid_map_zoom(map_name, zoom) or not valid_grid_tier(tier):
             return {"ok": False, "error": "非法地图名/zoom"}
+        if "source_tier" in data:
+            source_tier = str(data.get("source_tier") or "")
+            if source_tier != str(tier or ""):
+                return {
+                    "ok": False,
+                    "error": "网格来源层级不匹配：拒绝用 "
+                             f"{source_tier or '__main__'} 的文档覆盖 "
+                             f"{tier or '__main__'}",
+                }
         try:
             ov = data["origin"]
             if len(ov) == 2:  # 兼容 [x, z]，自动补 y=0
@@ -1074,6 +1885,11 @@ class MapService:
                 raise ValueError("origin 必须都是有限数")
         except (KeyError, TypeError, ValueError, IndexError, OverflowError):
             return {"ok": False, "error": "origin/cell_size 缺失或非法（必须是有限数）"}
+        try:
+            floor_regions = _normalize_floor_regions(
+                data.get("floor_regions", []))
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
 
         # 原数组范围（下标空间与 cells/blocked 相同：下标 0 ⇔ origin 那格的最小角）
         raw_shape = data.get("shape")
@@ -1153,14 +1969,16 @@ class MapService:
             "schema_version": GRID_SCHEMA_VERSION,
             "map_name": map_name,
             "zoom": zoom,
+            "tier": tier,
             # 平移成 cells[0,0] 最小角的世界坐标
             "origin": [origin[0] + min_ix * cell_size, 0.0, origin[2] + min_iz * cell_size],
             "cell_size": cell_size,
             "axis_convention": GRID_AXIS_CONVENTION,
+            "floor_regions": floor_regions,
             "source": "nav-grid-editor",
             "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        out = self.grid2d_path(map_name, zoom)
+        out = self.grid2d_path(map_name, zoom, tier)
         existed = out.is_file()
         out.parent.mkdir(parents=True, exist_ok=True)
         # 先写临时文件再原子替换：服务是多线程的，两次保存撞上会写出半个 npz。
@@ -1186,9 +2004,46 @@ class MapService:
                 "dir": str(out.parent), "overwrote": existed,
                 "shape": [height, width],
                 "origin": list(meta["origin"]),
+                "floor_regions": list(meta["floor_regions"]),
                 # 服务端按"原范围 ∪ 已涂格子"重定了下标基准，前端要把内存里的
                 # 格子坐标回移这么多，才能保持"下标 0 ⇔ origin"这一不变量
                 "shift": [min_ix, min_iz]}
+
+    def save_grid_floor_regions(self, map_name: str, zoom: str, tier: str,
+                                raw_regions) -> dict:
+        """Update only one grid file's floor_regions metadata."""
+        # 主地图在前端叫 __main__，落盘时要用无 tier 的文件名。
+        if tier == MAIN_GRID_KEY:
+            tier = ""
+        if not valid_map_zoom(map_name, zoom) or (
+                tier and not valid_grid_tier(tier)):
+            return {"ok": False, "error": "非法地图名/zoom/tier"}
+        try:
+            floor_regions = _normalize_floor_regions(raw_regions)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        path = self.grid2d_path(map_name, zoom, tier)
+        if not path.is_file():
+            return {"ok": False, "error": "网格文件不存在"}
+        tmp = _unique_tmp(path)
+        with _path_lock(path):
+            try:
+                arr, meta, _warnings = _load_grid_npz(path)
+                meta["floor_regions"] = floor_regions
+                with open(tmp, "wb") as fh:
+                    np.savez_compressed(
+                        fh,
+                        cells=arr,
+                        meta=np.array(json.dumps(meta, ensure_ascii=False)),
+                    )
+                _load_grid_npz(tmp)
+                _replace_with_retry(tmp, path)
+            except Exception as e:
+                tmp.unlink(missing_ok=True)
+                return {"ok": False, "error": f"保存失败（未覆盖原文件）: {e}"}
+        self._floor_grid_cache.pop(path, None)
+        return {"ok": True, "path": str(path),
+                "floor_regions": floor_regions}
 
 # =========================================================
 # 2D 网格读取：与 ok-end-field 的读方同级校验

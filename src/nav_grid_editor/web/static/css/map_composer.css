@@ -235,6 +235,11 @@ textarea {
   min-width: 94px;
 }
 
+#selTier {
+  min-width: 132px;
+  max-width: 210px;
+}
+
 .tb-modes {
   gap: 0;
   border: 1px solid var(--border-strong);
@@ -833,6 +838,13 @@ canvas#composeCanvas {
   padding: 7px 10px;
 }
 
+#markTip.interactive {
+  pointer-events: auto;
+  min-width: 190px;
+  padding: 8px;
+  white-space: normal;
+}
+
 #markTip b {
   color: var(--amber);
 }
@@ -840,6 +852,90 @@ canvas#composeCanvas {
 #markTip .mono {
   color: #8fdfff;
   font-family: var(--mono);
+}
+
+.mark-layer-title {
+  margin-bottom: 7px;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.mark-layer-list {
+  display: grid;
+  gap: 4px;
+}
+
+.mark-layer-option {
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 8px;
+  text-align: left;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.mark-layer-option:hover,
+.mark-layer-option.active {
+  border-color: var(--accent);
+  background: rgba(195, 253, 67, 0.12);
+  color: var(--accent);
+}
+
+.mark-layer-option.quiet {
+  margin-top: 6px;
+  color: var(--text-muted);
+}
+
+.link-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  font-size: var(--fs-detail);
+}
+
+.link-row small {
+  color: var(--text-muted);
+}
+
+.link-row button {
+  min-height: 28px;
+  padding: 3px 8px;
+}
+
+/* Keep all map layers on the same composited surface. */
+#canvasHolder {
+  backface-visibility: hidden;
+}
+
+#composeCanvas,
+#editCanvas,
+#selCanvas,
+#linkCanvas,
+#pathCanvas {
+  contain: paint;
+}
+
+#linkCanvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}
+
+/* Backdrop blur behind a moving map is expensive and causes visible flashes. */
+body.map-panning #toolbar,
+body.map-panning #side,
+body.map-panning #sideRail,
+body.map-panning #status,
+body.map-panning .viewport-hud,
+body.map-panning .canvas-toolbar,
+body.map-panning .layer-panel,
+body.map-panning #markTip,
+body.map-panning #brushHud {
+  backdrop-filter: none !important;
 }
 
 #brushHud {
@@ -1056,6 +1152,114 @@ canvas#composeCanvas {
   font-size: 13px;
 }
 
+#floorRegionDlg {
+  position: fixed;
+  left: 50%;
+  top: min(18vh, 150px);
+  z-index: 61;
+  width: min(440px, calc(100vw - 32px));
+  display: none;
+  transform: translateX(-50%);
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(118, 255, 159, 0.08), transparent 42%),
+    rgba(12, 12, 12, 0.88);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(24px) saturate(120%);
+  font-size: 13px;
+}
+
+#floorRegionDlg > strong {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+
+#overlapWarningDlg {
+  position: fixed;
+  left: 50%;
+  top: min(24vh, 190px);
+  z-index: 62;
+  width: min(470px, calc(100vw - 32px));
+  display: none;
+  transform: translateX(-50%);
+  padding: 16px;
+  border: 1px solid rgba(255, 196, 64, 0.34);
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(255, 196, 64, 0.09), transparent 42%),
+    rgba(12, 12, 12, 0.9);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(24px) saturate(120%);
+  font-size: 13px;
+}
+
+#overlapWarningDlg > strong {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+
+.floor-component {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 10px;
+  color: var(--text-muted);
+}
+
+.floor-component select {
+  width: 100%;
+}
+
+.floor-marked {
+  margin-top: 12px;
+}
+
+.floor-marked-head {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.floor-marked-list {
+  display: grid;
+  gap: 4px;
+  max-height: 138px;
+  overflow: auto;
+}
+
+.floor-marked-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid rgba(120, 215, 255, 0.28);
+  border-radius: 8px;
+  background: rgba(70, 190, 255, 0.08);
+  font-size: 12px;
+}
+
+.floor-marked-row > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.floor-marked-row button {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.floor-marked-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 #calibDlg > strong {
   display: block;
   margin-bottom: 12px;
@@ -1105,6 +1309,150 @@ canvas#composeCanvas {
   top: 0;
   z-index: 1;
   background: var(--surface);
+}
+
+/* ---------------- 透视视图（3D） ---------------- */
+
+.pv-view {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.pv-view[hidden] {
+  display: none;
+}
+
+#pvCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.pv-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.pv-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 2px 8px;
+  border: 1px solid rgba(232, 237, 242, 0.22);
+  border-radius: 999px;
+  background: rgba(11, 15, 19, 0.72);
+  color: var(--text);
+  font-size: var(--fs-secondary);
+  white-space: nowrap;
+  will-change: transform;
+}
+
+.pv-bar {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  max-width: calc(100vw - 32px);
+  padding: 9px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(18, 23, 29, 0.92);
+  box-shadow: var(--shadow);
+  font-size: var(--fs-secondary);
+  backdrop-filter: blur(18px) saturate(120%);
+}
+
+.pv-title {
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.pv-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.pv-field-range input {
+  width: 112px;
+}
+
+.pv-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.pv-bar select {
+  max-width: 220px;
+}
+
+.pv-legend {
+  position: absolute;
+  top: 74px;
+  right: 16px;
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(18, 23, 29, 0.86);
+  color: var(--text-secondary);
+  font-size: var(--fs-secondary);
+}
+
+.pv-legend span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.pv-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.pv-hint {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(18, 23, 29, 0.86);
+  color: var(--text-muted);
+  font-size: var(--fs-secondary);
+}
+
+.pv-status {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(18, 23, 29, 0.9);
+  color: var(--text-secondary);
+  font-size: var(--fs-secondary);
+}
+
+.pv-status:empty {
+  display: none;
 }
 
 @media (max-width: 1120px) {

@@ -14,6 +14,10 @@ dist/
 
 # IDE
 .idea/
+.playwright-cli/
+
+# 验证过程产物：Playwright 截图、分层对齐比对图、恢复实验等，都是可重跑的临时件
+output/
 
 # Playwright 持久化登录配置：含 Cookie / 登录态，务必不要提交
 browser_profile/

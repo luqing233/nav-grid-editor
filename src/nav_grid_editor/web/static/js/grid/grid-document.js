@@ -30,10 +30,15 @@ function createChunk() {
 }
 
 export class GridDocument {
-  constructor({ origin = [0, 0], shape = null, cellSize = 1 } = {}) {
+  constructor({ origin = [0, 0], shape = null, cellSize = 1,
+                floorRegions = [], sourceTier = "" } = {}) {
     this.origin = [Number(origin[0]) || 0, Number(origin[1]) || 0];
     this.shape = shape ? [Number(shape[0]), Number(shape[1])] : null;
     this.cellSize = Number(cellSize) || 1;
+    this.floorRegions = Array.isArray(floorRegions)
+      ? floorRegions.map(region => ({ ...region }))
+      : [];
+    this.sourceTier = String(sourceTier || "");
     this.chunks = new Map();
     this.dirtyChunks = new Set();
     this.freeCount = 0;
@@ -46,8 +51,11 @@ export class GridDocument {
     this.loaded = false;
   }
 
-  static fromSparse({ origin, shape, cellSize, cells = [], blocked = [] }) {
-    const document = new GridDocument({ origin, shape, cellSize });
+  static fromSparse({ origin, shape, cellSize, floorRegions = [],
+                      sourceTier = "", cells = [], blocked = [] }) {
+    const document = new GridDocument({
+      origin, shape, cellSize, floorRegions, sourceTier,
+    });
     document.setCells(cells, CELL_FREE);
     document.setCells(blocked, CELL_BLOCKED);
     return document;
@@ -227,6 +235,12 @@ export class GridDocument {
     this.origin = [meta.origin[0], meta.origin[1]];
     this.shape = meta.shape ? [meta.shape[0], meta.shape[1]] : null;
     this.cellSize = meta.cellSize;
+    this.floorRegions = Array.isArray(meta.floorRegions)
+      ? meta.floorRegions.map(region => ({ ...region }))
+      : [];
+    if (meta.sourceTier !== undefined) {
+      this.sourceTier = String(meta.sourceTier || "");
+    }
   }
 
   metadataSnapshot() {
@@ -234,6 +248,8 @@ export class GridDocument {
       origin: [this.origin[0], this.origin[1]],
       shape: this.shape ? [this.shape[0], this.shape[1]] : null,
       cellSize: this.cellSize,
+      floorRegions: this.floorRegions.map(region => ({ ...region })),
+      sourceTier: this.sourceTier,
     };
   }
 

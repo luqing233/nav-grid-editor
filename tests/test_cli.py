@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from nav_grid_editor import cli
-from nav_grid_editor.commands import fetch_marks
+from nav_grid_editor.commands import fetch_layers, fetch_marks
 
 
 class CliDispatchTest(unittest.TestCase):
@@ -17,6 +17,12 @@ class CliDispatchTest(unittest.TestCase):
             result = cli.main(["fetch-marks", "--out", "tmp"])
         self.assertEqual(result, 17)
         command.assert_called_once_with(["--out", "tmp"])
+
+    def test_fetch_layers_subcommand_is_dispatched(self):
+        with mock.patch.object(fetch_layers, "main", return_value=23) as command:
+            result = cli.main(["fetch-layers", "--dry-run"])
+        self.assertEqual(result, 23)
+        command.assert_called_once_with(["--dry-run"])
 
 
 class FetchMarksCommandTest(unittest.TestCase):

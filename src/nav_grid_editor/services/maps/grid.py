@@ -35,6 +35,38 @@ def _load_grid_npz(path: Path) -> tuple[np.ndarray, dict, list[str]]:
             time.sleep(0.05 * (attempt + 1))
 
 
+def _load_grid_meta_npz(path: Path) -> dict:
+    """Read only the JSON metadata member of a grid file."""
+    for attempt in range(6):
+        try:
+            with np.load(path, allow_pickle=False) as z:
+                members = sorted(z.files)
+                if members != sorted(GRID_MEMBERS):
+                    raise ValueError(
+                        f"npz 成员应为 {sorted(GRID_MEMBERS)}，实际 {members}")
+                meta_raw = np.asarray(z["meta"])
+            break
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+    if meta_raw.dtype.kind not in ("U", "S") or meta_raw.size != 1:
+        raise ValueError("meta 必须是单个 numpy 字符串数组")
+    text = meta_raw.item()
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    meta = json.loads(text)
+    if not isinstance(meta, dict):
+        raise ValueError("meta 顶层必须是 JSON 对象")
+    if meta.get("magic") != GRID_MAGIC:
+        raise ValueError(f"不是本项目的网格文件（magic={meta.get('magic')!r}）")
+    if int(meta.get("schema_version") or 0) != GRID_SCHEMA_VERSION:
+        raise ValueError(f"网格版本不匹配（文件 {meta.get('schema_version')}，"
+                         f"当前 {GRID_SCHEMA_VERSION}）")
+    return meta
+
+
 def _load_grid_npz_once(path: Path) -> tuple[np.ndarray, dict, list[str]]:
     """真正做校验的读方（重试逻辑见 :func:`_load_grid_npz`）。
 

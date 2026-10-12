@@ -6,6 +6,7 @@
 
     nav-grid-editor [--port 8765] [--data-root PATH]
     nav-grid-editor fetch-marks [抓取参数]
+    nav-grid-editor fetch-layers [抓取参数]
     python -m nav_grid_editor [同上]
 
 页面：
@@ -17,11 +18,16 @@
 
 - GET  /api/tilemaps                      列出瓦片库里的地图与 zoom
 - GET  /api/maps?map=&zoom=               已保存总图信息（供下拉框瞬时显示）
+- GET  /api/layers?map=&zoom=             列出可用的官方分层图片
+- GET  /api/layer-image?map=&zoom=&tier=  官方分层 PNG（首次访问自动下载并缓存）
 - GET  /api/overview?map=&zoom=           缩略总图（长边 <=2048，秒开用，按需生成并缓存）
 - GET  /api/calib?map=&zoom=              读取标定（像素↔游戏坐标）
 - POST /api/calib                         计算并保存标定
-- GET  /api/grid2d?map=&zoom=             读取 2D 网格（无高度）
-- POST /api/grid2d                        保存 2D 网格（<地图>_<zoom>.grid.npz，稠密 uint8）
+- GET  /api/grid2d?map=&zoom=&tier=       读取某地图/分层的 2D 网格（无高度）
+- POST /api/grid2d                        保存某地图/分层的 2D 网格（稠密 uint8）
+- GET  /api/grid-links?map=               读取跨地图/分层连接
+- POST /api/grid-links                    新增或更新连接
+- DELETE /api/grid-links/<id>             删除连接
 - GET  /api/events                        SSE 事件流（tile/stats/log/coords/hello）
 - GET  /tiles/<地图>/<zoom>/<x>_<y>.png   瓦片图片
 - GET  /maps/<地图>/<zoom>/<文件>.png     已拼接总图
@@ -29,12 +35,18 @@
 - POST /api/fetch/stop                    停止抓取，保存清单并合并到 latest
 - POST /api/compose                       合成并流式推送 {"map","zoom","save": bool}
 - POST /api/simulate/start|stop           模拟抓取（不落盘，演示实时贴图）
-- POST /api/coords                        坐标中继（可选 ws://127.0.0.1:3001 同功能）
+- GET  /api/position/status               官方地图 WS 位置流状态
+- POST /api/position/start|stop           启停官方地图 WS 位置流（连 skland）
+- POST /api/coords                        坐标中继（外部客户端可选的备用上报口）
 
 数据根目录默认取**当前工作目录**。采集/编辑产物统一收在它下面的 ``assets/``：
-``assets/tiles/``（瓦片与合成总图）、``assets/nav-grid-data/``（2D 网格）、
+``assets/tiles/``（瓦片、官方分层缓存与合成总图）、``assets/nav-grid-data/``（2D 网格）、
 ``assets/items/``（地图标记数据）。``browser_profile/``（登录态）与
 ``configs/``（设备ID）是凭证类目录，刻意留在 ``assets/`` 外面。
+
+玩家位置不再依赖本地 ``ws://127.0.0.1:3001`` 中继：服务启动后直接用
+``configs/hg_content.txt`` 里的凭证连官方地图 WebSocket
+``wss://ws.skland.com/ws/v1/game/endfield/map``，把实时坐标经 SSE 推给网页。
 
 可用 ``--data-root`` / ``NAV_DATA_ROOT`` 换根目录，或用 ``--tiles-root`` /
 ``--profile-dir`` / ``--grid2d-dir`` 单独覆盖。
@@ -43,10 +55,7 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
-import json
 import sys
-import threading
 from pathlib import Path
 
 from .api import app as api_app
@@ -57,63 +66,13 @@ from .services.maps import MapService
 DEFAULT_PORT = 8765
 
 
-# ---------------- 可选：WebSocket 坐标中继（与 wsserver/main.py 兼容） ----------------
-
-def start_ws_relay(svc: MapService, port: int = 3001):
-    """如果装有 websockets，就在 3001 端口额外开一个中继，兼容同一数据链路。"""
-    try:
-        import websockets  # noqa: F401
-    except Exception:
-        print("未安装 websockets：坐标中继 ws://127.0.0.1:3001 跳过；"
-              "仍可用 POST /api/coords 上报坐标（页面 /map 实时显示）")
-        return
-
-    clients = set()
-
-    async def handler(ws):
-        clients.add(ws)
-        print("ws-coords: browser connected")
-        try:
-            async for msg in ws:
-                try:
-                    data = json.loads(msg)
-                    pos = data.get("data", {}).get("pos", {})
-                    print(f"[coords] x={pos.get('x')} z={pos.get('z')}")
-                    if isinstance(data, dict) and "data" in data:
-                        data = data["data"]  # 拍平，与 POST /api/coords 一致
-                except Exception:
-                    data = msg
-                # 推给网页（SSE）
-                svc.bus.emit(type="coords", data=data)
-                # 广播给所有 ws 客户端（含发送者）
-                dead = []
-                for c in clients:
-                    try:
-                        await c.send(msg)
-                    except Exception:
-                        dead.append(c)
-                for c in dead:
-                    clients.discard(c)
-        finally:
-            clients.discard(ws)
-
-    async def serve():
-        async with websockets.serve(handler, "127.0.0.1", port):
-            await asyncio.Future()
-
-    t = threading.Thread(target=lambda: asyncio.run(serve()),
-                         name="ws-coords-relay", daemon=True)
-    t.start()
-    print(f"坐标中继已启动: ws://127.0.0.1:{port}")
-
-
 # ---------------- 入口 ----------------
 
 def _run_server(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="nav-grid-editor",
         description="地图瓦片采集/合成 + 标定 + 2D 网格编辑 统一服务",
-        epilog="附加命令: nav-grid-editor fetch-marks（用账号凭证抓取地图标记）",
+        epilog="附加命令: fetch-marks（地图标记）、fetch-layers（全部分层地图）",
     )
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--data-root", default="",
@@ -147,7 +106,9 @@ def _run_server(argv: list[str] | None = None) -> int:
     if map_service.Image is None:
         print("提示: 未安装 Pillow，WebP 瓦片转换与总图落盘不可用")
 
-    start_ws_relay(svc)
+    # 位置流默认关闭，避免启动即消耗凭证和网络；需要时在页面手动开启。
+    print("玩家位置流:              默认关闭"
+          "（页面手动开启，凭证 configs/hg_content.txt）")
 
     # uvicorn 自带 HTTP/1.1 keep-alive（原来用 stdlib 得手工设 protocol_version，
     # 否则 Chrome 每个请求新开 socket、还要在 socket 池里等约 300ms）。
@@ -170,6 +131,10 @@ def main(argv: list[str] | None = None) -> int:
         from .commands.fetch_marks import main as fetch_marks_main
 
         return fetch_marks_main(args[1:])
+    if args and args[0] == "fetch-layers":
+        from .commands.fetch_layers import main as fetch_layers_main
+
+        return fetch_layers_main(args[1:])
     return _run_server(args)
 
 

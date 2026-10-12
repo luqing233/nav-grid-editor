@@ -18,6 +18,7 @@ from nav_grid_editor.services.maps import (
     FetchState,
     MapService,
     TileStore,
+    merge_tiles,
     tile_pattern,
     valid_map_name,
     valid_map_zoom,
@@ -93,6 +94,17 @@ class TileMergeTest(unittest.TestCase):
             (info["minX"], info["maxX"], info["minY"], info["maxY"], info["count"]),
             (-2, 7, -3, 8, 3),
         )
+
+    def test_layer_cache_is_not_scanned_as_tile_maps_or_zooms(self):
+        _tile(self.root, "flat/m/4", 0, 0, b"tile")
+        layer_png = self.root / "layers" / "map01" / "map01_lv001" / "layer.png"
+        layer_png.parent.mkdir(parents=True)
+        layer_png.write_bytes(b"layer")
+
+        self.assertEqual(self.store.list_maps(), {"m": ["4"]})
+        merged = merge_tiles(self.root)
+        self.assertEqual(merged["new"], 1)
+        self.assertFalse((self.root / "latest" / "map01").exists())
 
 
 class ComposeRunRobustnessTest(unittest.TestCase):

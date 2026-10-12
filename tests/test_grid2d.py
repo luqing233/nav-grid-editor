@@ -72,6 +72,22 @@ class Grid2DRoundTripTest(unittest.TestCase):
         self.assertEqual(data["cells"], [[1, 1]])
         self.assertEqual(data["blocked"], [[2, 2]])
 
+    def test_source_tier_mismatch_is_rejected(self):
+        res = self.svc.save_grid2d(
+            "m", "4",
+            {
+                "origin": [10, 0, 20],
+                "cell_size": 1,
+                "shape": [2, 2],
+                "cells": [[0, 0]],
+                "blocked": [],
+                "source_tier": "tier-a",
+            },
+            tier="tier-b",
+        )
+        self.assertFalse(res["ok"])
+        self.assertIn("来源层级不匹配", res["error"])
+
     def test_painting_outside_expands_range_and_reports_shift(self):
         """涂到原范围外只扩不缩，并回报下标基准要回移多少。"""
         res = self._save(shape=[5, 5], cells=[[-2, 1]], blocked=[[2, 2]])

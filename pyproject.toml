@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 # numpy: 网格以稠密 uint8 npz 落盘（np.savez_compressed）
 # pillow: WebP 瓦片转 PNG、拼接总图、缩略图
 # playwright: 抓取游戏地图瓦片（还需 `uv run playwright install chromium`）
-# websockets: 3001 端口坐标中继（兼容 wsserver/main.py 客户端）
+# websockets: 官方地图 WS 位置流 + 数美设备ID 铸造时的 CDP 连接
 # fastapi/uvicorn: HTTP 层，自带 HTTP/1.1 keep-alive
 # cryptography: 数美设备ID 的「合成指纹」铸造路径（缺了还能走另外三条回退链）
 dependencies = [
@@ -34,12 +34,17 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 # 前端与设备认证运行资源随 wheel 分发。
+# 目录是白名单式列举，**新增子目录必须在这里补一行**，否则 dev 下
+# StaticFiles 照样能取到、装成 wheel 之后才 404（three/ 与 vendor/ 就踩过）。
 [tool.setuptools.package-data]
 "nav_grid_editor" = [
     "web/*.html",
     "web/static/css/*.css",
     "web/static/js/*.js",
     "web/static/js/grid/*.js",
+    "web/static/js/layers/*.js",
     "web/static/js/render/*.js",
+    "web/static/js/three/*.js",
+    "web/static/js/vendor/three/*.js",
 ]
 "nav_grid_editor.integrations.smsdk" = ["resources/*.mjs"]

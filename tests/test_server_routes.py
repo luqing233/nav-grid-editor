@@ -195,6 +195,9 @@ class StaticAssetsTest(_ServerMixin, unittest.TestCase):
         self.assertNotIn("<style>", html)
         self.assertNotIn("<script>", html)
         self.assertIn('<script type="module" src="/static/js/map_composer.js"></script>', html)
+        self.assertIn('type="importmap"', html)
+        self.assertIn('id="btnPerspective"', html)
+        self.assertIn('id="pvView"', html)
         self.assertIn('data-mode="edit"', html)
         self.assertIn('id="sideTabs"', html)
         self.assertIn('id="layerGrid"', html)
@@ -215,6 +218,68 @@ class StaticAssetsTest(_ServerMixin, unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("text/javascript", headers.get_content_type())
         self.assertIn(b"export class GridDocument", module)
+
+        status, module, headers = self._request(
+            "/static/js/layers/tier-transform.js")
+        self.assertEqual(status, 200)
+        self.assertIn("text/javascript", headers.get_content_type())
+        self.assertIn(b"export function tierToBaseMatrix", module)
+
+        # 透视视图按需动态 import，所以这些文件必须能单独取到。
+        status, module, headers = self._request(
+            "/static/js/three/perspective-view.js")
+        self.assertEqual(status, 200)
+        self.assertIn("text/javascript", headers.get_content_type())
+        self.assertIn(b"export class PerspectiveView", module)
+
+        status, vendor, headers = self._request(
+            "/static/js/vendor/three/three.module.js")
+        self.assertEqual(status, 200)
+        self.assertIn("text/javascript", headers.get_content_type())
+        self.assertIn(b"THREE", vendor)
+
+        status, vendor, headers = self._request(
+            "/static/js/vendor/three/OrbitControls.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"class OrbitControls", vendor)
+
+    def test_layers_catalog_endpoint(self):
+        status, body, _ = self._request("/api/layers?map=map02&zoom=4")
+        self.assertEqual(status, 200)
+        data = json.loads(body.decode("utf-8"))
+        self.assertTrue(data["ok"])
+        self.assertEqual(len(data["layers"]), 7)
+        self.assertEqual(
+            data["layers"][3]["id"], "scene_map02_lv002_layer_tips_4")
+
+    def test_grid_link_endpoints_roundtrip(self):
+        payload = {
+            "from": {
+                "map": "map02", "tier": "tier_a",
+                "rect": {"x0": 0, "z0": 0, "x1": 1, "z1": 1},
+            },
+            "to": {
+                "map": "map02", "tier": "tier_b",
+                "rect": {"x0": 2, "z0": 2, "x1": 3, "z1": 3},
+            },
+            "kind": "stairs",
+            "bidirectional": True,
+            "cost": 1,
+        }
+        status, saved = self._post_json("/api/grid-links", payload)
+        self.assertEqual(status, 200)
+        self.assertTrue(saved["ok"], saved)
+        link_id = saved["link"]["id"]
+        status, body, _ = self._request("/api/grid-links?map=map02")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(json.loads(body.decode("utf-8"))["links"]), 1)
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/grid-links/{link_id}",
+            method="DELETE",
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            deleted = json.loads(r.read().decode("utf-8"))
+        self.assertTrue(deleted["ok"] and deleted["deleted"])
 
 
 if __name__ == "__main__":

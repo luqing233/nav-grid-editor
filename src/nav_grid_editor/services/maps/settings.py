@@ -144,6 +144,12 @@ def valid_map_zoom(map_name: object, zoom: object) -> bool:
     return valid_map_name(map_name) and str(zoom or "").isdigit()
 
 
+def valid_grid_tier(tier: object) -> bool:
+    """分层 ID 可为空（大地图），否则必须符合地图名安全白名单。"""
+    text = str(tier or "")
+    return not text or valid_map_name(text)
+
+
 # 模拟抓取参数
 SIM_MAP = "sim"
 SIM_ZOOM = "4"

@@ -89,7 +89,9 @@ class TileStore:
             scan(s)
         # 旧版扁平目录（跳过 latest/maps/marks/icons/run_*）
         for d in sorted(self.tiles_root.iterdir()):
-            if not d.is_dir() or d.name in ("latest", "maps", "marks", "icons"):
+            if not d.is_dir() or d.name in (
+                "latest", "maps", "marks", "icons", "layers"
+            ):
                 continue
             if d.name.startswith(f"{RUN_PREFIX}_"):
                 continue
@@ -147,7 +149,9 @@ def merge_tiles(tiles_root: Path, run_prefix: str = RUN_PREFIX) -> dict:
 
     # 旧版扁平目录
     for d in sorted(Path(tiles_root).iterdir()):
-        if not d.is_dir() or d.name in ("latest", "maps", "marks", "icons"):
+        if not d.is_dir() or d.name in (
+            "latest", "maps", "marks", "icons", "layers"
+        ):
             continue
         if d.name.startswith(f"{run_prefix}_"):
             continue

@@ -18,8 +18,12 @@ class GridDocumentJsTest(unittest.TestCase):
 import {{ GridDocument, CELL_FREE, CELL_BLOCKED, CELL_UNKNOWN }} from {MODULE.as_uri()!r};
 const d = GridDocument.fromSparse({{
   origin: [10, 20], shape: [3, 4], cellSize: 1,
+  floorRegions: [{{ x0: 0, x1: 1, z0: 2, z1: 3, y_min: 10, y_max: 20 }}],
   cells: [[1, 1], [2, 2]], blocked: [[0, 0]],
 }});
+if (d.metadataSnapshot().floorRegions[0].y_max !== 20) {{
+  throw new Error("floor regions must survive metadata snapshots");
+}}
 d.beginTransaction();
 d.setCell(1, 1, CELL_BLOCKED);
 d.setCell(3, 4, CELL_FREE);

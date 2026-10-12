@@ -178,6 +178,12 @@ def maps_info(map: str = "", zoom: str = "") -> JSONResponse:
     return JSONResponse({"ok": True, **info} if info else {"ok": True, "file": None})
 
 
+@app.get("/api/layers")
+def layers_info(map: str = "", zoom: str = "") -> JSONResponse:
+    """官方分层图片目录（当前内置 Map02Lv002 的七个 tier）。"""
+    return JSONResponse({"ok": True, "layers": _svc().list_layers(map, zoom)})
+
+
 @app.get("/api/calib")
 def calib_get(map: str = "", zoom: str = "") -> JSONResponse:
     data = _svc().get_calib(map, zoom)
@@ -185,8 +191,54 @@ def calib_get(map: str = "", zoom: str = "") -> JSONResponse:
 
 
 @app.get("/api/grid2d")
-def grid2d_get(map: str = "", zoom: str = "") -> JSONResponse:
-    return JSONResponse({"ok": True, **_svc().get_grid2d(map, zoom)})
+def grid2d_get(map: str = "", zoom: str = "", tier: str = "") -> JSONResponse:
+    return JSONResponse({"ok": True, **_svc().get_grid2d(map, zoom, tier)})
+
+
+@app.get("/api/grid2d/floor-map")
+def grid2d_floor_map(map: str = "", zoom: str = "",
+                     level_id: str = "") -> JSONResponse:
+    return JSONResponse(_svc().get_grid_floor_map(map, zoom, level_id))
+
+
+@app.get("/api/grid2d/overlaps")
+def grid2d_overlaps(map: str = "", zoom: str = "", tier: str = "",
+                    level_id: str = "") -> JSONResponse:
+    return JSONResponse(_svc().get_grid_overlaps(map, zoom, tier, level_id))
+
+
+@app.post("/api/grid2d/overlap-components/height")
+async def grid2d_overlap_component_height(request: Request) -> Response:
+    req, err = await _json_body(request)
+    if err:
+        return _bad_request(err)
+    return JSONResponse(_svc().save_overlap_component_height(
+        str(req.get("map", "")),
+        str(req.get("zoom", "")),
+        str(req.get("tier", "")),
+        str(req.get("level_id", "")),
+        str(req.get("component_id", "")),
+        req.get("assignments", []),
+        replace_component_ids=req.get("replace_component_ids", {}),
+    ))
+
+
+@app.get("/api/grid-links")
+def grid_links_get(map: str = "") -> JSONResponse:
+    return JSONResponse({"ok": True, **_svc().get_grid_links(map)})
+
+
+@app.post("/api/grid-links")
+async def grid_links_save(request: Request) -> Response:
+    req, err = await _json_body(request)
+    if err:
+        return _bad_request(err)
+    return JSONResponse(_svc().save_grid_link(req))
+
+
+@app.delete("/api/grid-links/{link_id}")
+def grid_links_delete(link_id: str) -> JSONResponse:
+    return JSONResponse(_svc().delete_grid_link(link_id))
 
 
 @app.get("/api/fetch/status")
@@ -236,6 +288,18 @@ def overview(request: Request, map: str = "", zoom: str = "") -> Response:
     resp = _cached_file(request, p, _image_type(p), max_age=0)
     return resp or Response("overview not found", status_code=404,
                             media_type="text/plain; charset=utf-8")
+
+
+@app.get("/api/layer-image")
+def layer_image(request: Request, map: str = "", zoom: str = "",
+                tier: str = "") -> Response:
+    """官方分层 PNG；首次访问由服务端下载并缓存到 assets/tiles/layers/。"""
+    data = _svc().get_layer_image(map, zoom, tier)
+    if data is None:
+        return Response("layer image not found", status_code=404,
+                        media_type="text/plain; charset=utf-8")
+    return _cached(request, data, "image/png", max_age=86400,
+                   etag=_etag_of_bytes(data))
 
 
 @app.get("/tiles/{map_name}/{zoom}/{filename}")
@@ -352,6 +416,22 @@ async def coords(request: Request) -> JSONResponse:
     return JSONResponse(_svc().relay_coords(await request.body()))
 
 
+@app.get("/api/position/status")
+def position_status() -> JSONResponse:
+    """官方地图 WS 位置流状态（连 skland，不依赖本地 ws 服务器）。"""
+    return JSONResponse(_svc().position_status())
+
+
+@app.post("/api/position/start")
+def position_start() -> JSONResponse:
+    return JSONResponse(_svc().start_position_stream())
+
+
+@app.post("/api/position/stop")
+def position_stop() -> JSONResponse:
+    return JSONResponse(_svc().stop_position_stream())
+
+
 @app.post("/api/calib")
 async def calib_save(request: Request) -> Response:
     req, err = await _json_body(request)
@@ -377,4 +457,16 @@ async def grid2d_save(request: Request) -> Response:
     return JSONResponse(_svc().save_grid2d(
         str(req.get("map", "")), str(req.get("zoom", "")),
         req.get("data", {}),
+        tier=str(req.get("tier", "")),
+    ))
+
+
+@app.post("/api/grid2d/floor-regions")
+async def grid2d_floor_regions_save(request: Request) -> Response:
+    req, err = await _json_body(request)
+    if err:
+        return _bad_request(err)
+    return JSONResponse(_svc().save_grid_floor_regions(
+        str(req.get("map", "")), str(req.get("zoom", "")),
+        str(req.get("tier", "")), req.get("floor_regions", []),
     ))

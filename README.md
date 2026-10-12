@@ -61,13 +61,23 @@ uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 - **模拟抓取**：在内存中生成瓦片并实时演示拼接过程，不写盘，也不需要登录。
 - **总图合成**：将当前地图与层级的所有瓦片合成为 PNG，保存到
   `assets/tiles/maps/<地图>/<zoom>/<地图>_<zoom>.png`，同名文件覆盖。
+- **官方分层地图**：在已标定的地图上选择官方 `tier` 图层。分层图片首次访问
+  自动下载到 `assets/tiles/layers/`，随后按官方世界 bounds 和当前标定矩阵
+  叠到大地图坐标中。点击地图上的“分层入口”标记会直接展开对应的楼层列表。
+  没有分层入口标记的区域归入“独立地图”，例如“首墩内部”和“遂明”。
+  低缩放时只解码预览图，放大后才切换全分辨率，并只保留当前地图的解码缓存。
 - **高性能渲染**：画布只绘制当前可见区域。打开地图时先加载长边不超过
   2048 像素的缩略图，缩放后再按需加载瓦片，避免大图占用过量显存。
+  瓦片解码缓存限制为 420 张 / 96 MiB，并且切换到其他地图时立即释放；
+  分层图低缩放使用预览版，放大后才加载全分辨率。拖动时 Canvas 位移和重绘
+  在同一动画帧提交，并临时关闭侧栏背景模糊，避免拖拽抖动和闪烁。
 - **地图标定**：在地图上选择特征点并输入游戏坐标 X/Z。系统使用仿射最小二乘
   和 RANSAC 计算像素与世界坐标的映射，结果写入对应地图的
   `<地图>_<zoom>_mapping.json`。
-- **玩家定位**：标定完成后，通过 `POST /api/coords` 或兼容的 WebSocket
-  中继发送世界坐标，网页会实时显示玩家位置。
+- **玩家定位**：标定完成后，服务端用 `configs/hg_content.txt` 里的凭证直接连
+  官方地图 WebSocket `wss://ws.skland.com/ws/v1/game/endfield/map`，把实时坐标
+  经 SSE 推给网页，显示玩家位置，不再依赖本地 WS 中继。`POST /api/coords`
+  仍保留为外部客户端的备用上报口。
 - **路径标记**：粘贴 `(x,z)` 坐标序列后生成路径折线。起点为绿色，终点为
   红色，途经点显示编号。
 - **坐标读取**：点击地图即可查看游戏世界坐标，以及对应的 2D 网格格子坐标。
@@ -86,12 +96,35 @@ uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 
 不要把未探索区域标记为 `Free`，也不建议将整个未知区域标记为 `Blocked`。
 
+### 分层连接
+
+网格支持类似 PCB via 的跨层连接。每个 grid 仍只保存 `Unknown/Free/Blocked`，
+跨地图/分层连接统一保存在 `assets/nav-grid-data/links.json`：
+
+- 起点和终点可以是大地图、分层地图或独立地图；
+- 端点保存世界坐标区域，不依赖易漂移的格子下标；
+- 支持双向、单向、楼梯、电梯、传送、门、绳索和通行代价；
+- 编辑器中进入“连接”模式，依次框选起点区域、切换分层、框选终点区域并保存。
+
+带分层的网格文件名为：
+
+```text
+<地图>__<tier>_<zoom>.grid.npz
+```
+
+未选择分层时继续使用旧格式：
+
+```text
+<地图>_<zoom>.grid.npz
+```
+
 ## 数据目录
 
 ```text
 assets/
 ├── nav-grid-data/       导航网格数据，随仓库发布
 ├── tiles/
+│   ├── layers/          官方分层图片缓存，仅本地
 │   ├── latest/          最新合并瓦片，仅本地
 │   ├── run_<时间戳>/    抓取会话，仅本地
 │   └── maps/            拼接总图与标定，随仓库发布
@@ -121,6 +154,44 @@ GitHub 仓库只跟踪以下内容：
 
 `meta` 包含 `origin`、`cell_size`、`magic`、`schema_version` 和
 `axis_convention`。`origin` 表示 `cells[0,0]` 最小角的世界坐标。
+
+分层网格还可以在 `meta.floor_regions` 中保存三维高度区间。服务端收到 WS
+位置后，用这些区间判断玩家所在楼层：
+
+```json
+{
+  "floor_regions": [
+    {
+      "x0": -768, "x1": 128,
+      "z0": -768, "z1": 0,
+      "y_min": 245, "y_max": 285
+    }
+  ]
+}
+```
+
+只更新某个网格的楼层区间，不重存格子数据：
+
+```powershell
+$body = @{
+  map = "map02"
+  zoom = "4"
+  tier = "scene_map02_lv005_layer_tips_7"
+  floor_regions = @(
+    @{ x0 = -768; x1 = 128; z0 = -768; z1 = 0; y_min = 245; y_max = 285 }
+  )
+} | ConvertTo-Json -Depth 5
+Invoke-RestMethod -Method Post -ContentType "application/json" `
+  -Body $body http://127.0.0.1:8877/api/grid2d/floor-regions
+```
+
+同一位置命中唯一楼层时，SSE `coords` 事件会带 `gridFloorStatus="unique"` 和
+`gridTierId`；命中多层时返回 `ambiguous`，服务端不会随便选择楼层。
+网格或连接模式中的“楼层区间”按钮会自动叠加同一区域的候选楼层：绿色为当前层，
+红色为 X/Z 与 Y 都重合，黄色为只有 X/Z 重合。先选择“重合连通区”，再选择
+“重合地图网格”，分别填写该层的 Y 范围并保存。所有涉及层级都已定义高度的
+连通区会改为蓝色，与未处理的黄色重合区区分。主地图以 `__main__` 作为
+特殊网格参与重合分析，可以与任意分层网格一起设置高度区间。
 
 保存范围取“原数组范围与已涂格子范围的并集”，因此已有未知边框不会被裁掉。
 当前限制：
@@ -154,6 +225,56 @@ uv run nav-grid-editor fetch-marks --per-level
 
 默认读取 `configs/hg_content.txt`。该文件包含认证凭证，不会进入版本库。
 
+## 命令行分层地图抓取
+
+使用自动发现程序抓取官方全部分层地图：
+
+```powershell
+uv run nav-grid-editor fetch-layers --dry-run
+uv run nav-grid-editor fetch-layers
+```
+
+程序会：
+
+1. 读取官方 `map/tree`；
+2. 读取官方入口标记的 `levelId` / `targetRegionId`，精确绑定分层组；
+3. 从当前官方前端 bundle 自动发现分层资源映射和资源版本；
+4. 下载全部 tier PNG；
+5. 生成 `assets/tiles/layers/catalog.json`，编辑器启动后直接读取。
+
+重复执行时会跳过已存在图片；需要更新时使用：
+
+```powershell
+uv run nav-grid-editor fetch-layers --force
+```
+
+也可以绕过 CLI 直接运行：
+
+```powershell
+uv run python scripts/fetch_layers.py
+```
+
+输出结构：
+
+```text
+assets/tiles/layers/
+├── catalog.json
+├── map01/
+│   └── map01_lv001/
+├── map02/
+│   ├── map02_lv002/
+│   └── indie_dg007/
+└── .bundle-cache/
+```
+
+编辑器显示名称：
+
+| 内部 ID | 显示名称 |
+| --- | --- |
+| `base01` | 帝江号 |
+| `map01` | 四号谷底 |
+| `map02` | 武陵 |
+
 ## 项目结构
 
 ```text
@@ -165,7 +286,8 @@ src/nav_grid_editor/
 │   └── fetch_marks.py           命令行地图标记抓取
 ├── services/
 │   ├── maps/                    瓦片、事件、网格、标定与服务编排
-│   └── marks.py                 地图标记抓取与校验
+│   ├── endfield_ws.py           官方地图 WS 位置流（认证复用 marks.py）
+│   └── marks.py                 地图标记抓取、OAuth 签名与校验
 ├── integrations/smsdk/          设备 ID、指纹与 SMSdk 运行资源
 └── web/
     ├── map_composer.html        页面结构

@@ -3,6 +3,7 @@
 import { CELL_BLOCKED, CELL_FREE, CELL_UNKNOWN, GridDocument } from "./grid/grid-document.js";
 import { GridRasterCache } from "./grid/grid-raster-cache.js";
 import { loadGridDocument, saveGridDocument } from "./grid/grid-transport.js";
+import { pickLayerGroup, tierToBaseMatrix } from "./layers/tier-transform.js";
 import { RENDER_LAYERS, RenderScheduler } from "./render/render-scheduler.js";
 
 // ---------------- 状态 ----------------
@@ -15,20 +16,39 @@ const state = {
   counts: { new: 0, updated: 0, unchanged: 0, skipped: 0, error: 0 },
   // 每个 (map,zoom) 一个视图：{canvas, g, minX, maxX, minY, maxY, pasted:Set}
   views: new Map(),
+  tierCatalogs: new Map(), // "map@zoom" -> 官方分层目录
+  activeTier: null,       // {key,id,meta,bitmap}
+  tierRequestId: 0,
+  tierLoading: false,
   activeKey: null,
   compose: null, // {map, zoom, total, done}
   marks: null,   // 地图标记抓取状态（/api/marks/status）
+  position: null, // 官方地图 WS 位置流状态（/api/position/status）
   markers: null, // 当前地图的标记点位（/api/marks/data）
   markHidden: new Set(),  // 被选择器关掉的 templateId（不画这些）
   mpCat: null,      // 选择器当前的大类
   mpCats: [],       // [[大类, [条目]]]，打开选择器时算一次
   markersPromise: null,  // 正在进行的标记请求（并发调用共享它）
   markersKey: null,
+  tileMaps: {},
+  positionView: { requestId: 0, appliedKey: "" },
+  floorMap: { key: "", levelId: "", layers: [], error: null },
+  floorOverlap: {
+    key: "", xzOnly: new Set(), threeD: new Set(),
+    resolved: new Set(), components: [],
+  },
+  floorPeerGrids: new Map(),
+  floorLiveRefreshTimer: 0,
+  floorHighlight: { componentId: "", layerId: "" },
+  floorMarkedRows: [],
+  gridLinks: [],
   layers: {
     base: true,
+    tier: true,
     markers: true,
     grid: true,
     selection: true,
+    links: true,
     path: true,
   },
   gridOpacity: 0.82,
@@ -47,6 +67,16 @@ const gridBoundsEl = $("gridBounds");
 const brushCursor = $("brushCursor");
 const brushCursorLabel = $("brushCursorLabel");
 
+const MAP_DISPLAY_NAMES = {
+  base01: "帝江号",
+  map01: "四号谷底",
+  map02: "武陵",
+};
+
+function mapDisplayName(map) {
+  return MAP_DISPLAY_NAMES[map] || map;
+}
+
 function setStatus(text, state = "idle") {
   $("statusText").textContent = text;
   statusEl.dataset.state = state;
@@ -63,7 +93,7 @@ function getView(map, zoom, bounds) {
   let v = state.views.get(key);
   if (!v) {
     v = { minX: 0, maxX: -1, minY: 0, maxY: -1, pasted: new Set(),
-          overview: null };
+          overview: null, tierId: null };
   }
   if (bounds) {
     const { minX, maxX, minY, maxY } = bounds;
@@ -105,17 +135,36 @@ function noteTile(map, zoom, x, y, kind) {
 
 function setActive(key) {
   if (state.activeKey === key) return;
+  const previousKey = state.activeKey;
+  if (state.activeTier && state.activeTier.key !== key) {
+    clearActiveTier(false, previousKey);
+  }
+  if (link.drag) {
+    link.drag = null;
+    requestRender(RENDER_LAYERS.LINK);
+  }
+  clearTileCache();
+  for (const [viewKeyValue, view] of state.views) {
+    if (viewKeyValue === key || !view.overview) continue;
+    if (typeof view.overview.close === "function") view.overview.close();
+    view.overview = null;
+  }
   state.activeKey = key;
   redrawActive();
   fitView();
   updateCurBar();
-  setStatus("当前视图: " + key + "（拖动平移 · 滚轮缩放 · 双击适应）", "ready");
+  const [activeMap] = key.split("@");
+  setStatus("当前视图: " + mapDisplayName(activeMap) +
+            "（拖动平移 · 滚轮缩放 · 双击适应）", "ready");
   loadMappingForCurrent();
+  void loadTierCatalog();
+  syncTierControls();
   updatePlayerMarker(null);
   hidePickMarker();
   $("pickReadout").textContent = "-";
-  if (edit.mode) loadGrid2D(false);
+  if (edit.mode || link.mode) loadGrid2D(false);
   loadMarkers();   // 换了图，标记也要跟着换
+  void loadGridLinks();
 }
 
 // 顶部信息条：实时显示当前拼接的地图名 / zoom / 瓦片数 / 坐标范围
@@ -128,10 +177,11 @@ function updateCurBar() {
     return;
   }
   const [map, zoom] = state.activeKey.split("@");
-  bar("curMap", map);
+  const displayName = mapDisplayName(map);
+  bar("curMap", displayName);
   bar("curZoom", zoom);
-  bar("canvasViewLabel", map + " / L" + zoom);
-  bar("sideViewLabel", map + " / L" + zoom);
+  bar("canvasViewLabel", displayName + " / L" + zoom);
+  bar("sideViewLabel", displayName + " / L" + zoom);
   const v = state.views.get(state.activeKey);
   if (hasBounds(v)) {
     bar("curCount", v.pasted.size);
@@ -163,7 +213,18 @@ const mapView = { scale: 1, panX: 0, panY: 0,
   // 瓦片按到它的距离排序后再发请求，见 render()。
   focus: null };
 let dragState = null;
+let viewFrame = 0;
+let viewFrameNeedsRender = false;
+let renderOverscan = 0;
+let dragBufferRect = null;
+let isPanning = false;
+let deferredRenderLayers = 0;
 let brushCursorMinPx = 7;
+
+// 拖动时让画布多覆盖视口四周一段距离。CSS transform 只负责移动已经画好的
+// 合成层，主线程不必每帧重画；越界前再重建一次缓冲。
+const DRAG_OVERSCAN = 0.36;
+const DRAG_BUFFER_EDGE = 0.08;
 
 function refreshUiMetrics() {
   const rootStyle = getComputedStyle(document.documentElement);
@@ -180,25 +241,40 @@ function focusHolder() {
   return { x: vis.x + vis.w / 2, y: vis.y + vis.h / 2 };
 }
 
-const DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+const DPR = Math.max(1, Math.min(1.5, window.devicePixelRatio || 1));
 // 解码后的瓦片位图上限（256×256×4B = 256KiB/张，1200 张约 300MiB）。
 // **必须明显大于 MAX_TILES_PER_FRAME**：缓存装不下"一屏最多会画的瓦片数"时，
 // 同一屏里的瓦片会互相把对方挤出 LRU，于是每一帧都重新请求自己，
 // 请求量成倍膨胀（实测 1100×749 窗口、一屏 580 张时，580 个坐标被取了 1864 次）。
-const TILE_CACHE_MAX = 1200;
-const MAX_TILES_PER_FRAME = 600; // 视野内瓦片过多时只画缩略图，不逐张请求
+const TILE_CACHE_MAX = 420;
+const TILE_CACHE_MAX_BYTES = 96 * 1024 * 1024;
+const MAX_TILES_PER_FRAME = 320; // 视野内瓦片过多时只画缩略图，不逐张请求
+const TILE_DETAIL_MIN_SCALE = 0.16;
+const TIER_PREVIEW_MAX = 2048;
+const TIER_FULL_MIN_SCALE = 0.32;
+const TIER_FULL_RELEASE_SCALE = 0.22;
 const tileCache = new Map();     // "map/zoom/x_y" -> ImageBitmap | "loading" | {missing:true}
+let tileCacheBytes = 0;
+let tileCacheGeneration = 0;
 const renderScheduler = new RenderScheduler((layers) => render(layers));
 
 function requestRender(layers = RENDER_LAYERS.ALL) {
+  if (isPanning) {
+    deferredRenderLayers |= layers;
+    return;
+  }
   renderScheduler.request(layers);
 }
 
 // 可见区域（holder 坐标系：1 单位 = 总图像素）
 function visibleRect() {
   const s = mapView.scale;
-  return { x: -mapView.panX / s, y: -mapView.panY / s,
-           w: canvasWrap.clientWidth / s, h: canvasWrap.clientHeight / s };
+  const w = canvasWrap.clientWidth / s;
+  const h = canvasWrap.clientHeight / s;
+  const ox = w * renderOverscan;
+  const oy = h * renderOverscan;
+  return { x: -mapView.panX / s - ox, y: -mapView.panY / s - oy,
+           w: w + ox * 2, h: h + oy * 2 };
 }
 
 // 把一层画布摆到可见区域上方，并把它的 2D 上下文设成"直接按 holder 坐标作图"。
@@ -225,15 +301,34 @@ function cacheGet(key) {
   tileCache.set(key, v);
   return v;
 }
+function bitmapBytes(value) {
+  return isBitmap(value)
+    ? (value.width || 0) * (value.height || 0) * 4
+    : 0;
+}
 function cachePut(key, val) {
-  if (tileCache.has(key)) tileCache.delete(key);
+  if (tileCache.has(key)) {
+    tileCacheBytes -= bitmapBytes(tileCache.get(key));
+    tileCache.delete(key);
+  }
+  tileCacheBytes += bitmapBytes(val);
   tileCache.set(key, val);
-  while (tileCache.size > TILE_CACHE_MAX) {
+  while (tileCache.size > TILE_CACHE_MAX ||
+         tileCacheBytes > TILE_CACHE_MAX_BYTES) {
     const oldest = tileCache.keys().next().value;
     const old = tileCache.get(oldest);
+    tileCacheBytes -= bitmapBytes(old);
     if (old && typeof old.close === "function") old.close();
     tileCache.delete(oldest);
   }
+}
+function clearTileCache() {
+  tileCacheGeneration++;
+  for (const value of tileCache.values()) {
+    if (value && typeof value.close === "function") value.close();
+  }
+  tileCache.clear();
+  tileCacheBytes = 0;
 }
 
 // 只有解码好的位图能画
@@ -273,20 +368,28 @@ function requestTileBitmap(map, zoom, x, y) {
   // 位图 / 正在下载 / 已确认这次没有 -> 都不重复发请求
   if (isBitmap(cur) || cur === "loading" || isMissing(cur)) return;
   cachePut(key, "loading");
+  const generation = tileCacheGeneration;
   fetch("/tiles/" + map + "/" + zoom + "/" + x + "_" + y + ".png")
     .then(r => r.ok ? r.blob() : Promise.reject(new Error("HTTP " + r.status)))
     .then(blob => window.createImageBitmap ? createImageBitmap(blob) : loadImageFromBlob(blob))
     .then(bmp => {
+      if (generation !== tileCacheGeneration) {
+        if (bmp && typeof bmp.close === "function") bmp.close();
+        return;
+      }
       cachePut(key, bmp);
       if (state.activeKey === viewKey(map, zoom)) requestRender(RENDER_LAYERS.BASE);
     })
-    .catch(() => { cachePut(key, { missing: true }); });
+    .catch(() => {
+      if (generation === tileCacheGeneration) cachePut(key, { missing: true });
+    });
 }
 
 async function loadOverview(map, zoom) {
   const key = viewKey(map, zoom);
   const v0 = state.views.get(key);
   if (!hasBounds(v0) || v0.overview) return;
+  const generation = tileCacheGeneration;
   try {
     const resp = await fetch("/api/overview?map=" + encodeURIComponent(map) +
                              "&zoom=" + encodeURIComponent(zoom));
@@ -294,6 +397,10 @@ async function loadOverview(map, zoom) {
     const blob = await resp.blob();
     const bmp = window.createImageBitmap ? await createImageBitmap(blob)
                                          : await loadImageFromBlob(blob);
+    if (generation !== tileCacheGeneration) {
+      if (bmp && typeof bmp.close === "function") bmp.close();
+      return;
+    }
     const v = state.views.get(key);
     if (!v) return;
     v.overview = bmp;
@@ -303,9 +410,43 @@ async function loadOverview(map, zoom) {
   }
 }
 
+function drawTierOverlay(g, vis) {
+  const tier = state.activeTier;
+  if (!tier || tier.key !== state.activeKey || !state.layers.tier) return;
+  if (!calib.mapping || calib.key !== state.activeKey) return;
+
+  let matrix;
+  try {
+    matrix = tierToBaseMatrix(tier.meta, calib.mapping.inverse_matrix);
+  } catch (e) {
+    addLog("分层变换失败: " + e.message, "t-err");
+    return;
+  }
+
+  // 官方页面也使用同样的“压暗底图，只照亮当前层”方式。
+  g.save();
+  g.globalAlpha = 0.60;
+  g.fillStyle = "#000";
+  g.fillRect(vis.x, vis.y, vis.w, vis.h);
+  g.restore();
+
+  g.save();
+  g.imageSmoothingEnabled = true;
+  g.transform(matrix[0], matrix[1], matrix[2],
+              matrix[3], matrix[4], matrix[5]);
+  const bitmap = tier.bitmap || tier.preview;
+  if (!bitmap) {
+    g.restore();
+    return;
+  }
+  g.drawImage(bitmap, 0, 0, tier.meta.width, tier.meta.height);
+  g.restore();
+}
+
 function render(layers = RENDER_LAYERS.ALL) {
   const s = mapView.scale;
   const vis = visibleRect();
+  dragBufferRect = { x: vis.x, y: vis.y, w: vis.w, h: vis.h };
   const v = state.views.get(state.activeKey);
 
   if (layers & RENDER_LAYERS.BASE) {
@@ -315,8 +456,9 @@ function render(layers = RENDER_LAYERS.ALL) {
 
     if (state.layers.base && hasBounds(v)) {
       const size = viewSize(v);
+      const useTiles = s >= TILE_DETAIL_MIN_SCALE;
       // 1) 缩略总图打底：秒出图，缩着看时不用几千张瓦片
-      if (v.overview) {
+      if (v.overview && !useTiles) {
         g.imageSmoothingEnabled = true;
         g.drawImage(v.overview, 0, 0, size.w, size.h);
       }
@@ -327,7 +469,8 @@ function render(layers = RENDER_LAYERS.ALL) {
       const x1 = Math.min(v.maxX, Math.ceil((vis.x + vis.w) / TILE) - 1 + v.minX);
       const y1 = Math.min(v.maxY, Math.ceil((vis.y + vis.h) / TILE) - 1 + v.minY);
       const need = Math.max(0, x1 - x0 + 1) * Math.max(0, y1 - y0 + 1);
-      if (need > 0 && need <= MAX_TILES_PER_FRAME) {
+      let drewTile = false;
+      if (useTiles && need > 0 && need <= MAX_TILES_PER_FRAME) {
         const [map, zoom] = state.activeKey.split("@");
         const pending = [];
         for (let y = y0; y <= y1; y++) {
@@ -336,6 +479,7 @@ function render(layers = RENDER_LAYERS.ALL) {
             const bmp = cacheGet(key);
             if (isBitmap(bmp)) {
               g.drawImage(bmp, (x - v.minX) * TILE, (y - v.minY) * TILE, TILE, TILE);
+              drewTile = true;
             } else if (bmp !== "loading") {
               pending.push([x, y]);
             }
@@ -372,14 +516,21 @@ function render(layers = RENDER_LAYERS.ALL) {
         }
         g.stroke();
       }
+      if (v.overview && !drewTile) {
+        g.imageSmoothingEnabled = true;
+        g.drawImage(v.overview, 0, 0, size.w, size.h);
+      }
     }
+
+    // 2.1) 官方分层图片：底图之上、标记/网格/路径之下
+    drawTierOverlay(g, vis);
 
     // 2.5) 地图标记层：画在瓦片之上、网格/路径之下
     if (state.layers.markers) drawMarkers(g);
   }
 
-  // 3) 网格编辑层与选择层（只在编辑模式画）
-  if (edit.mode && (layers & RENDER_LAYERS.GRID)) {
+  // 3) 网格层在编辑和连接模式都显示；选择层仍然只属于编辑模式。
+  if ((edit.mode || link.mode) && (layers & RENDER_LAYERS.GRID)) {
     const ge = layoutLayer(editCanvasEl, ectx, vis, s);
     if (state.layers.grid) drawAllCells(ge);
     else {
@@ -387,10 +538,15 @@ function render(layers = RENDER_LAYERS.ALL) {
       gridBoundsEl.style.display = "none";
     }
   }
-  if (edit.mode && (layers & RENDER_LAYERS.SELECTION)) {
+  if ((edit.mode || link.mode) && (layers & RENDER_LAYERS.SELECTION)) {
     const gs = layoutLayer(selCanvasEl, sctx, vis, s);
     if (state.layers.selection) drawSelLayer(gs);
     else gs.clearRect(vis.x, vis.y, vis.w, vis.h);
+  }
+  if (layers & RENDER_LAYERS.LINK) {
+    const gl = layoutLayer(linkCanvasEl, lctx, vis, s);
+    if (state.layers.links) drawLinkLayer(gl);
+    else gl.clearRect(vis.x, vis.y, vis.w, vis.h);
   }
   // 4) 路径层
   if (layers & RENDER_LAYERS.PATH) {
@@ -400,13 +556,100 @@ function render(layers = RENDER_LAYERS.ALL) {
   }
 }
 
-function applyView() {
+function applyViewTransform() {
   canvasHolder.style.transform =
-    "translate(" + mapView.panX + "px," + mapView.panY + "px) scale(" + mapView.scale + ")";
+    "translate3d(" + mapView.panX + "px," + mapView.panY + "px,0) scale(" + mapView.scale + ")";
+}
+
+function applyViewChrome() {
+  applyViewTransform();
   if (calib.mode) renderCalibMarks();
   updatePlayerMarker(lastPos);
   if (edit.mode && edit.cursorCell) updateBrushCursor(edit.cursorCell[0], edit.cursorCell[1]);
-  requestRender();
+}
+
+function applyView(renderNow = false, renderDeferred = true) {
+  applyViewChrome();
+  if (renderNow || !isPanning) syncTierResolution();
+  if (renderNow) {
+    deferredRenderLayers = 0;
+    render(RENDER_LAYERS.ALL);
+  } else if (renderDeferred && !isPanning) {
+    requestRender();
+  }
+}
+
+function scheduleViewFrame(renderNow = false) {
+  viewFrameNeedsRender = viewFrameNeedsRender || renderNow;
+  if (viewFrame) return;
+  viewFrame = requestAnimationFrame(() => {
+    const needsRender = viewFrameNeedsRender;
+    viewFrame = 0;
+    viewFrameNeedsRender = false;
+    applyView(needsRender, false);
+  });
+}
+
+function resetViewFrame() {
+  if (viewFrame) cancelAnimationFrame(viewFrame);
+  viewFrame = 0;
+  viewFrameNeedsRender = false;
+}
+
+function currentViewportRect() {
+  const s = mapView.scale;
+  return {
+    x: -mapView.panX / s,
+    y: -mapView.panY / s,
+    w: canvasWrap.clientWidth / s,
+    h: canvasWrap.clientHeight / s,
+  };
+}
+
+function viewportInsideDragBuffer() {
+  if (!dragBufferRect || renderOverscan <= 0) return false;
+  const view = currentViewportRect();
+  const padX = view.w * DRAG_BUFFER_EDGE;
+  const padY = view.h * DRAG_BUFFER_EDGE;
+  return view.x >= dragBufferRect.x + padX &&
+         view.y >= dragBufferRect.y + padY &&
+         view.x + view.w <= dragBufferRect.x + dragBufferRect.w - padX &&
+         view.y + view.h <= dragBufferRect.y + dragBufferRect.h - padY;
+}
+
+function startPanGesture(e, hideBrush = false) {
+  dragState = {
+    id: e.pointerId,
+    sx: e.clientX,
+    sy: e.clientY,
+    px: mapView.panX,
+    py: mapView.panY,
+    moved: false,
+  };
+  canvasWrap.setPointerCapture(e.pointerId);
+  canvasWrap.classList.add("dragging");
+  document.body.classList.add("map-panning");
+  if (hideBrush) hideBrushCursor();
+}
+
+function activatePanBuffer() {
+  if (isPanning) return;
+  isPanning = true;
+  renderOverscan = DRAG_OVERSCAN;
+  deferredRenderLayers = 0;
+  renderScheduler.cancel();
+  resetViewFrame();
+  applyView(true);
+}
+
+function finishPanGesture() {
+  if (!isPanning) return;
+  isPanning = false;
+  renderOverscan = 0;
+  deferredRenderLayers = 0;
+  renderScheduler.cancel();
+  resetViewFrame();
+  applyView(true);
 }
 
 // 地图小于窗口时居中，大于窗口时限制拖出边界
@@ -431,7 +674,7 @@ function fitView() {
   mapView.scale = Math.max(0.02, Math.min(1, wrapW / size.w, wrapH / size.h));
   mapView.focus = null;   // 整图铺满，焦点交给视口中心
   clampPan();
-  applyView();
+  applyView(true);
 }
 
 // 以鼠标位置为中心缩放
@@ -446,7 +689,7 @@ function zoomAt(cx, cy, factor) {
   mapView.panX = cx - (cx - mapView.panX) * k;
   mapView.panY = cy - (cy - mapView.panY) * k;
   clampPan();
-  applyView();
+  applyView(true);
 }
 
 function clearView(map, zoom) {
@@ -638,14 +881,19 @@ const MODES = {
   browse: { label: "浏览",   color: "#c3fd43" },
   calib:  { label: "标定",   color: "#c3fd43" },
   edit:   { label: "网格",   color: "#c3fd43" },
+  link:   { label: "连接",   color: "#c3fd43" },
   pick:   { label: "取坐标", color: "#c3fd43" },
 };
-const DEFAULT_SIDE_TAB = { browse: "capture", calib: "calib", edit: "grid", pick: "coords" };
+const DEFAULT_SIDE_TAB = {
+  browse: "capture", calib: "calib", edit: "grid",
+  link: "grid", pick: "coords",
+};
 const MODE_BY_SIDE_TAB = { capture: "browse", calib: "calib", grid: "edit", coords: "pick" };
 let activeSideTab = null;
 
 function currentMode() {
   if (edit.mode) return "edit";
+  if (link.mode) return "link";
   if (calib.mode) return "calib";
   if (pick.mode) return "pick";
   return "browse";
@@ -655,12 +903,17 @@ function currentMode() {
 // 状态栏模式标签，以及那个统一的 --mode 颜色变量（行1 强调条 / 选中态 / 标签共用）。
 function syncModeChrome() {
   const m = currentMode();
-  const modeOrder = { browse: "01", calib: "02", edit: "03", pick: "04" };
+  const modeOrder = {
+    browse: "01", calib: "02", edit: "03", link: "04", pick: "05",
+  };
   document.documentElement.style.setProperty("--mode", MODES[m].color);
   document.body.dataset.mode = m;
 
-  ["browse", "calib", "edit", "pick"].forEach(k => {
-    const btn = $({ browse: "btnBrowse", calib: "btnCalib", edit: "btnEdit", pick: "btnPick" }[k]);
+  ["browse", "calib", "edit", "link", "pick"].forEach(k => {
+    const btn = $({
+      browse: "btnBrowse", calib: "btnCalib", edit: "btnEdit",
+      link: "btnLink", pick: "btnPick",
+    }[k]);
     const active = k === m;
     btn.classList.toggle("on", active);
     btn.setAttribute("aria-pressed", String(active));
@@ -720,11 +973,13 @@ function setMode(name) {
   // 关掉除目标外的模式，一律委托给各自的 setter，保留它们的清理副作用
   // （setEditMode(false) 要清画笔/框选/选区并归零覆盖画布）。
   if (name !== "edit") setEditMode(false);
+  if (name !== "link") setLinkMode(false);
   if (name !== "calib") setCalibMode(false);
   if (name !== "pick") setPickMode(false);
 
   if (name === "calib") setCalibMode(true);
   else if (name === "edit") setEditMode(true);   // 未标定时会被拒绝
+  else if (name === "link") setLinkMode(true);
   else if (name === "pick") setPickMode(true);
 
   // 不假设切换成功：setEditMode 可能因未标定而拒绝，所以最后按真实状态统一重画
@@ -734,6 +989,7 @@ function setMode(name) {
 function setCalibMode(on) {
   if (on) {
     if (pick.mode) setPickMode(false);
+    if (link.mode) setLinkMode(false);
     // 以前这里漏了 edit：网格模式下点标定会让两个模式同时亮着（只是被鼠标分发
     // 的 !edit.mode 挡住，平时看不出来）。单选组要求这里必须对称。
     if (edit.mode) setEditMode(false);
@@ -868,6 +1124,7 @@ async function loadMappingForCurrent() {
   updatePlayerMarker(lastPos);
   requestRender();
   updateMarksHint();   // 标定状态决定标记能不能画
+  syncTierControls();
 }
 
 // 玩家定位：游戏坐标 (x,z) → 地图像素 → 固定屏幕尺寸的十字准星
@@ -917,10 +1174,20 @@ const edit = {
   paintFrameQueued: false,
   paintDirty: false,
 };
+const link = {
+  mode: false,
+  stage: "source",
+  source: null,
+  target: null,
+  drag: null,
+  editingId: null,
+};
 const editCanvasEl = $("editCanvas");
 const ectx = editCanvasEl.getContext("2d");
 const selCanvasEl = $("selCanvas");
 const sctx = selCanvasEl.getContext("2d");
+const linkCanvasEl = $("linkCanvas");
+const lctx = linkCanvasEl.getContext("2d");
 
 function ed() { return (edit.v && edit.v.edit) || null; }
 
@@ -990,7 +1257,7 @@ function invalidateGridLayer() {
 
 function updateGridBoundsOverlay(e) {
   const bb = e ? savedBounds(e) : null;
-  if (!bb || !calib.mapping || !edit.mode || !state.layers.grid) {
+  if (!bb || !calib.mapping || (!edit.mode && !link.mode) || !state.layers.grid) {
     gridBoundsEl.style.display = "none";
     return;
   }
@@ -1061,6 +1328,8 @@ function drawSelLayer() {
   if (selCanvasEl.width <= 1 || !calib.mapping) return;
   const vis = visibleRect();
   sctx.clearRect(vis.x, vis.y, vis.w, vis.h);
+  drawFloorRegionOverlay();
+  if (!edit.mode) return;
   const r = selRectOf();
   if (!r) return;
   const p = cellRangeRectPx(r.x0, r.z0, r.x1 + 1, r.z1 + 1);
@@ -1069,6 +1338,258 @@ function drawSelLayer() {
   sctx.strokeStyle = "rgba(190,150,255,0.72)";
   sctx.lineWidth = 1;
   sctx.strokeRect(p.x + 0.5, p.y + 0.5, Math.max(0, p.w), Math.max(0, p.h));
+}
+
+function floorRegionRect(region) {
+  return {
+    x0: Number(region.x0), x1: Number(region.x1),
+    z0: Number(region.z0), z1: Number(region.z1),
+    y_min: Number(region.y_min), y_max: Number(region.y_max),
+  };
+}
+
+function drawWorldPolygon(g, rect, fill, stroke, dashed = false) {
+  const points = worldRectPoints(rect, calib.mapping.inverse_matrix);
+  g.save();
+  g.beginPath();
+  g.moveTo(points[0][0], points[0][1]);
+  for (let i = 1; i < points.length; i++) {
+    g.lineTo(points[i][0], points[i][1]);
+  }
+  g.closePath();
+  if (fill) {
+    g.fillStyle = fill;
+    g.fill();
+  }
+  if (stroke) {
+    g.setLineDash(dashed
+      ? [6 / mapView.scale, 4 / mapView.scale]
+      : []);
+    g.strokeStyle = stroke;
+    g.lineWidth = Math.max(0.5, 1 / mapView.scale);
+    g.stroke();
+  }
+  g.restore();
+}
+
+function drawOverlapCellSet(g, cells, fill) {
+  if (!cells || !cells.size) return;
+  if (!ed() || !calib.mapping) return;
+  const vis = visibleRect();
+  g.save();
+  g.fillStyle = fill;
+  g.beginPath();
+  for (const key of cells) {
+    const comma = key.indexOf(",");
+    const ix = Number(key.slice(0, comma));
+    const iz = Number(key.slice(comma + 1));
+    const rect = cellRangeRectPx(ix, iz, ix + 1, iz + 1);
+    if (rect.x + rect.w < vis.x || rect.x > vis.x + vis.w) continue;
+    if (rect.y + rect.h < vis.y || rect.y > vis.y + vis.h) continue;
+    g.rect(rect.x, rect.y, rect.w, rect.h);
+  }
+  g.fill();
+  g.restore();
+}
+
+function drawFloorComponentHighlight() {
+  const id = state.floorHighlight.componentId;
+  if (!id) return;
+  const component = (state.floorOverlap.components || [])
+    .find(item => item.id === id);
+  if (!component) return;
+  const palette = ["#66ddff", "#ffb84d", "#ff72d2", "#8dff9b", "#d0a6ff"];
+  component.layers.forEach((tierId, index) => {
+    const layer = (state.floorMap.layers || [])
+      .find(item => item.tier_id === tierId);
+    if (!layer) return;
+    // 只画这条连通区自己认领的区间，别把同层其它/历史标记一起拖出来。
+    const region = floorRegionForComponent(layer, component);
+    if (!region) return;
+    const selectedLayer = tierId === state.floorHighlight.layerId;
+    drawWorldPolygon(
+      sctx, floorRegionRect(region),
+      selectedLayer ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.035)",
+      palette[index % palette.length],
+      !selectedLayer,
+    );
+  });
+  if (!ed() || !calib.mapping) return;
+  sctx.save();
+  sctx.fillStyle = "rgba(255,255,255,0.30)";
+  sctx.strokeStyle = "rgba(255,118,232,0.98)";
+  sctx.lineWidth = Math.max(1, 1.5 / mapView.scale);
+  for (const cell of component.cells || []) {
+    const ix = Number(cell[0]);
+    const iz = Number(cell[1]);
+    const rect = cellRangeRectPx(ix, iz, ix + 1, iz + 1);
+    sctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+    sctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+  }
+  sctx.restore();
+}
+
+// 已保存的标记统一填蓝：不管它属于哪一层、还跟不跟得上当前连通区，
+// 都能看见、也能回去改，避免旧标记"隐身"。
+function drawMarkedRegion(g, region) {
+  if (!region || !calib.mapping) return;
+  const cells = Array.isArray(region.cells) ? region.cells : [];
+  const valid = cells.filter(cell =>
+    Array.isArray(cell) && cell.length >= 4 &&
+    Number.isFinite(Number(cell[0])) && Number.isFinite(Number(cell[1])) &&
+    Number.isFinite(Number(cell[2])) && Number.isFinite(Number(cell[3])));
+  if (valid.length) {
+    g.save();
+    g.fillStyle = "rgba(70,190,255,0.46)";
+    g.beginPath();
+    for (const cell of valid) {
+      const points = worldRectPoints({
+        x0: Number(cell[0]), x1: Number(cell[1]),
+        z0: Number(cell[2]), z1: Number(cell[3]),
+      }, calib.mapping.inverse_matrix);
+      g.moveTo(points[0][0], points[0][1]);
+      for (let i = 1; i < points.length; i++) {
+        g.lineTo(points[i][0], points[i][1]);
+      }
+      g.closePath();
+    }
+    g.fill();
+    g.restore();
+  }
+  drawWorldPolygon(g, floorRegionRect(region), null, "rgba(120,215,255,0.9)");
+}
+
+function drawFloorRegionOverlay() {
+  const data = state.floorMap;
+  if (!data || !data.layers || !data.layers.length) return;
+  const active = currentGridKey();
+  const current = data.layers.find(layer => layer.tier_id === active);
+  // 默认只画当前网格自己的标记，免得别的分层的历史标记跑到大地图上。
+  if (current) {
+    for (const region of current.floor_regions || []) {
+      drawMarkedRegion(sctx, region);
+      drawWorldPolygon(
+        sctx, floorRegionRect(region), null,
+        "rgba(118,255,159,0.9)",
+      );
+    }
+  }
+  // 选中的标记区间：即使它属于别的分层，也照样显示范围。
+  const marking = selectedFloorMarking();
+  if (marking && (!current || marking.layer.tier_id !== active)) {
+    drawMarkedRegion(sctx, marking.region);
+  }
+  // 选中的重合连通区：它涉及的每一层，只画认领到的那一条区间。
+  const component = selectedFloorComponent();
+  if (component) {
+    for (const tierId of component.layers) {
+      if (current && tierId === active) continue;
+      const layer = data.layers.find(item => item.tier_id === tierId);
+      const region = layer ? floorRegionForComponent(layer, component) : null;
+      if (region) drawMarkedRegion(sctx, region);
+    }
+  }
+  drawOverlapCellSet(
+    sctx, state.floorOverlap.xzOnly, "rgba(255,213,64,0.48)");
+  drawOverlapCellSet(
+    sctx, state.floorOverlap.threeD, "rgba(255,86,86,0.52)");
+  drawFloorComponentHighlight();
+  if (marking) {
+    drawWorldPolygon(
+      sctx, floorRegionRect(marking.region), null,
+      "rgba(255,214,90,0.95)",
+    );
+  }
+}
+
+function floorWorldCellKey(x, z) {
+  return Number(x).toFixed(3) + "," + Number(z).toFixed(3);
+}
+
+async function loadFloorPeerGrids(force = false) {
+  const key = state.activeKey;
+  if (!key || !(edit.mode || link.mode)) return;
+  if (!force && state.floorPeerGrids.size) return;
+  const currentKey = currentGridKey();
+  const [map, zoom] = key.split("@");
+  const candidates = (state.floorMap.layers || []).filter(layer =>
+    layer.has_grid && layer.tier_id !== currentKey
+  );
+  const loaded = new Map();
+  await Promise.all(candidates.map(async layer => {
+    const requestTier = layer.tier_id === "__main__" ? "" : layer.tier_id;
+    try {
+      const result = await fetch(
+        "/api/grid2d?map=" + encodeURIComponent(map) +
+        "&zoom=" + encodeURIComponent(zoom) +
+        "&tier=" + encodeURIComponent(requestTier),
+      ).then(response => response.json());
+      if (!result.data) return;
+      const origin = result.data.origin || [0, 0, 0];
+      const size = Number(result.data.cell_size) || 1;
+      const cells = new Set();
+      for (const [ix, iz] of result.data.cells || []) {
+        cells.add(floorWorldCellKey(
+          Number(origin[0]) + (Number(ix) + 0.5) * size,
+          Number(origin[2]) + (Number(iz) + 0.5) * size,
+        ));
+      }
+      for (const [ix, iz] of result.data.blocked || []) {
+        cells.add(floorWorldCellKey(
+          Number(origin[0]) + (Number(ix) + 0.5) * size,
+          Number(origin[2]) + (Number(iz) + 0.5) * size,
+        ));
+      }
+      loaded.set(layer.tier_id, cells);
+    } catch (e) {
+      addLog("加载重合对比网格失败 " + layer.tier_id + ": " + e.message, "t-warn");
+    }
+  }));
+  if (state.activeKey !== key || currentGridKey() !== currentKey) return;
+  state.floorPeerGrids = loaded;
+  recomputeFloorOverlapLive();
+}
+
+function recomputeFloorOverlapLive() {
+  const document = ed();
+  if (!document || !calib.mapping || !state.floorPeerGrids.size) {
+    requestRender(RENDER_LAYERS.SELECTION);
+    return;
+  }
+  const live = new Set();
+  document.forEachCell((ix, iz, value) => {
+    if (!value) return;
+    const x = document.origin[0] + (ix + 0.5) * document.cellSize;
+    const z = document.origin[1] + (iz + 0.5) * document.cellSize;
+    const worldKey = floorWorldCellKey(x, z);
+    for (const peer of state.floorPeerGrids.values()) {
+      if (peer.has(worldKey)) {
+        live.add(ix + "," + iz);
+        break;
+      }
+    }
+  });
+  const yellow = new Set();
+  for (const cell of live) {
+    if (state.floorOverlap.threeD.has(cell) ||
+        state.floorOverlap.resolved.has(cell)) {
+      continue;
+    }
+    yellow.add(cell);
+  }
+  state.floorOverlap.xzOnly = yellow;
+  requestRender(RENDER_LAYERS.SELECTION);
+}
+
+function scheduleFloorOverlapLiveRefresh() {
+  if (!(edit.mode || link.mode)) return;
+  if (state.floorLiveRefreshTimer) {
+    clearTimeout(state.floorLiveRefreshTimer);
+  }
+  state.floorLiveRefreshTimer = setTimeout(() => {
+    state.floorLiveRefreshTimer = 0;
+    void loadFloorPeerGrids(false).then(() => recomputeFloorOverlapLive());
+  }, 80);
 }
 
 function updateSelBar() {
@@ -1082,6 +1603,720 @@ function clearSelection() {
   if (v && v.edit) v.edit.selRect = null;
   requestRender(RENDER_LAYERS.SELECTION);
   updateSelBar();
+}
+
+function floorMarkingKey(layer, region) {
+  const tierId = (layer && layer.tier_id) || "__main__";
+  const index = ((layer && layer.floor_regions) || []).indexOf(region);
+  return "m:" + tierId + ":" + index;
+}
+
+// 已经保存、但没有被当前任何重合连通区认领的标记（多半是基准挪动后留下的旧标记）。
+function floorMarkingsNotInComponents() {
+  const components = state.floorOverlap.components || [];
+  const claimed = new Set();
+  for (const component of components) {
+    for (const tierId of component.layers) {
+      const layer = (state.floorMap.layers || [])
+        .find(item => item.tier_id === tierId);
+      const region = layer ? floorRegionForComponent(layer, component) : null;
+      if (region) claimed.add(region);
+    }
+  }
+  const out = [];
+  for (const layer of state.floorMap.layers || []) {
+    for (const region of layer.floor_regions || []) {
+      if (!claimed.has(region)) out.push({ layer, region });
+    }
+  }
+  return out;
+}
+
+function populateFloorComponentSelect() {
+  const select = $("floorComponent");
+  if (!select) return;
+  const previous = select.value;
+  const components = state.floorOverlap.components || [];
+  const options = components.map((component, index) => {
+    const label = "连通区 " + (index + 1) +
+      " · " + component.severity +
+      " · " + (component.resolved ? "已标记" : "未标记") +
+      " · " + component.cells.length + " 格 · " +
+      component.layer_names.join(" / ");
+    return '<option value="c:' + component.id + '">' + label + "</option>";
+  });
+  for (const { layer, region } of floorMarkingsNotInComponents()) {
+    const label = "已标记 · " + (layer.name || layer.tier_id) +
+      " · Y " + region.y_min + " ~ " + region.y_max +
+      " · " + ((region.cells || []).length) + " 格";
+    options.push('<option value="' + floorMarkingKey(layer, region) + '">' +
+      label + "</option>");
+  }
+  select.innerHTML = options.length
+    ? options.join("")
+    : '<option value="">暂无重合连通区</option>';
+  select.disabled = !options.length;
+  if (options.length) {
+    const values = [...select.options].map(option => option.value);
+    select.value = values.includes(previous) ? previous : values[0];
+  }
+}
+
+function selectedFloorTarget() {
+  const value = $("floorComponent").value || "";
+  if (value.startsWith("c:")) {
+    const id = value.slice(2);
+    const component = (state.floorOverlap.components || [])
+      .find(item => item.id === id);
+    return component ? { kind: "component", component } : null;
+  }
+  if (value.startsWith("m:")) {
+    const rest = value.slice(2);
+    const sep = rest.lastIndexOf(":");
+    const tierId = rest.slice(0, sep);
+    const index = Number(rest.slice(sep + 1));
+    const layer = (state.floorMap.layers || [])
+      .find(item => (item.tier_id || "__main__") === tierId);
+    const region = layer && (layer.floor_regions || [])[index];
+    return layer && region ? { kind: "marking", layer, region } : null;
+  }
+  return null;
+}
+
+function selectedFloorComponent() {
+  const target = selectedFloorTarget();
+  return target && target.kind === "component" ? target.component : null;
+}
+
+function selectedFloorMarking() {
+  const target = selectedFloorTarget();
+  return target && target.kind === "marking" ? target : null;
+}
+
+function componentCellCenters(component) {
+  const document = ed();
+  if (!document) return new Set();
+  return new Set((component.cells || []).map(cell => {
+    const x = document.origin[0] + (Number(cell[0]) + 0.5) * document.cellSize;
+    const z = document.origin[1] + (Number(cell[1]) + 0.5) * document.cellSize;
+    return x.toFixed(3) + "," + z.toFixed(3);
+  }));
+}
+
+function floorRegionForComponent(layer, component) {
+  if (!layer) return null;
+  const regions = layer.floor_regions || [];
+  const active = regions.find(region =>
+    region.component_id === component.id);
+  if (active) return active;
+  const componentCenters = componentCellCenters(component);
+  if (!componentCenters.size) {
+    return regions.find(region =>
+      Number(region.x0) <= Number(component.world_bounds && component.world_bounds.x1) &&
+      Number(region.x1) >= Number(component.world_bounds && component.world_bounds.x0) &&
+      Number(region.z0) <= Number(component.world_bounds && component.world_bounds.z1) &&
+      Number(region.z1) >= Number(component.world_bounds && component.world_bounds.z0)
+    ) || null;
+  }
+  let best = null;
+  let bestRatio = 0;
+  for (const region of regions) {
+    const cells = region.cells || [];
+    if (!cells.length) continue;
+    const regionCenters = new Set(cells.map(cell =>
+      ((Number(cell[0]) + Number(cell[1])) / 2).toFixed(3) + "," +
+      ((Number(cell[2]) + Number(cell[3])) / 2).toFixed(3)
+    ));
+    let overlap = 0;
+    for (const center of componentCenters) {
+      if (regionCenters.has(center)) overlap++;
+    }
+    const ratio = overlap / Math.min(
+      componentCenters.size, regionCenters.size);
+    if (ratio > bestRatio) {
+      bestRatio = ratio;
+      best = region;
+    }
+  }
+  if (bestRatio >= 0.8) return best;
+  // 网格基准挪动过以后，旧标记的格子可能只和当前连通区部分相交。
+  // 只要包围盒相交，就仍然当作该连通区的旧标记，方便直接改掉。
+  const bounds = component.world_bounds;
+  if (!bounds) return null;
+  let hit = null;
+  let hitArea = 0;
+  for (const region of regions) {
+    const ix0 = Math.max(Number(region.x0), Number(bounds.x0));
+    const ix1 = Math.min(Number(region.x1), Number(bounds.x1));
+    const iz0 = Math.max(Number(region.z0), Number(bounds.z0));
+    const iz1 = Math.min(Number(region.z1), Number(bounds.z1));
+    if (!(ix1 > ix0 && iz1 > iz0)) continue;
+    const area = (ix1 - ix0) * (iz1 - iz0);
+    if (area > hitArea) {
+      hitArea = area;
+      hit = region;
+    }
+  }
+  return hit;
+}
+
+function populateFloorLayerSelect() {
+  const select = $("floorLayer");
+  if (!select) return;
+  const target = selectedFloorTarget();
+  const previous = select.value;
+  let entries = [];
+  if (target && target.kind === "component") {
+    const component = target.component;
+    entries = component.layers.map((tierId, index) => {
+        const layer = (state.floorMap.layers || [])
+          .find(item => item.tier_id === tierId);
+        const region = layer ? floorRegionForComponent(layer, component) : null;
+        const mark = region
+          ? "已标记 Y " + region.y_min + " ~ " + region.y_max
+          : "未标记";
+        return {
+          tierId,
+          label:
+          (component.layer_names[index] || tierId) + " · " + tierId +
+          " · " + mark,
+        };
+      });
+  } else if (target && target.kind === "marking") {
+    const layer = target.layer;
+    entries = [{
+      tierId: layer.tier_id,
+      label: (layer.name || layer.tier_id) +
+        " · Y " + target.region.y_min + " ~ " + target.region.y_max +
+        " · 已标记",
+    }];
+  }
+  select.innerHTML = entries.length
+    ? entries.map(entry =>
+        '<option value="' + entry.tierId + '">' + entry.label + "</option>"
+      ).join("")
+    : '<option value="">暂无重合网格</option>';
+  select.disabled = !entries.length;
+  if (entries.some(entry => entry.tierId === previous)) {
+    select.value = previous;
+  }
+}
+
+function selectedFloorLayerId() {
+  return $("floorLayer").value || "";
+}
+
+function currentGridKey() {
+  return currentTierId() || "__main__";
+}
+
+// 标记对话框停在画布中央，定位时把目标放到左侧偏下，免得被对话框挡住。
+function focusWorldBounds(bounds, anchorX = 0.30, anchorY = 0.70) {
+  if (!bounds || !calib.mapping) return;
+  const width = Math.max(1, Number(bounds.x1) - Number(bounds.x0));
+  const height = Math.max(1, Number(bounds.z1) - Number(bounds.z0));
+  const desired = Math.min(
+    canvasWrap.clientWidth * 0.55 / width,
+    canvasWrap.clientHeight * 0.55 / height,
+    4,
+  );
+  mapView.scale = Math.max(mapView.scale, Math.max(0.05, desired));
+  const cx = (Number(bounds.x0) + Number(bounds.x1)) / 2;
+  const cz = (Number(bounds.z0) + Number(bounds.z1)) / 2;
+  const inv = calib.mapping.inverse_matrix;
+  const px = inv[0][0] * cx + inv[0][1] * cz + inv[0][2];
+  const py = inv[1][0] * cx + inv[1][1] * cz + inv[1][2];
+  mapView.panX = canvasWrap.clientWidth * anchorX - px * mapView.scale;
+  mapView.panY = canvasWrap.clientHeight * anchorY - py * mapView.scale;
+  mapView.focus = null;
+  clampPan();
+  applyView(true);
+}
+
+function focusFloorComponent(component) {
+  focusWorldBounds(component && component.world_bounds);
+}
+
+function floorLayerKey(layer) {
+  const tierId = layer && layer.tier_id;
+  return !tierId || tierId === "__main__" ? "" : tierId;
+}
+
+function renderFloorMarkedList() {
+  const box = $("floorMarkedList");
+  if (!box) return;
+  const rows = [];
+  for (const layer of state.floorMap.layers || []) {
+    for (const region of layer.floor_regions || []) {
+      rows.push({ layer, region });
+    }
+  }
+  state.floorMarkedRows = rows;
+  const count = $("floorMarkedCount");
+  if (count) count.textContent = rows.length ? "（" + rows.length + "）" : "";
+  if (!rows.length) {
+    box.innerHTML = '<div class="floor-marked-empty">暂无已标记区间</div>';
+    return;
+  }
+  box.innerHTML = rows.map(({ layer, region }, index) => {
+    const cells = Array.isArray(region.cells) ? region.cells.length : 0;
+    const label = (layer.name || layer.tier_id) +
+      " · Y " + region.y_min + " ~ " + region.y_max +
+      " · " + cells + "格";
+    return '<div class="floor-marked-row">' +
+      "<span>" + label + "</span>" +
+      '<button type="button" data-floor-focus="' + index + '">定位</button>' +
+      '<button type="button" data-floor-remove="' + index + '">删除</button>' +
+      "</div>";
+  }).join("");
+}
+
+function focusFloorRegion(region) {
+  if (!region) return;
+  focusWorldBounds({
+    x0: Number(region.x0), x1: Number(region.x1),
+    z0: Number(region.z0), z1: Number(region.z1),
+  });
+}
+
+async function postFloorRegions(layer, regions) {
+  const [map, zoom] = (state.activeKey || "@").split("@");
+  const res = await fetch("/api/grid2d/floor-regions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      map, zoom, tier: floorLayerKey(layer), floor_regions: regions,
+    }),
+  }).then(response => response.json());
+  if (!res.ok) throw new Error(res.error || "保存失败");
+  return res;
+}
+
+async function removeFloorRegion(layer, region) {
+  if (!layer || !region) return;
+  try {
+    await postFloorRegions(
+      layer, (layer.floor_regions || []).filter(item => item !== region));
+    await loadFloorRegionMap(true);
+    await loadFloorOverlaps(true);
+    renderFloorMarkedList();
+    $("floorRegionStatus").textContent = "已删除 1 条已标记区间";
+  } catch (e) {
+    $("floorRegionStatus").textContent = e.message;
+  }
+}
+
+function fillFloorHeightFromSelection() {
+  const target = selectedFloorTarget();
+  if (!target) {
+    state.floorHighlight = { componentId: "", layerId: "" };
+    requestRender(RENDER_LAYERS.SELECTION);
+    return;
+  }
+  if (target.kind === "marking") {
+    const { layer, region } = target;
+    const key = floorMarkingKey(layer, region);
+    const changed = state.floorHighlight.componentId !== key;
+    state.floorHighlight.componentId = key;
+    state.floorHighlight.layerId = layer.tier_id;
+    populateFloorLayerSelect();
+    $("floorYMin").value = region.y_min;
+    $("floorYMax").value = region.y_max;
+    $("floorRegionStatus").textContent =
+      "已标记区间（" + (layer.name || layer.tier_id) + "）Y " +
+      region.y_min + " ~ " + region.y_max +
+      "；改完点“标记所选网格”覆盖，或点“清除所选网格区间”删除";
+    if (changed) focusFloorRegion(region);
+    requestRender(RENDER_LAYERS.SELECTION);
+    return;
+  }
+  const component = target.component;
+  const componentChanged =
+    state.floorHighlight.componentId !== component.id;
+  state.floorHighlight.componentId = component.id;
+  populateFloorLayerSelect();
+  const tierId = selectedFloorLayerId();
+  state.floorHighlight.layerId = tierId;
+  if (componentChanged) focusFloorComponent(component);
+  const layer = (state.floorMap.layers || [])
+    .find(item => item.tier_id === tierId);
+  const region = floorRegionForComponent(layer, component);
+  if (region) {
+    $("floorYMin").value = region.y_min;
+    $("floorYMax").value = region.y_max;
+    $("floorRegionStatus").textContent =
+      (component.resolved ? "该重合区各层都已标记；" : "") +
+      "此层已标记 Y " + region.y_min + " ~ " + region.y_max +
+      "（改完点“标记所选网格”即覆盖旧区间）；涉及 " +
+      component.layer_names.join(" / ");
+  } else {
+    const y = Number(lastPos && lastPos.y);
+    $("floorYMin").value = Number.isFinite(y) ? y - 20 : "";
+    $("floorYMax").value = Number.isFinite(y) ? y + 20 : "";
+    $("floorRegionStatus").textContent =
+      (component.resolved ? "该重合区各层都已标记；" : "") +
+      "此层尚未标记该重合区；涉及 " +
+      component.layer_names.join(" / ");
+  }
+  requestRender(RENDER_LAYERS.SELECTION);
+}
+
+function componentWorldCenter(component) {
+  const bounds = component && component.world_bounds;
+  if (!bounds) return null;
+  return [
+    (Number(bounds.x0) + Number(bounds.x1)) / 2,
+    (Number(bounds.z0) + Number(bounds.z1)) / 2,
+  ];
+}
+
+// 切换正在编辑的分层网格，切完再把原来选中的目标落回去。
+async function switchFloorTier(tierId, restore) {
+  const next = tierId || "";
+  if ((currentTierId() || "") === next) {
+    if (typeof restore === "function") restore();
+    return;
+  }
+  await setActiveTier(next);
+  await loadFloorRegionMap(true);
+  if (typeof restore === "function") restore();
+  else fillFloorHeightFromSelection();
+}
+
+function selectFloorComponentBySignature(component) {
+  const signature = [...component.layers].sort().join("|");
+  const options = (state.floorOverlap.components || [])
+    .filter(item => [...item.layers].sort().join("|") === signature);
+  if (!options.length) return null;
+  const center = componentWorldCenter(component);
+  if (!center) return options[0];
+  const distance = item => {
+    const other = componentWorldCenter(item);
+    return other
+      ? Math.hypot(other[0] - center[0], other[1] - center[1])
+      : Infinity;
+  };
+  return options.slice().sort((a, b) => distance(a) - distance(b))[0];
+}
+
+async function onFloorLayerChange() {
+  const target = selectedFloorTarget();
+  if (!target || target.kind !== "component") {
+    fillFloorHeightFromSelection();
+    return;
+  }
+  const tierId = selectedFloorLayerId();
+  const next = tierId === "__main__" ? "" : tierId;
+  if (next !== (currentTierId() || "")) {
+    const previous = target.component;
+    $("floorRegionStatus").textContent = "正在切换到该分层的网格…";
+    await switchFloorTier(next, () => {
+      const match = selectFloorComponentBySignature(previous);
+      if (match) $("floorComponent").value = "c:" + match.id;
+      fillFloorHeightFromSelection();
+    });
+    return;
+  }
+  fillFloorHeightFromSelection();
+}
+
+function restoreFloorTarget(value) {
+  const select = $("floorComponent");
+  if (!select) return false;
+  if ([...select.options].some(option => option.value === value)) {
+    select.value = value;
+    fillFloorHeightFromSelection();
+    return true;
+  }
+  return false;
+}
+
+async function onFloorTargetChange() {
+  const target = selectedFloorTarget();
+  if (target && target.kind === "marking") {
+    const tierId = target.layer.tier_id || "__main__";
+    const next = tierId === "__main__" ? "" : tierId;
+    if (next !== (currentTierId() || "")) {
+      const regionIndex = (target.layer.floor_regions || [])
+        .indexOf(target.region);
+      $("floorRegionStatus").textContent =
+        "正在切换到 " + (target.layer.name || tierId) + " 的网格…";
+      await switchFloorTier(next, () => {
+        if (restoreFloorTarget("m:" + tierId + ":" + regionIndex)) return;
+        // 换到该分层自己视角后，这条标记多半已被某个连通区认领，直接选中它。
+        const layer = (state.floorMap.layers || [])
+          .find(item => (item.tier_id || "__main__") === tierId);
+        const region = layer && (layer.floor_regions || [])[regionIndex];
+        const owner = region && (state.floorOverlap.components || [])
+          .find(component =>
+            floorRegionForComponent(layer, component) === region);
+        if (owner) $("floorComponent").value = "c:" + owner.id;
+        fillFloorHeightFromSelection();
+      });
+      return;
+    }
+  }
+  fillFloorHeightFromSelection();
+}
+
+function openFloorRegionDialog() {
+  if (!edit.mode && !link.mode) {
+    setStatus("请先进入网格或连接模式", "warning");
+    return;
+  }
+  const dialog = $("floorRegionDlg");
+  populateFloorComponentSelect();
+  fillFloorHeightFromSelection();
+  renderFloorMarkedList();
+  dialog.style.display = "block";
+}
+
+function closeFloorRegionDialog() {
+  $("floorRegionDlg").style.display = "none";
+  if (state.floorMap.key && state.floorMap.key !== mapKey) {
+    state.floorHighlight = { componentId: "", layerId: "" };
+  }
+  requestRender(RENDER_LAYERS.SELECTION);
+}
+
+function floorHeightFromInputs() {
+  const yMin = Number($("floorYMin").value);
+  const yMax = Number($("floorYMax").value);
+  if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) {
+    throw new Error("Y MIN/Y MAX 必须是有效数字");
+  }
+  if (yMin > yMax) throw new Error("Y MIN 不能大于 Y MAX");
+  return { y_min: yMin, y_max: yMax };
+}
+
+async function saveFloorRegion() {
+  const target = selectedFloorTarget();
+  if (!target) {
+    $("floorRegionStatus").textContent = "请先选择重合连通区或已标记区间";
+    return;
+  }
+  let height;
+  try {
+    height = floorHeightFromInputs();
+  } catch (e) {
+    $("floorRegionStatus").textContent = e.message;
+    return;
+  }
+  if (target.kind === "marking") {
+    const layer = target.layer;
+    const regions = (layer.floor_regions || []).map(item =>
+      item === target.region
+        ? { ...item, y_min: height.y_min, y_max: height.y_max }
+        : item);
+    try {
+      await postFloorRegions(layer, regions);
+      await loadFloorRegionMap(true);
+      await loadFloorOverlaps(true);
+      renderFloorMarkedList();
+      $("floorRegionStatus").textContent =
+        "已更新该标记为 Y " + height.y_min + " ~ " + height.y_max;
+    } catch (e) {
+      $("floorRegionStatus").textContent = e.message;
+    }
+    return;
+  }
+  const component = target.component;
+  const tierId = selectedFloorLayerId();
+  if (!tierId) {
+    $("floorRegionStatus").textContent = "请先选择重合网格";
+    return;
+  }
+  const [map, zoom] = (state.activeKey || "@").split("@");
+  const targetLayer = (state.floorMap.layers || [])
+    .find(item => item.tier_id === tierId);
+  const previous = floorRegionForComponent(targetLayer, component);
+  const replaceComponentIds = previous && previous.component_id
+    ? { [tierId]: [previous.component_id] }
+    : {};
+  try {
+    const res = await fetch("/api/grid2d/overlap-components/height", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        map,
+        zoom,
+        tier: currentGridKey(),
+        level_id: state.floorMap.levelId,
+        component_id: component.id,
+        assignments: [{
+          tier_id: tierId,
+          y_min: height.y_min,
+          y_max: height.y_max,
+        }],
+        replace_component_ids: replaceComponentIds,
+      }),
+    }).then(response => response.json());
+    if (!res.ok) throw new Error(res.error || "保存失败");
+    await loadFloorRegionMap(true);
+    await loadFloorOverlaps(true);
+    renderFloorMarkedList();
+    const remaining = unmarkedYellowComponents().length;
+    $("floorRegionStatus").textContent =
+      "已标记 " + (component.layer_names[component.layers.indexOf(tierId)] || tierId) +
+      " 的 Y " + height.y_min + " ~ " + height.y_max +
+      (remaining ? "；仍有 " + remaining + " 个黄色连通区未完成" : "；全部重合区已完成");
+    if (remaining) {
+      addLog("仍有 " + remaining + " 个黄色重合连通区未定义高度区间", "t-warn");
+    }
+  } catch (e) {
+    $("floorRegionStatus").textContent = e.message;
+  }
+}
+
+async function clearFloorRegions() {
+  const target = selectedFloorTarget();
+  if (!target) {
+    $("floorRegionStatus").textContent = "请先选择要清除的标记";
+    return;
+  }
+  let layer;
+  let regions;
+  if (target.kind === "marking") {
+    layer = target.layer;
+    regions = (layer.floor_regions || [])
+      .filter(item => item !== target.region);
+  } else {
+    const tierId = selectedFloorLayerId();
+    if (!tierId) {
+      $("floorRegionStatus").textContent = "请先选择要清除的重合网格";
+      return;
+    }
+    layer = (state.floorMap.layers || [])
+      .find(item => item.tier_id === tierId);
+    regions = (layer && layer.floor_regions || [])
+      .filter(item =>
+        !floorRegionForComponent({ floor_regions: [item] }, target.component));
+  }
+  try {
+    await postFloorRegions(layer, regions);
+    await loadFloorRegionMap(true);
+    await loadFloorOverlaps(true);
+    renderFloorMarkedList();
+    $("floorRegionStatus").textContent = target.kind === "marking"
+      ? "已删除该已标记区间"
+      : "已清除所选网格在此重合区的区间";
+  } catch (e) {
+    $("floorRegionStatus").textContent = e.message;
+  }
+}
+
+function worldRectPoints(rect, inv) {
+  const points = [
+    [rect.x0, rect.z0], [rect.x1, rect.z0],
+    [rect.x1, rect.z1], [rect.x0, rect.z1],
+  ];
+  return points.map(([x, z]) => [
+    inv[0][0] * x + inv[0][1] * z + inv[0][2],
+    inv[1][0] * x + inv[1][1] * z + inv[1][2],
+  ]);
+}
+
+function drawWorldRect(g, rect, inv, fill, stroke) {
+  const points = worldRectPoints(rect, inv);
+  g.beginPath();
+  g.moveTo(points[0][0], points[0][1]);
+  for (let i = 1; i < points.length; i++) g.lineTo(points[i][0], points[i][1]);
+  g.closePath();
+  g.fillStyle = fill;
+  g.fill();
+  g.strokeStyle = stroke;
+  g.lineWidth = 1 / mapView.scale;
+  g.stroke();
+  return points;
+}
+
+function endpointIsCurrent(endpoint) {
+  const [map] = (state.activeKey || "@").split("@");
+  return endpoint && endpoint.map === map &&
+    String(endpoint.tier || "") === currentTierId();
+}
+
+function linkKindLabel(kind) {
+  return {
+    stairs: "楼梯",
+    elevator: "电梯",
+    portal: "传送",
+    door: "门",
+    rope: "绳索",
+    other: "其他",
+  }[kind] || kind;
+}
+
+function drawLinkLayer() {
+  if (!linkCanvasEl || linkCanvasEl.width <= 1 || !calib.mapping) return;
+  const vis = visibleRect();
+  lctx.clearRect(vis.x, vis.y, vis.w, vis.h);
+  if (!state.layers.links) return;
+  const inv = calib.mapping.inverse_matrix;
+
+  const pending = [];
+  if (link.source) pending.push([link.source, "#76ff9f"]);
+  if (link.target) pending.push([link.target, "#66baff"]);
+  if (link.drag && link.drag.rect) {
+    const e = ed();
+    if (e) {
+      const r = link.drag.rect;
+      const rect = {
+        x0: e.origin[0] + r.x0 * e.cellSize,
+        z0: e.origin[1] + r.z0 * e.cellSize,
+        x1: e.origin[0] + (r.x1 + 1) * e.cellSize,
+        z1: e.origin[1] + (r.z1 + 1) * e.cellSize,
+      };
+      pending.push([{
+        map: state.activeKey.split("@")[0],
+        tier: currentTierId(),
+        rect,
+      }, link.stage === "target" ? "#66baff" : "#76ff9f"]);
+    }
+  }
+
+  for (const [endpoint, color] of pending) {
+    drawWorldRect(lctx, endpoint.rect, inv,
+      color + "33", color + "cc");
+  }
+
+  for (const item of state.gridLinks) {
+    const fromCurrent = endpointIsCurrent(item.from);
+    const toCurrent = endpointIsCurrent(item.to);
+    if (!fromCurrent && !toCurrent) continue;
+    const fp = drawWorldRect(lctx, item.from.rect, inv,
+      fromCurrent ? "rgba(118,255,159,0.24)" : "rgba(102,186,255,0.08)",
+      fromCurrent ? "rgba(118,255,159,0.9)" : "rgba(102,186,255,0.35)");
+    const tp = drawWorldRect(lctx, item.to.rect, inv,
+      toCurrent ? "rgba(102,186,255,0.24)" : "rgba(118,255,159,0.08)",
+      toCurrent ? "rgba(102,186,255,0.9)" : "rgba(118,255,159,0.35)");
+    const fc = fp.reduce((a, p) => [a[0] + p[0] / 4, a[1] + p[1] / 4], [0, 0]);
+    const tc = tp.reduce((a, p) => [a[0] + p[0] / 4, a[1] + p[1] / 4], [0, 0]);
+    const rope = item.kind === "rope";
+    lctx.save();
+    lctx.setLineDash(rope
+      ? [2 / mapView.scale, 3 / mapView.scale]
+      : [6 / mapView.scale, 4 / mapView.scale]);
+    lctx.strokeStyle = rope
+      ? "rgba(255,150,64,0.96)"
+      : "rgba(255,214,92,0.9)";
+    lctx.lineWidth = (rope ? 2 : 1.5) / mapView.scale;
+    lctx.beginPath();
+    lctx.moveTo(fc[0], fc[1]);
+    lctx.lineTo(tc[0], tc[1]);
+    lctx.stroke();
+    if (rope) {
+      lctx.setLineDash([]);
+      lctx.beginPath();
+      lctx.arc(tc[0], tc[1], 5 / mapView.scale, 0, Math.PI * 2);
+      lctx.stroke();
+      lctx.beginPath();
+      lctx.arc(tc[0], tc[1], 2.5 / mapView.scale, 0, Math.PI * 2);
+      lctx.fillStyle = "rgba(255,190,92,0.95)";
+      lctx.fill();
+    }
+    lctx.restore();
+  }
 }
 
 // 当前是否框选着格子（网格模式的快捷键要靠它决定"做事"还是"选工具"）
@@ -1111,6 +2346,7 @@ function applySelection(brush) {
   e.selRect = null;
   updateEditStats();
   requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
+  scheduleFloorOverlapLiveRefresh();
   const label = brush === "free" ? "填充 Free" : brush === "blocked" ? "填充 Blocked" : "填充 未知";
   addLog("已对选中的 " + total + " 格执行: " + label, "t-ok");
   updateSelBar();
@@ -1155,9 +2391,10 @@ function finishMarquee() {
 // 尺寸与摆放现在统一由 render() 里的 layoutLayer 负责。
 function syncEditCanvas() {
   const v = state.views.get(state.activeKey);
-  if (!edit.mode || !hasBounds(v)) {
+  if ((!edit.mode && !link.mode) || !hasBounds(v)) {
     editCanvasEl.width = 1; editCanvasEl.height = 1;
     selCanvasEl.width = 1; selCanvasEl.height = 1;
+    invalidateGridLayer();
   }
   requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
 }
@@ -1177,6 +2414,7 @@ function refreshAfterGridHistory() {
   updateEditStats();
   updateSelBar();
   requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
+  scheduleFloorOverlapLiveRefresh();
 }
 
 function undoGridEdit() {
@@ -1304,6 +2542,7 @@ function flushPaintFrame() {
   setGridDirty(true);
   updateEditStats();
   render(RENDER_LAYERS.GRID);
+  scheduleFloorOverlapLiveRefresh();
 }
 
 function queuePaintFrame() {
@@ -1327,15 +2566,17 @@ function adoptViewEdit(v) {
 async function loadGrid2D(force) {
   const wantKey = state.activeKey;
   const [map, zoom] = (state.activeKey || "").split("@");
-  const v = state.views.get(state.activeKey);
-  if (!map || !zoom || !v) return;
+  if (!map || !zoom) return;
+  const v = state.views.get(state.activeKey) || getView(map, zoom);
   if (!v.edit) {
-    v.edit = new GridDocument();
+    v.edit = new GridDocument({ sourceTier: currentTierId() });
   }
   if (v.edit.loaded && !force) { adoptViewEdit(v); return; }
   const previousDocument = v.edit;
   try {
-    const { document, response: res } = await loadGridDocument(map, zoom);
+    const { document, response: res } = await loadGridDocument(
+      map, zoom, currentTierId(),
+    );
     if (document) {
       gridRasterCache.clear(previousDocument);
       v.edit = document;
@@ -1354,7 +2595,7 @@ async function loadGrid2D(force) {
       }
     } else {
       gridRasterCache.clear(previousDocument);
-      v.edit = new GridDocument();
+      v.edit = new GridDocument({ sourceTier: currentTierId() });
       if (state.activeKey === wantKey) {
         $("editStatus").innerHTML = "无已存网格（origin=[0,0], cell_size=1；保存时按已涂格子的范围定 origin）";
       }
@@ -1373,6 +2614,8 @@ async function loadGrid2D(force) {
   if (state.activeKey === wantKey) {
     adoptViewEdit(v);
     setGridDirty(false);
+    if (edit.mode || link.mode) void loadFloorRegionMap(true);
+    scheduleFloorOverlapLiveRefresh();
   }
 }
 
@@ -1385,8 +2628,10 @@ function setEditMode(on) {
   edit.mode = on;
   if (on) {
     if (pick.mode) setPickMode(false);
+    if (link.mode) setLinkMode(false);
     setCalibMode(false);
     loadGrid2D(false);
+    void loadFloorRegionMap(true);
     canvasWrap.style.cursor = "crosshair";
     setStatus("网格编辑：左键拖动涂色，Shift+左键框选，右键拖动平移，滚轮缩放", "active");
   } else {
@@ -1397,10 +2642,178 @@ function setEditMode(on) {
     clearSelection();
     editCanvasEl.width = 1; editCanvasEl.height = 1;   // 清掉覆盖层
     selCanvasEl.width = 1; selCanvasEl.height = 1;
+    invalidateGridLayer();
     canvasWrap.style.cursor = "";
     setStatus("已退出网格编辑");
   }
   syncModeChrome();
+}
+
+function endpointLabel(endpoint) {
+  if (!endpoint) return "未选择";
+  if (!endpoint.tier) return `${mapDisplayName(endpoint.map)} / 大地图`;
+  const layer = [...state.tierCatalogs.values()]
+    .flat()
+    .find(item => item.id === endpoint.tier);
+  const tier = layer ? `${layer.level_name} · ${layer.name}` : endpoint.tier;
+  return `${mapDisplayName(endpoint.map)} / ${tier}`;
+}
+
+function endpointFromRect(rect) {
+  const e = ed();
+  const [map] = (state.activeKey || "@").split("@");
+  if (!e || !map) return null;
+  return {
+    map,
+    tier: currentTierId(),
+    rect: {
+      x0: e.origin[0] + rect.x0 * e.cellSize,
+      z0: e.origin[1] + rect.z0 * e.cellSize,
+      x1: e.origin[0] + (rect.x1 + 1) * e.cellSize,
+      z1: e.origin[1] + (rect.z1 + 1) * e.cellSize,
+    },
+  };
+}
+
+function clearLinkDraft() {
+  link.source = null;
+  link.target = null;
+  link.drag = null;
+  link.editingId = null;
+  link.stage = "source";
+  updateLinkEditorUi();
+  renderLinkList();
+  requestRender(RENDER_LAYERS.LINK);
+}
+
+function setLinkStage(stage) {
+  link.stage = stage === "target" ? "target" : "source";
+  updateLinkEditorUi();
+  requestRender(RENDER_LAYERS.LINK);
+}
+
+function updateLinkEditorUi() {
+  $("btnLinkSource").classList.toggle("on", link.stage === "source");
+  $("btnLinkTarget").classList.toggle("on", link.stage === "target");
+  $("btnLinkSource").textContent = link.source ? "重选起点" : "选起点";
+  $("btnLinkTarget").textContent = link.target ? "重选终点" : "选终点";
+  $("btnLinkSave").disabled = !(link.source && link.target);
+  $("linkEditStatus").textContent =
+    "起点 " + endpointLabel(link.source) +
+    " · 终点 " + endpointLabel(link.target);
+}
+
+function setLinkMode(on) {
+  if (on && (!calib.mapping || !calib.key || calib.key !== state.activeKey)) {
+    setStatus("请先完成该地图标定，才能编辑跨层连接", "warning");
+    syncModeChrome();
+    return;
+  }
+  link.mode = on;
+  if (on) {
+    if (edit.mode) setEditMode(false);
+    if (pick.mode) setPickMode(false);
+    setCalibMode(false);
+    link.stage = "source";
+    loadGrid2D(false);
+    void loadFloorRegionMap(true);
+    void loadGridLinks();
+    canvasWrap.style.cursor = "crosshair";
+    setStatus("连接模式：选择起点区域，切换分层后选择终点区域", "active");
+  } else {
+    link.drag = null;
+    link.source = null;
+    link.target = null;
+    link.editingId = null;
+    editCanvasEl.width = 1;
+    editCanvasEl.height = 1;
+    invalidateGridLayer();
+    gridBoundsEl.style.display = "none";
+    linkCanvasEl.width = 1;
+    linkCanvasEl.height = 1;
+    canvasWrap.style.cursor = "";
+    updateLinkEditorUi();
+    setStatus("已退出连接模式");
+  }
+  syncModeChrome();
+}
+
+async function loadGridLinks() {
+  const [map] = (state.activeKey || "@").split("@");
+  if (!map) return;
+  try {
+    const res = await fetch("/api/grid-links?map=" + encodeURIComponent(map)).then(r => r.json());
+    state.gridLinks = res.ok ? (res.links || []) : [];
+    $("linkListStatus").textContent = res.ok
+      ? `本图 ${state.gridLinks.length} 条连接`
+      : ("读取失败: " + (res.error || "未知错误"));
+  } catch (e) {
+    state.gridLinks = [];
+    $("linkListStatus").textContent = "读取失败: " + e.message;
+  }
+  renderLinkList();
+  requestRender(RENDER_LAYERS.LINK);
+}
+
+function renderLinkList() {
+  const box = $("linkList");
+  if (!box) return;
+  box.innerHTML = "";
+  for (const item of state.gridLinks) {
+    const row = document.createElement("div");
+    row.className = "link-row";
+    const text = document.createElement("div");
+    text.innerHTML =
+      "<b>" + endpointLabel(item.from) + "</b> → <b>" +
+      endpointLabel(item.to) + "</b><br><small>" +
+      linkKindLabel(item.kind) + " · " + (item.bidirectional ? "双向" : "单向") +
+      " · cost " + item.cost + "</small>";
+    const del = document.createElement("button");
+    del.textContent = "删除";
+    del.onclick = () => void deleteGridLink(item.id);
+    row.append(text, del);
+    box.appendChild(row);
+  }
+}
+
+async function saveGridLink() {
+  if (!link.source || !link.target) return;
+  const payload = {
+    id: link.editingId || undefined,
+    from: link.source,
+    to: link.target,
+    kind: $("linkKind").value,
+    bidirectional: $("linkBidirectional").checked,
+    cost: parseFloat($("linkCost").value) || 1,
+  };
+  try {
+    const res = await fetch("/api/grid-links", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(r => r.json());
+    if (!res.ok) throw new Error(res.error || "保存失败");
+    addLog("已保存分层连接: " + res.link.id, "t-ok");
+    link.source = null;
+    link.target = null;
+    link.editingId = null;
+    link.stage = "source";
+    await loadGridLinks();
+    updateLinkEditorUi();
+  } catch (e) {
+    addLog("保存分层连接失败: " + e.message, "t-err");
+  }
+}
+
+async function deleteGridLink(linkId) {
+  try {
+    const res = await fetch("/api/grid-links/" + encodeURIComponent(linkId),
+                            { method: "DELETE" }).then(r => r.json());
+    if (!res.ok) throw new Error(res.error || "删除失败");
+    await loadGridLinks();
+  } catch (e) {
+    addLog("删除分层连接失败: " + e.message, "t-err");
+  }
 }
 
 const D8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
@@ -1492,12 +2905,53 @@ function connectivityWarning(e) {
   return parts.join("；");
 }
 
+function unmarkedYellowComponents() {
+  return (state.floorOverlap.components || []).filter(component =>
+    component.severity === "xz_only" && !component.resolved
+  );
+}
+
+function confirmUnmarkedYellowComponents(components) {
+  return new Promise(resolve => {
+    const dialog = $("overlapWarningDlg");
+    const list = $("overlapWarningList");
+    const names = components.slice(0, 8).map((component, index) =>
+      "连通区 " + (index + 1) + "：" +
+      component.cells.length + " 格，" +
+      component.layer_names.join(" / ")
+    );
+    if (components.length > names.length) {
+      names.push("另有 " + (components.length - names.length) + " 个未标注连通区");
+    }
+    list.innerHTML = names.map(text => "<div>" + text + "</div>").join("");
+    dialog.style.display = "block";
+    $("overlapWarningContinue").onclick = () => {
+      dialog.style.display = "none";
+      resolve(true);
+    };
+    $("overlapWarningCancel").onclick = () => {
+      dialog.style.display = "none";
+      resolve(false);
+    };
+  });
+}
+
 async function saveGrid2D() {
   const [map, zoom] = (state.activeKey || "").split("@");
   const e = ed();
   if (!map || !zoom || !e) { addLog("没有可保存的网格数据", "t-err"); return; }
+  await loadFloorRegionMap(true);
+  await loadFloorOverlaps(true);
+  const unmarked = unmarkedYellowComponents();
+  if (unmarked.length) {
+    const proceed = await confirmUnmarkedYellowComponents(unmarked);
+    if (!proceed) {
+      setStatus("仍有 " + unmarked.length + " 个黄色连通区未标注高度", "warning");
+      return;
+    }
+  }
   try {
-    const res = await saveGridDocument(map, zoom, e);
+    const res = await saveGridDocument(map, zoom, currentTierId(), e);
     if (!res.ok) { addLog("保存网格失败: " + res.error, "t-err"); return; }
     // 服务端按"原范围 ∪ 已涂格子"定最终范围，可能平移了下标基准；
     // 把内存模型同步过去，连续保存才不会漂移、也不会把范围缩回去
@@ -1625,6 +3079,7 @@ function hidePickMarker() {
 
 function setPickMode(on) {
   if (on) {
+    if (link.mode) setLinkMode(false);
     setCalibMode(false);
     setEditMode(false);
   }
@@ -1649,7 +3104,11 @@ async function ensurePickRef() {
   v.pickRefPending = (async () => {
     try {
       const [map, zoom] = (state.activeKey || "").split("@");
-      const resp = await fetch("/api/grid2d?map=" + encodeURIComponent(map) + "&zoom=" + encodeURIComponent(zoom));
+      const resp = await fetch(
+        "/api/grid2d?map=" + encodeURIComponent(map) +
+        "&zoom=" + encodeURIComponent(zoom) +
+        "&tier=" + encodeURIComponent(currentTierId()),
+      );
       const res = await resp.json();
       if (res.data && res.data.origin && res.data.cell_size) {
         v.pickRef = { origin: [res.data.origin[0], res.data.origin[2]], cellSize: res.data.cell_size };
@@ -1774,6 +3233,148 @@ async function startMarks() {
   renderMarksPanel();
 }
 
+// ---------------- 玩家位置流（官方地图 WS） ----------------
+// 服务端直接连 wss://ws.skland.com/.../endfield/map，这里只读状态、控制启停。
+function syncMapSelectors(mapId, preferredZoom = "") {
+  const zooms = (state.tileMaps[mapId] || []).slice().sort((a, b) => +a - +b);
+  const selM = $("selMap"), selZ = $("selZoom");
+  if (!zooms.length || !selM || !selZ) return null;
+  selM.value = mapId;
+  selZ.innerHTML = "";
+  for (const zoom of zooms) {
+    const option = document.createElement("option");
+    option.value = zoom;
+    option.textContent = zoom;
+    selZ.appendChild(option);
+  }
+  const wanted = preferredZoom && zooms.includes(String(preferredZoom))
+    ? String(preferredZoom)
+    : String(zooms[zooms.length - 1]);
+  selZ.value = wanted;
+  return wanted;
+}
+
+async function syncPositionLocation(data) {
+  if (!data || typeof data !== "object") return;
+  const mapId = String(data.mapId || "").trim();
+  const levelId = String(data.levelId || "").trim();
+  if (!mapId) return;
+  const locationKey = mapId + "|" + levelId;
+  if (locationKey === state.positionView.appliedKey) return;
+
+  const currentKey = state.activeKey || "";
+  const currentMap = currentKey.split("@")[0] || "";
+  if (currentMap !== mapId && (edit.mode || link.mode) && edit.dirty) {
+    setStatus("实时位置已进入 " + mapDisplayName(mapId) +
+              "，请先保存当前网格再自动切换地图", "warning");
+    state.positionView.appliedKey = locationKey;
+    return;
+  }
+
+  const requestId = ++state.positionView.requestId;
+  const currentZoom = currentKey.split("@")[1] || "";
+  const zoom = syncMapSelectors(
+    mapId, currentMap === mapId ? currentZoom : "",
+  );
+  if (!zoom) {
+    addLog("实时位置地图不在本地列表中: " + mapId, "t-warn");
+    return;
+  }
+
+  const key = viewKey(mapId, zoom);
+  if (state.activeKey !== key) {
+    await openSelectedMap({ preserveFollow: true });
+  }
+  if (requestId !== state.positionView.requestId || state.activeKey !== key) return;
+
+  if (!(calib.mapping && calib.key === key)) {
+    await loadMappingForCurrent();
+  }
+  if (requestId !== state.positionView.requestId || state.activeKey !== key) return;
+
+  await loadTierCatalog();
+  if (requestId !== state.positionView.requestId || state.activeKey !== key) return;
+
+  const activeTierId = currentTierId();
+  const floorStatus = String(data.gridFloorStatus || "");
+  let targetTierId = activeTierId;
+  if (floorStatus === "unique") {
+    targetTierId = String(data.gridTierId || "");
+  } else if (floorStatus === "main") {
+    targetTierId = "";
+  } else if (floorStatus === "ambiguous") {
+    addLog("WS 三维位置命中多个网格楼层，保持当前楼层不自动切换", "t-warn");
+    state.positionView.appliedKey = locationKey;
+    return;
+  } else if (floorStatus === "no_grid" || floorStatus === "no_match") {
+    addLog("当前区域没有可匹配的网格高度区间，保持当前楼层", "t-warn");
+    state.positionView.appliedKey = locationKey;
+    return;
+  }
+
+  if (targetTierId && !state.layers.tier) {
+    state.layers.tier = true;
+    $("layerTier").checked = true;
+    requestRender(RENDER_LAYERS.BASE);
+  }
+  if (targetTierId !== activeTierId) {
+    await setActiveTier(targetTierId);
+  }
+  if (requestId !== state.positionView.requestId || state.activeKey !== key) return;
+  state.positionView.appliedKey = locationKey;
+  updatePlayerMarker(data.pos || data);
+}
+
+async function loadPositionStatus() {
+  try {
+    state.position = await (await fetch("/api/position/status")).json();
+  } catch (e) { /* 拿不到就保持原样，不打断页面 */ }
+  renderPositionPanel();
+}
+
+function renderPositionPanel() {
+  const p = state.position;
+  const el = $("posStreamState");
+  if (!p || !el) return;
+  let line;
+  if (p.connected) {
+    line = '位置流: <b class="t-ok">已连接</b>';
+    if (p.last_position) {
+      const q = p.last_position;
+      line += ' <span class="t-time">(' + q.x.toFixed(1) + ", " + q.z.toFixed(1) + ")</span>";
+    }
+  } else if (!p.credential_ready) {
+    line = '位置流: <b class="t-warn">缺凭证</b> —— 需要 configs/hg_content.txt';
+  } else if (p.running) {
+    line = "位置流: 连接中…";
+  } else {
+    line = "位置流: 未开启";
+  }
+  if (!p.connected && p.last_error) {
+    line += '<br><span class="t-err">' + p.last_error + "</span>";
+  }
+  el.innerHTML = line;
+  const btn = $("btnPosToggle");
+  if (btn) btn.textContent = p.running ? "停止位置流" : "开启位置流";
+  const chk = $("chkWs");
+  if (chk) chk.checked = !!p.running;
+  const dot = $("wsDot");
+  if (dot) dot.classList.toggle("on", !!p.connected);
+}
+
+async function togglePositionStream() {
+  const on = !(state.position && state.position.running);
+  if (on) state.positionView.appliedKey = "";
+  try {
+    const res = await (await fetch("/api/position/" + (on ? "start" : "stop"),
+      { method: "POST" })).json();
+    if (!res.ok) addLog("位置流操作失败: " + (res.error || "未知错误"), "t-err");
+  } catch (e) {
+    addLog("位置流请求失败: " + e.message, "t-err");
+  }
+  await loadPositionStatus();
+}
+
 // ---------------- 标记图层（把图标画到地图上） ----------------
 // 标记是世界坐标 (x,y,z)，要靠标定矩阵换算成像素；没标定的图没法画。
 // 跟瓦片一样"只画可见范围 + 设缩放下限"——map01@4 有 2414 个点，不设限会糊满屏。
@@ -1782,8 +3383,10 @@ const markBadges = new Map();     // 图标文件名 -> 合成好的徽章画布
 const MARK_MIN_SCALE = 0.12;      // 低于此缩放不画（与瓦片的 600 张阈值同量级）
 const MARK_BADGE_PX = 40;         // 徽章直径（**屏幕像素**，与缩放无关）
 const MARK_POINTER_PX = 8;        // 底部小三角高度（屏幕像素）
+const MARK_BUCKET_SIZE = 256;     // 世界坐标空间索引格子
 const DEFAULT_MARK_MAIN_TYPE = "地图探索";
-const DEFAULT_MARK_NAMES = new Set(["协议传送点", "次级核心", "协议核心"]);
+const DEFAULT_MARK_NAMES = new Set(["协议传送点", "次级核心", "协议核心", "分层入口"]);
+const LAYER_ENTRANCE_TID = "feec2fbd748b3d10131a07971b25baf2";
 
 function showMarks() { return !!(state.markers && state.markers.points.length); }
 
@@ -1798,6 +3401,53 @@ function defaultHiddenMarkTids(markers) {
     hidden.add(tid);
   }
   return hidden;
+}
+
+function buildMarkerIndex(points) {
+  const buckets = new Map();
+  for (const point of points || []) {
+    const cx = Math.floor(Number(point[1]) / MARK_BUCKET_SIZE);
+    const cz = Math.floor(Number(point[3]) / MARK_BUCKET_SIZE);
+    const key = cx + "," + cz;
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = [];
+      buckets.set(key, bucket);
+    }
+    bucket.push(point);
+  }
+  return buckets;
+}
+
+function markerCandidates(vis, matrix) {
+  const markerData = state.markers;
+  if (!markerData || !markerData.index || !matrix) return markerData ? markerData.points : [];
+  const corners = [
+    [vis.x, vis.y],
+    [vis.x + vis.w, vis.y],
+    [vis.x, vis.y + vis.h],
+    [vis.x + vis.w, vis.y + vis.h],
+  ].map(([px, py]) => [
+    matrix[0][0] * px + matrix[0][1] * py + matrix[0][2],
+    matrix[1][0] * px + matrix[1][1] * py + matrix[1][2],
+  ]);
+  const minX = Math.min(...corners.map(item => item[0]));
+  const maxX = Math.max(...corners.map(item => item[0]));
+  const minZ = Math.min(...corners.map(item => item[1]));
+  const maxZ = Math.max(...corners.map(item => item[1]));
+  const cx0 = Math.floor(minX / MARK_BUCKET_SIZE) - 1;
+  const cx1 = Math.floor(maxX / MARK_BUCKET_SIZE) + 1;
+  const cz0 = Math.floor(minZ / MARK_BUCKET_SIZE) - 1;
+  const cz1 = Math.floor(maxZ / MARK_BUCKET_SIZE) + 1;
+  if ((cx1 - cx0 + 1) * (cz1 - cz0 + 1) > 4096) return markerData.points;
+  const out = [];
+  for (let cz = cz0; cz <= cz1; cz++) {
+    for (let cx = cx0; cx <= cx1; cx++) {
+      const bucket = markerData.index.get(cx + "," + cz);
+      if (bucket) out.push(...bucket);
+    }
+  }
+  return out;
 }
 
 // 图标以**中文名**落盘（如「供电设备.png」），多个 templateId 可能指向同一个文件，
@@ -1856,7 +3506,8 @@ async function loadMarkers() {
       const res = await (await fetch("/api/marks/data?map=" + encodeURIComponent(map))).json();
       if (state.activeKey !== key) return;     // 期间切图了，丢弃
       state.markers = { key, templates: res.templates || {},
-                        points: res.points || [], loaded: true };
+                        points: res.points || [], loaded: true,
+                        index: buildMarkerIndex(res.points || []) };
       state.markHidden = defaultHiddenMarkTids(state.markers);
     } catch (e) {
       addLog("标记数据加载失败: " + e.message, "t-warn");
@@ -1884,6 +3535,7 @@ function drawMarkers(g) {
   const inv = (calib.mapping && calib.key === state.activeKey)
     ? calib.mapping.inverse_matrix : null;
   if (!inv) return;                          // 没标定就拿不到 世界→像素
+  const matrix = calib.mapping.matrix;
 
   // 1/scale 把"屏幕像素"折算成 holder 单位：画布整体被缩放 s，holder 尺寸 × s
   // 才是屏幕尺寸。这样无论缩放多少，徽章在屏幕上都一样大。
@@ -1893,7 +3545,7 @@ function drawMarkers(g) {
   const pw = ph * 0.85;
   const padTop = d + ph;                     // 剔除时留出整个徽章的高度（往上长）
 
-  for (const [tid, wx, _wy, wz] of m.points) {
+  for (const [tid, wx, _wy, wz] of markerCandidates(vis, matrix)) {
     const info = m.templates[tid];
     if (!info || state.markHidden.has(tid)) continue;   // 选择器里逐个关掉的
     const px = inv[0][0] * wx + inv[0][1] * wz + inv[0][2];
@@ -1970,7 +3622,7 @@ function buildMarkPicker() {
 
 function renderMpCats() {
   $("mpCats").innerHTML = state.mpCats.map(([cat, items]) => {
-    const n = items.reduce((a, x) => a + x.n, 0);
+    const n = items.length;
     return '<button class="mp-cat' + (cat === state.mpCat ? " on" : "") +
            '" data-cat="' + cat + '"><span>' + cat + '</span>' +
            '<span class="mp-n">' + n + "</span></button>";
@@ -2055,19 +3707,22 @@ function updateMarksHint() {
 // 徽章是**画在画布上的**（不是 DOM），所以得自己做命中测试：把点击位置换算成
 // holder 坐标，再看落不落在某个徽章的圆里（圆心在锚点上方 ph + r 处）。
 function hitTestMarker(clientX, clientY) {
+  if (!state.layers.markers) return null;
   if (!showMarks()) return null;
   const s = mapView.scale;
   if (s < MARK_MIN_SCALE) return null;     // 这个缩放下根本没画，别误判
   const inv = (calib.mapping && calib.key === state.activeKey)
     ? calib.mapping.inverse_matrix : null;
   if (!inv) return null;
+  const matrix = calib.mapping.matrix;
   const rect = canvasWrap.getBoundingClientRect();
   const hx = (clientX - rect.left - mapView.panX) / s;
   const hy = (clientY - rect.top - mapView.panY) / s;
   const r = (MARK_BADGE_PX / s) / 2;
   const ph = MARK_POINTER_PX / s;
   let best = null, bestD = Infinity;
-  for (const [tid, wx, , wz] of state.markers.points) {
+  const vis = visibleRect();
+  for (const [tid, wx, , wz] of markerCandidates(vis, matrix)) {
     const info = state.markers.templates[tid];
     if (!info || state.markHidden.has(tid)) continue;
     const px = inv[0][0] * wx + inv[0][1] * wz + inv[0][2];
@@ -2078,8 +3733,19 @@ function hitTestMarker(clientX, clientY) {
   return best;
 }
 
+function openLayerEntranceFromEvent(e) {
+  if (e.button !== 0) return false;
+  const hit = hitTestMarker(e.clientX, e.clientY);
+  if (!hit || hit.tid !== LAYER_ENTRANCE_TID) return false;
+  showMarkTip(null);
+  void showLayerEntrancePicker(hit);
+  e.preventDefault();
+  return true;
+}
+
 function showMarkTip(hit) {
   const el = $("markTip");
+  el.classList.remove("interactive");
   if (!hit) { el.style.display = "none"; return; }
   const info = state.markers.templates[hit.tid];
   const s = mapView.scale;
@@ -2100,6 +3766,44 @@ function showMarkTip(hit) {
   el.style.left = (hit.px * s + mapView.panX) + "px";
   el.style.top = ((hit.py - MARK_POINTER_PX / s) * s + mapView.panY - 8) + "px";
   el.style.display = "block";
+}
+
+async function showLayerEntrancePicker(hit) {
+  const key = state.activeKey;
+  if (!key || !hit) return;
+  await loadTierCatalog();
+  if (state.activeKey !== key) return;
+
+  const picked = pickLayerGroup(currentTierCatalog(), hit.wx, hit.wz);
+  if (!picked) {
+    showMarkTip(hit);
+    return;
+  }
+
+  const el = $("markTip");
+  const s = mapView.scale;
+  const activeId = state.activeTier && state.activeTier.key === key
+    ? state.activeTier.id : "";
+  const options = picked.layers.map(layer =>
+    '<button type="button" class="mark-layer-option' +
+    (layer.id === activeId ? " active" : "") +
+    '" data-tier="' + layer.id + '">' + layer.name + "</button>"
+  ).join("");
+  el.innerHTML =
+    '<div class="mark-layer-title">' + picked.group + " · 分层入口</div>" +
+    '<div class="mark-layer-list">' + options + "</div>" +
+    '<button type="button" class="mark-layer-option quiet" data-tier="">退出分层</button>';
+  el.classList.add("interactive");
+  el.style.left = (hit.px * s + mapView.panX) + "px";
+  el.style.top = ((hit.py - MARK_POINTER_PX / s) * s + mapView.panY - 8) + "px";
+  el.style.display = "block";
+
+  el.querySelectorAll("[data-tier]").forEach(button => {
+    button.onclick = async () => {
+      await setActiveTier(button.dataset.tier);
+      await showLayerEntrancePicker(hit);
+    };
+  });
 }
 
 function setBusyFetch(b) {
@@ -2172,6 +3876,10 @@ async function handleEvent(evt) {
           { new: 0, updated: 0, unchanged: 0, skipped: 0, error: 0 },
           evt.service.fetch.counts);
         updateCounts();
+      }
+      if (evt.service.position) {
+        state.position = evt.service.position;
+        renderPositionPanel();
       }
       break;
     case "tile": {
@@ -2265,23 +3973,388 @@ async function handleEvent(evt) {
       {
         const d = evt.data || {};
         const pos = d.pos || d;
-        if (pos && pos.x != null && pos.z != null) updatePlayerMarker({ x: pos.x, z: pos.z });
+        if (pos && pos.x != null && pos.z != null) {
+          updatePlayerMarker({ x: pos.x, y: pos.y, z: pos.z });
+        }
+        void syncPositionLocation(d);
       }
+      break;
+    case "position_state":
+      state.position = evt.state;
+      renderPositionPanel();
       break;
   }
 }
 
 // ---------------- UI 绑定 ----------------
+function currentTierCatalog() {
+  return state.tierCatalogs.get(state.activeKey) || [];
+}
+
+function currentTierId() {
+  return state.activeTier && state.activeTier.key === state.activeKey
+    ? state.activeTier.id : "";
+}
+
+function syncTierControls() {
+  const sel = $("selTier");
+  if (!sel) return;
+  const layers = currentTierCatalog();
+  const calibrated = !!(calib.mapping && calib.key === state.activeKey);
+  sel.disabled = state.tierLoading || !layers.length || !calibrated;
+  if (!layers.length) {
+    sel.title = "当前底图没有内置的官方分层目录";
+  } else if (!calibrated) {
+    sel.title = "需先标定当前地图，才能把分层图片和底图对齐";
+  } else {
+    sel.title = "选择官方分层图片";
+  }
+}
+
+function populateTierSelect() {
+  const sel = $("selTier");
+  if (!sel) return;
+  const layers = currentTierCatalog();
+  const activeId = state.activeTier && state.activeTier.key === state.activeKey
+    ? state.activeTier.id : "";
+  sel.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "关闭";
+  sel.appendChild(none);
+  const appendGroup = (label, items, textOf) => {
+    if (!items.length) return;
+    const group = document.createElement("optgroup");
+    group.label = label;
+    for (const layer of items) {
+      const option = document.createElement("option");
+      option.value = layer.id;
+      option.textContent = textOf(layer);
+      option.title = [
+        layer.map_display_name,
+        layer.level_name,
+        layer.group,
+        layer.name,
+      ].filter(Boolean).join(" / ");
+      group.appendChild(option);
+    }
+    sel.appendChild(group);
+  };
+  appendGroup(
+    "分层地图",
+    layers.filter(layer => layer.map_category !== "independent"),
+    layer => layer.level_name + " · " + layer.name,
+  );
+  appendGroup(
+    "独立地图",
+    layers.filter(layer => layer.map_category === "independent"),
+    layer => layer.group + " · " + layer.name,
+  );
+  sel.value = activeId;
+  syncTierControls();
+}
+
+function closeTierBitmap(tier) {
+  if (!tier) return;
+  for (const bitmap of [tier.bitmap, tier.preview]) {
+    if (bitmap && typeof bitmap.close === "function") bitmap.close();
+  }
+}
+
+async function decodeTierBitmap(blob, meta, maxEdge = 0) {
+  if (!window.createImageBitmap) return await loadImageFromBlob(blob);
+  const width = Number(meta.width) || 0;
+  const height = Number(meta.height) || 0;
+  const longest = Math.max(width, height);
+  if (!maxEdge || !longest || longest <= maxEdge) {
+    return await createImageBitmap(blob);
+  }
+  const scale = maxEdge / longest;
+  return await createImageBitmap(blob, {
+    resizeWidth: Math.max(1, Math.round(width * scale)),
+    resizeHeight: Math.max(1, Math.round(height * scale)),
+    resizeQuality: "high",
+  });
+}
+
+function syncTierResolution() {
+  const tier = state.activeTier;
+  if (!tier || tier.key !== state.activeKey || !tier.blob) return;
+  if (mapView.scale >= TIER_FULL_MIN_SCALE &&
+      !tier.bitmap && !tier.fullLoading) {
+    tier.fullLoading = true;
+    const requestId = state.tierRequestId;
+    decodeTierBitmap(tier.blob, tier.meta).then(bitmap => {
+      if (requestId !== state.tierRequestId || state.activeTier !== tier) {
+        if (bitmap && typeof bitmap.close === "function") bitmap.close();
+        return;
+      }
+      if (mapView.scale < TIER_FULL_RELEASE_SCALE) {
+        if (bitmap && typeof bitmap.close === "function") bitmap.close();
+        tier.fullLoading = false;
+        return;
+      }
+      tier.bitmap = bitmap;
+      if (tier.preview && typeof tier.preview.close === "function") {
+        tier.preview.close();
+      }
+      tier.preview = null;
+      tier.previewLoading = false;
+      tier.fullLoading = false;
+      requestRender(RENDER_LAYERS.BASE);
+    }).catch(e => {
+      tier.fullLoading = false;
+      addLog("分层高清图加载失败: " + e.message, "t-warn");
+    });
+  } else if (mapView.scale < TIER_FULL_RELEASE_SCALE && tier.bitmap) {
+    if (typeof tier.bitmap.close === "function") tier.bitmap.close();
+    tier.bitmap = null;
+    tier.fullLoading = false;
+    requestRender(RENDER_LAYERS.BASE);
+  }
+  if (mapView.scale < TIER_FULL_MIN_SCALE &&
+      !tier.preview && !tier.previewLoading) {
+    tier.previewLoading = true;
+    const requestId = state.tierRequestId;
+    decodeTierBitmap(tier.blob, tier.meta, TIER_PREVIEW_MAX).then(preview => {
+      if (requestId !== state.tierRequestId || state.activeTier !== tier) {
+        if (preview && typeof preview.close === "function") preview.close();
+        return;
+      }
+      tier.preview = preview;
+      tier.previewLoading = false;
+      requestRender(RENDER_LAYERS.BASE);
+    }).catch(() => {
+      tier.previewLoading = false;
+    });
+  }
+}
+
+function clearActiveTier(render = true, key = state.activeKey) {
+  state.tierRequestId++;
+  state.tierLoading = false;
+  if (state.activeTier) closeTierBitmap(state.activeTier);
+  state.activeTier = null;
+  const v = state.views.get(key);
+  if (v) v.tierId = null;
+  if (render && state.activeKey) requestRender(RENDER_LAYERS.BASE);
+  populateTierSelect();
+}
+
+async function loadTierCatalog() {
+  const key = state.activeKey;
+  if (!key) return;
+  if (state.tierCatalogs.has(key)) {
+    populateTierSelect();
+    return;
+  }
+  const [map, zoom] = key.split("@");
+  try {
+    const resp = await fetch("/api/layers?map=" + encodeURIComponent(map) +
+                             "&zoom=" + encodeURIComponent(zoom));
+    const res = await resp.json();
+    if (!resp.ok || res.ok === false) {
+      throw new Error(res.error || ("HTTP " + resp.status));
+    }
+    state.tierCatalogs.set(key, Array.isArray(res.layers) ? res.layers : []);
+  } catch (e) {
+    addLog("加载分层目录失败: " + e.message, "t-err");
+    state.tierCatalogs.set(key, []);
+  }
+  if (state.activeKey === key) populateTierSelect();
+  renderLinkList();
+}
+
+async function loadFloorRegionMap(force = false) {
+  const key = state.activeKey;
+  if (!key) return;
+  await loadTierCatalog();
+  const activeId = currentTierId();
+  const layer = currentTierCatalog().find(item => item.id === activeId);
+  const levelId = String(layer && layer.level_id || "");
+  const mapKey = key + "|" + (levelId || "__all__");
+  if (!force && state.floorMap.key === mapKey) return;
+  state.floorHighlight = { componentId: "", layerId: "" };
+  state.floorPeerGrids = new Map();
+  const [map, zoom] = key.split("@");
+  try {
+    const res = await fetch(
+      "/api/grid2d/floor-map?map=" + encodeURIComponent(map) +
+      "&zoom=" + encodeURIComponent(zoom) +
+      "&level_id=" + encodeURIComponent(levelId),
+    ).then(response => response.json());
+    if (!res.ok) throw new Error(res.error || "读取楼层范围失败");
+    if (state.activeKey !== key || currentTierId() !== activeId) return;
+    state.floorMap = {
+      key: mapKey,
+      levelId,
+      layers: res.layers || [],
+      error: null,
+    };
+    await loadFloorOverlaps(true);
+  } catch (e) {
+    state.floorMap = {
+      key: mapKey, levelId, layers: [], error: e.message,
+    };
+    addLog("加载楼层重合范围失败: " + e.message, "t-warn");
+  }
+  requestRender(RENDER_LAYERS.SELECTION);
+}
+
+async function loadFloorOverlaps(force = false) {
+  const key = state.activeKey;
+  const tierId = currentTierId() || "__main__";
+  const levelId = state.floorMap.levelId;
+  if (!key) {
+    state.floorOverlap = {
+      key: "", xzOnly: new Set(), threeD: new Set(),
+      resolved: new Set(), components: [],
+    };
+    requestRender(RENDER_LAYERS.SELECTION);
+    return;
+  }
+  const mapKey = key + "|" + tierId + "|" + levelId;
+  if (!force && state.floorOverlap.key === mapKey) return;
+  const [map, zoom] = key.split("@");
+  try {
+    const res = await fetch(
+      "/api/grid2d/overlaps?map=" + encodeURIComponent(map) +
+      "&zoom=" + encodeURIComponent(zoom) +
+      "&tier=" + encodeURIComponent(tierId) +
+      "&level_id=" + encodeURIComponent(levelId),
+    ).then(response => response.json());
+    if (!res.ok) throw new Error(res.error || "计算网格重合失败");
+    if (state.activeKey !== key ||
+        (currentTierId() || "__main__") !== tierId) return;
+    const components = (res.components || []).map(component => {
+      const resolved = component.layers.every(targetTier => {
+        const layer = (state.floorMap.layers || [])
+          .find(item => item.tier_id === targetTier);
+        return !!floorRegionForComponent(layer, component);
+      });
+      return { ...component, resolved };
+    });
+    const resolvedCells = new Set();
+    const xzOnly = new Set();
+    const threeD = new Set();
+    for (const component of components) {
+      const target = component.resolved
+        ? resolvedCells
+        : component.severity === "three_d" ? threeD : xzOnly;
+      for (const cell of component.cells || []) {
+        target.add(cell[0] + "," + cell[1]);
+      }
+    }
+    state.floorOverlap = {
+      key: mapKey,
+      xzOnly,
+      threeD,
+      resolved: resolvedCells,
+      components,
+    };
+    populateFloorComponentSelect();
+    renderFloorMarkedList();
+    void loadFloorPeerGrids(true);
+  } catch (e) {
+    state.floorOverlap = {
+      key: mapKey, xzOnly: new Set(), threeD: new Set(),
+      resolved: new Set(), components: [],
+    };
+    addLog("计算网格重合失败: " + e.message, "t-warn");
+    populateFloorComponentSelect();
+    renderFloorMarkedList();
+  }
+  requestRender(RENDER_LAYERS.SELECTION);
+}
+
+async function setActiveTier(layerId) {
+  const key = state.activeKey;
+  if (!key) return;
+  const oldTierId = currentTierId();
+  if ((edit.mode || link.mode) && edit.dirty && oldTierId !== layerId) {
+    setStatus("切换分层前请先保存当前层网格", "warning");
+    populateTierSelect();
+    return;
+  }
+  if (!layerId) {
+    clearActiveTier();
+    if (edit.mode || link.mode) void loadGrid2D(true);
+    await loadFloorRegionMap(true);
+    requestRender(RENDER_LAYERS.LINK);
+    setStatus("已关闭分层显示", "ready");
+    return;
+  }
+  if (!calib.mapping || calib.key !== key) {
+    addLog("分层图片需要先完成当前地图标定", "t-warn");
+    populateTierSelect();
+    return;
+  }
+  const layer = currentTierCatalog().find(item => item.id === layerId);
+  if (!layer) {
+    addLog("找不到分层配置: " + layerId, "t-err");
+    populateTierSelect();
+    return;
+  }
+
+  const requestId = ++state.tierRequestId;
+  state.tierLoading = true;
+  syncTierControls();
+  setStatus("正在加载分层: " + layer.name + "…", "active");
+  const [map, zoom] = key.split("@");
+  try {
+    const resp = await fetch("/api/layer-image?map=" + encodeURIComponent(map) +
+                             "&zoom=" + encodeURIComponent(zoom) +
+                             "&tier=" + encodeURIComponent(layerId));
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const blob = await resp.blob();
+    const preview = await decodeTierBitmap(blob, layer, TIER_PREVIEW_MAX);
+    if (requestId !== state.tierRequestId || state.activeKey !== key) {
+      if (preview && typeof preview.close === "function") preview.close();
+      return;
+    }
+    if (state.activeTier) closeTierBitmap(state.activeTier);
+    state.activeTier = {
+      key, id: layerId, meta: layer, blob, preview,
+      bitmap: null, fullLoading: false, previewLoading: false,
+    };
+    state.tierLoading = false;
+    const v = state.views.get(key);
+    if (v) v.tierId = layerId;
+    populateTierSelect();
+    syncTierResolution();
+    requestRender(RENDER_LAYERS.BASE);
+    if ((edit.mode || link.mode) && oldTierId !== layerId) {
+      void loadGrid2D(true);
+    }
+    await loadFloorRegionMap(true);
+    requestRender(RENDER_LAYERS.LINK);
+    setStatus("已显示分层: " + layer.group + " / " + layer.name, "ready");
+    addLog("已加载官方分层图片: " + layer.filename, "t-ok");
+  } catch (e) {
+    if (requestId !== state.tierRequestId || state.activeKey !== key) return;
+    state.tierLoading = false;
+    populateTierSelect();
+    setStatus("分层图片加载失败", "warning");
+    addLog("分层图片加载失败: " + e.message, "t-err");
+  }
+}
+
 async function loadTileMaps() {
   try {
     const resp = await fetch("/api/tilemaps");
     const res = await resp.json();
     const maps = res.maps || {};
+    state.tileMaps = maps;
+    if (state.position && state.position.last_position) {
+      void syncPositionLocation(state.position.last_position);
+    }
     const selM = $("selMap"), selZ = $("selZoom");
     selM.innerHTML = "";
     for (const m of Object.keys(maps).sort()) {
       const o = document.createElement("option");
-      o.value = m; o.textContent = m;
+      o.value = m;
+      o.textContent = mapDisplayName(m);
+      o.title = m;
       selM.appendChild(o);
     }
     const fillZooms = () => {
@@ -2305,11 +4378,14 @@ async function loadTileMaps() {
 }
 
 // 下拉选择后：内存视图 → 已存总图 → 自动流式合成，依次尝试显示
-async function openSelectedMap() {
+async function openSelectedMap({ preserveFollow = false } = {}) {
   const map = $("selMap").value, zoom = $("selZoom").value;
   if (!map || !zoom) return;
-  state.follow = false;               // 手动选择后固定视图，不再被抓取流切走
-  $("chkFollow").checked = false;
+  const displayName = mapDisplayName(map);
+  if (!preserveFollow) {
+    state.follow = false;             // 手动选择后固定视图，不再被抓取流切走
+    $("chkFollow").checked = false;
+  }
   const key = viewKey(map, zoom);
 
   // 1) 内存里已经有这张图的范围（之前合成/抓取过）→ 直接显示，瓦片按需取
@@ -2317,7 +4393,7 @@ async function openSelectedMap() {
   if (hasBounds(v0) && v0.pasted.size > 0) {
     setActive(key);
     fitView();
-    setStatus("已显示 " + key + "（内存视图）", "ready");
+    setStatus("已显示 " + displayName + " / L" + zoom + "（内存视图）", "ready");
     return;
   }
   setActive(key);
@@ -2331,7 +4407,8 @@ async function openSelectedMap() {
       getView(map, zoom, { minX: info.minX, maxX: info.maxX, minY: info.minY, maxY: info.maxY });
       redrawActive();
       fitView();
-      setStatus("已显示 " + key + "（缩略总图，放大后自动加载瓦片）", "ready");
+      setStatus("已显示 " + displayName + " / L" + zoom +
+                "（缩略总图，放大后自动加载瓦片）", "ready");
       addLog("下拉选择: 载入缩略总图 " + info.file, "t-ok");
       loadOverview(map, zoom);
       return;
@@ -2347,6 +4424,8 @@ async function openSelectedMap() {
 
 $("btnCompose").onclick = startCompose;
 $("btnMarksAuth").onclick = () => startMarks();
+$("btnPosToggle").onclick = () => togglePositionStream();
+$("chkWs").onchange = () => togglePositionStream();
 $("btnFetch").onclick = async () => {
   try {
     const resp = await fetch("/api/fetch/start", {
@@ -2406,12 +4485,55 @@ $("btnRedo").onclick = () => {
   else if (calib.mode) redoCalibEdit();
 };
 document.querySelectorAll(".rail-mode").forEach(btn => {
+  // 透视按钮只是"打开 3D 视图"，不属于模式单选组。
+  if (!btn.dataset.railMode) return;
   btn.onclick = () => {
     const mode = btn.dataset.railMode;
     setMode(mode);
-    setSideTab(DEFAULT_SIDE_TAB[currentMode()]);
+    setSideTab(DEFAULT_SIDE_TAB[currentMode()], { syncMode: false });
   };
 });
+
+// three.js 按需动态加载：只有真的打开过透视视图才付这份体积。
+let perspectiveView = null;
+
+function setPerspectiveButton(on) {
+  const button = $("btnPerspective");
+  button.classList.toggle("is-active", on);
+  button.setAttribute("aria-pressed", String(on));
+}
+
+function closePerspective() {
+  if (perspectiveView) perspectiveView.close();
+  setPerspectiveButton(false);
+}
+
+async function openPerspective() {
+  const key = state.activeKey;
+  if (!key) {
+    setStatus("先选择一张要透视查看的地图", "warning");
+    return;
+  }
+  const [map, zoom] = key.split("@");
+  setPerspectiveButton(true);
+  try {
+    if (!perspectiveView) {
+      const module = await import("./three/perspective-view.js");
+      perspectiveView = new module.PerspectiveView($("pvView"));
+      $("pvClose").onclick = closePerspective;
+    }
+    await perspectiveView.show({ map, zoom, tier: currentTierId() });
+  } catch (e) {
+    addLog("透视视图加载失败: " + e.message, "t-err");
+    setStatus("透视视图加载失败: " + e.message, "warning");
+    closePerspective();
+  }
+}
+
+$("btnPerspective").onclick = () => {
+  if (perspectiveView && perspectiveView.open) closePerspective();
+  else void openPerspective();
+};
 document.querySelectorAll("[data-side-tab]").forEach(btn => {
   btn.onclick = () => setSideTab(btn.dataset.sideTab);
 });
@@ -2435,8 +4557,10 @@ function isTextEditingTarget(target) {
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    if (isSidePanelOpen()) setSidePanel(false);
+    if (perspectiveView && perspectiveView.open) closePerspective();
+    else if (isSidePanelOpen()) setSidePanel(false);
     else if ($("calibDlg").style.display === "block") closeCalibDialog();
+    else if ($("floorRegionDlg").style.display === "block") closeFloorRegionDialog();
     else if (edit.mode) clearSelection();
     return;
   }
@@ -2587,12 +4711,33 @@ function updateBrushCursor(ix, iz) {
 document.querySelectorAll(".brushBtn").forEach(b => {
   b.onclick = () => setBrush(b.dataset.brush);
 });
+$("btnLinkSource").onclick = () => setLinkStage("source");
+$("btnLinkTarget").onclick = () => setLinkStage("target");
+$("btnLinkSave").onclick = () => void saveGridLink();
+$("btnLinkClear").onclick = clearLinkDraft;
 $("btnEditLoad").onclick = () => loadGrid2D(true);
 $("btnEditSave").onclick = saveGrid2D;
 $("btnSelFree").onclick = () => applySelection("free");
 $("btnSelBlocked").onclick = () => applySelection("blocked");
 $("btnSelErase").onclick = () => applySelection("erase");
 $("btnSelClear").onclick = clearSelection;
+$("btnFloorRegion").onclick = openFloorRegionDialog;
+$("floorComponent").onchange = () => void onFloorTargetChange();
+$("floorLayer").onchange = () => void onFloorLayerChange();
+$("floorSave").onclick = () => void saveFloorRegion();
+$("floorClear").onclick = () => void clearFloorRegions();
+$("floorCancel").onclick = closeFloorRegionDialog;
+$("floorMarkedList").onclick = event => {
+  const focusBtn = event.target.closest("[data-floor-focus]");
+  const removeBtn = event.target.closest("[data-floor-remove]");
+  if (focusBtn) {
+    const row = state.floorMarkedRows[Number(focusBtn.dataset.floorFocus)];
+    if (row) focusFloorRegion(row.region);
+  } else if (removeBtn) {
+    const row = state.floorMarkedRows[Number(removeBtn.dataset.floorRemove)];
+    if (row) void removeFloorRegion(row.layer, row.region);
+  }
+};
 $("btnPathMark").onclick = markPath;
 $("btnPathClear").onclick = clearPath;
 // 注意用 isNaN 判定而非 `|| 默认值`：后者会把用户输入的 0 当成"空"而忽略掉
@@ -2605,6 +4750,7 @@ $("editCellSize").onchange = () => {
     setGridDirty(true);
     updateEditStats();
     requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
+    scheduleFloorOverlapLiveRefresh();
   }
 };
 $("editOriginX").onchange = () => {
@@ -2616,6 +4762,7 @@ $("editOriginX").onchange = () => {
     setGridDirty(true);
     updateEditStats();
     requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
+    scheduleFloorOverlapLiveRefresh();
   }
 };
 $("editOriginZ").onchange = () => {
@@ -2627,15 +4774,18 @@ $("editOriginZ").onchange = () => {
     setGridDirty(true);
     updateEditStats();
     requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
+    scheduleFloorOverlapLiveRefresh();
   }
 };
 $("editBrush").onchange = () => setBrushSize($("editBrush").value);
 
 const layerControls = {
   layerBase: "base",
+  layerTier: "tier",
   layerMarkers: "markers",
   layerGrid: "grid",
   layerSelection: "selection",
+  layerLinks: "links",
   layerPath: "path",
 };
 
@@ -2643,15 +4793,22 @@ Object.entries(layerControls).forEach(([id, layer]) => {
   $(id).checked = state.layers[layer];
   $(id).onchange = () => {
     state.layers[layer] = $(id).checked;
-    if (layer === "base" || layer === "markers") requestRender(RENDER_LAYERS.BASE);
+    if (layer === "base" || layer === "tier" || layer === "markers") {
+      requestRender(RENDER_LAYERS.BASE);
+    }
     else if (layer === "grid") {
       if ($(id).checked) invalidateGridLayer();
       requestRender(RENDER_LAYERS.GRID);
     }
     else if (layer === "selection") requestRender(RENDER_LAYERS.SELECTION);
+    else if (layer === "links") requestRender(RENDER_LAYERS.LINK);
     else requestRender(RENDER_LAYERS.PATH);
   };
 });
+
+$("selTier").onchange = () => void setActiveTier($("selTier").value);
+syncTierControls();
+updateLinkEditorUi();
 
 $("gridOpacity").value = String(state.gridOpacity);
 editCanvasEl.style.opacity = "";
@@ -2663,7 +4820,7 @@ $("gridOpacity").oninput = () => {
 
 // 画布浮层中的交互控件不能把 pointerdown 冒泡给 canvasWrap，否则点击
 // 图层开关或底部工具栏会同时开始涂色、框选或平移。
-["canvasToolbar", "layerPanel"].forEach(id => {
+["canvasToolbar", "layerPanel", "markTip"].forEach(id => {
   const overlay = $(id);
   ["pointerdown", "pointermove", "pointerup", "pointercancel", "wheel",
    "dblclick", "contextmenu"].forEach(type => {
@@ -2674,6 +4831,27 @@ $("gridOpacity").oninput = () => {
 // ---------------- 总图拖动 / 缩放 / 涂色 交互 ----------------
 canvasWrap.addEventListener("pointerdown", (e) => {
   gestureRect = canvasWrap.getBoundingClientRect();
+  // 网格/连接模式下，入口徽章优先于涂格和连线框选：点它只负责切层。
+  if ((edit.mode || link.mode) && openLayerEntranceFromEvent(e)) return;
+  if (link.mode) {
+    if (e.button === 0) {
+      const p = canvasPixelOfEvent(e);
+      const c = p ? cellAtPixel(p[0], p[1]) : null;
+      if (c) {
+        link.drag = {
+          id: e.pointerId,
+          rect: { x0: c[0], z0: c[1], x1: c[0], z1: c[1] },
+        };
+        canvasWrap.setPointerCapture(e.pointerId);
+        requestRender(RENDER_LAYERS.LINK);
+        e.preventDefault();
+      }
+    } else if (e.button === 2) {
+      startPanGesture(e);
+      e.preventDefault();
+    }
+    return;
+  }
   if (edit.mode) {
     if (e.button === 0) {
       if (e.shiftKey) {
@@ -2696,22 +4874,28 @@ canvasWrap.addEventListener("pointerdown", (e) => {
       }
     } else if (e.button === 2) {
       // 右键：拖动平移
-      dragState = { id: e.pointerId, sx: e.clientX, sy: e.clientY, px: mapView.panX, py: mapView.panY, moved: false };
-      canvasWrap.setPointerCapture(e.pointerId);
-      canvasWrap.classList.add("dragging");
-      hideBrushCursor();
+      startPanGesture(e, true);
       e.preventDefault();
     }
     return;
   }
   if (e.button !== 0 && e.pointerType === "mouse") return;
   showMarkTip(null);   // 开始平移就把徽章提示收起来，别拖着一块跑
-  dragState = { id: e.pointerId, sx: e.clientX, sy: e.clientY, px: mapView.panX, py: mapView.panY, moved: false };
-  canvasWrap.setPointerCapture(e.pointerId);
-  canvasWrap.classList.add("dragging");
+  startPanGesture(e);
   e.preventDefault();
 });
 canvasWrap.addEventListener("pointermove", (e) => {
+  if (link.mode && link.drag && e.pointerId === link.drag.id) {
+    const p = canvasPixelOfEvent(e);
+    const c = p ? cellAtPixel(p[0], p[1]) : null;
+    if (c) {
+      link.drag.rect.x1 = c[0];
+      link.drag.rect.z1 = c[1];
+      requestRender(RENDER_LAYERS.LINK);
+    }
+    e.preventDefault();
+    return;
+  }
   if (edit.mode) {
     const rect = gestureRect || canvasWrap.getBoundingClientRect();
     edit.pointer = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -2729,9 +4913,15 @@ canvasWrap.addEventListener("pointermove", (e) => {
       dragState.moved = true;
     }
     if (dragState.moved) {
+      activatePanBuffer();
       mapView.panX = dragState.px + (e.clientX - dragState.sx);
       mapView.panY = dragState.py + (e.clientY - dragState.sy);
-      clampPan(); applyView();
+      clampPan();
+      if (!viewportInsideDragBuffer()) applyView(true);
+      else {
+        applyViewTransform();
+        scheduleViewFrame(false);
+      }
       e.preventDefault();
     }
     return;
@@ -2750,10 +4940,30 @@ canvasWrap.addEventListener("pointermove", (e) => {
   }
 });
 const endDrag = (e) => {
+  if (link.mode && link.drag && e.pointerId === link.drag.id) {
+    const r = link.drag.rect;
+    const rect = {
+      x0: Math.min(r.x0, r.x1), x1: Math.max(r.x0, r.x1),
+      z0: Math.min(r.z0, r.z1), z1: Math.max(r.z0, r.z1),
+    };
+    const endpoint = endpointFromRect(rect);
+    if (endpoint) {
+      if (link.stage === "target") link.target = endpoint;
+      else link.source = endpoint;
+      link.stage = link.stage === "target" ? "source" : "target";
+    }
+    link.drag = null;
+    updateLinkEditorUi();
+    requestRender(RENDER_LAYERS.LINK);
+    gestureRect = null;
+    return;
+  }
   if (dragState && e.pointerId === dragState.id) {
     const wasTap = !dragState.moved;
     dragState = null;
     canvasWrap.classList.remove("dragging");
+    document.body.classList.remove("map-panning");
+    finishPanGesture();
     // 真的拖动过 = 视线挪到了别处：缩放时记的焦点作废，退回视口中心
     if (!wasTap) mapView.focus = null;
     // 标定模式下：轻点地图 → 取控制点
@@ -2765,7 +4975,12 @@ const endDrag = (e) => {
       doPick(e);
     } else if (wasTap && !edit.mode) {
       // 浏览模式：点地图上的徽章 → 弹出它是谁、在哪（只报信息，不改视图也不筛选）
-      showMarkTip(hitTestMarker(e.clientX, e.clientY));
+      const hit = hitTestMarker(e.clientX, e.clientY);
+      if (hit && hit.tid === LAYER_ENTRANCE_TID) {
+        void showLayerEntrancePicker(hit);
+      } else {
+        showMarkTip(hit);
+      }
     }
   }
   if (edit.mode && edit.painting && e.pointerId === edit.painting.id) {
@@ -2813,7 +5028,66 @@ window.addEventListener("resize", () => {
 window.__NAV_GRID_EDITOR__ = {
   get document() { return ed(); },
   get editor() { return edit; },
+  get linkEditor() { return link; },
+  get floorMap() { return state.floorMap; },
+  get floorOverlap() {
+    return {
+      key: state.floorOverlap.key,
+      xzOnly: [...state.floorOverlap.xzOnly],
+      threeD: [...state.floorOverlap.threeD],
+      resolved: [...state.floorOverlap.resolved],
+      components: state.floorOverlap.components,
+    };
+  },
+  get floorPeerGridSizes() {
+    return Object.fromEntries(
+      [...state.floorPeerGrids].map(([key, value]) => [key, value.size])
+    );
+  },
+  get calibration() {
+    return { key: calib.key, hasMapping: !!calib.mapping };
+  },
+  refreshOverlaps: scheduleFloorOverlapLiveRefresh,
   get view() { return state.views.get(state.activeKey) || null; },
+  setMode,
+  get stats() {
+    let tileCount = 0;
+    let tileBytes = 0;
+    for (const bitmap of tileCache.values()) {
+      if (!isBitmap(bitmap)) continue;
+      tileCount++;
+      tileBytes += (bitmap.width || 0) * (bitmap.height || 0) * 4;
+    }
+    let overviewBytes = 0;
+    let overviewCount = 0;
+    for (const view of state.views.values()) {
+      if (!view.overview) continue;
+      overviewCount++;
+      overviewBytes += (view.overview.width || 0) *
+        (view.overview.height || 0) * 4;
+    }
+    const tierBytes = state.activeTier
+      ? [state.activeTier.preview, state.activeTier.bitmap]
+        .filter(Boolean)
+        .reduce((sum, bitmap) => sum + (bitmap.width || 0) *
+          (bitmap.height || 0) * 4, 0)
+      : 0;
+    const canvasBytes = [
+      canvas, editCanvasEl, selCanvasEl, linkCanvasEl, pathCanvasEl,
+    ].reduce((sum, item) => sum + item.width * item.height * 4, 0);
+    return {
+      activeKey: state.activeKey,
+      activeTier: state.activeTier ? state.activeTier.id : null,
+      tileCount,
+      tileBytes,
+      overviewCount,
+      overviewBytes,
+      tierBytes,
+      canvasBytes,
+      markerPoints: state.markers ? state.markers.points.length : 0,
+      markupNodes: document.getElementsByTagName("*").length,
+    };
+  },
   undo: undoGridEdit,
   redo: redoGridEdit,
   render: requestRender,
@@ -2827,6 +5101,7 @@ window.addEventListener("load", () => {
   syncButtons();
   syncHistoryButtons();
   loadMarksStatus();
+  loadPositionStatus();
   loadTileMaps();
   connect();
 });

@@ -7,6 +7,13 @@
 <meta name="theme-color" content="#111411">
 <title>终末地地图采集 / 标定 / 网格编辑</title>
 <link rel="stylesheet" href="/static/css/map_composer.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "/static/js/vendor/three/three.module.js"
+  }
+}
+</script>
 <script type="module" src="/static/js/map_composer.js"></script>
 </head>
 <body>
@@ -29,6 +36,12 @@
       <label class="compact-field">
         <span>层级</span>
         <select id="selZoom" aria-label="选择地图层级"></select>
+      </label>
+      <label class="compact-field">
+        <span>分层</span>
+        <select id="selTier" aria-label="选择分层地图">
+          <option value="">关闭</option>
+        </select>
       </label>
     </div>
 
@@ -70,6 +83,7 @@
       <canvas id="composeCanvas"></canvas>
       <canvas id="editCanvas"></canvas>
       <canvas id="selCanvas"></canvas>
+      <canvas id="linkCanvas"></canvas>
       <canvas id="pathCanvas"></canvas>
       <div id="gridBounds" aria-hidden="true"></div>
       <div id="pickMarker"></div>
@@ -103,6 +117,11 @@
         <button id="btnReset" title="清除当前地图画布">清空</button>
         <button id="btnDownload" title="下载当前地图总图 PNG">下载</button>
         <label class="toggle"><input type="checkbox" id="chkFollow" checked><span>跟随</span></label>
+        <label class="toggle" title="官方地图 WebSocket 位置流：实时获取玩家坐标">
+          <span class="status-dot" id="wsDot" aria-hidden="true"></span>
+          <input type="checkbox" id="chkWs">
+          <span>位置流</span>
+        </label>
       </div>
       <div class="tb-act" data-mode="calib">
         <button id="btnCalibSave" disabled title="计算并保存标定（Ctrl+S）">保存标定</button>
@@ -126,7 +145,29 @@
         <button id="btnSelBlocked" title="把选中的格子填成 Blocked">填充 Blocked</button>
         <button id="btnSelErase" title="把选中的格子擦成未知">填充未知</button>
         <button id="btnSelClear" title="取消框选（快捷键 Esc）">取消选择</button>
+        <button id="btnFloorRegion" title="为当前分层网格标记 X/Z 重合区域和高度区间">楼层区间</button>
         <button id="btnEditSave" title="保存网格（Ctrl+S）">保存网格</button>
+      </div>
+      <div class="tb-act" data-mode="link">
+        <button id="btnLinkSource" class="on">选起点</button>
+        <button id="btnLinkTarget">选终点</button>
+        <label class="field-inline">类型
+          <select id="linkKind">
+            <option value="stairs">楼梯</option>
+            <option value="elevator">电梯</option>
+            <option value="portal">传送</option>
+            <option value="door">门</option>
+            <option value="rope">绳索</option>
+            <option value="other">其他</option>
+          </select>
+        </label>
+        <label class="toggle"><input type="checkbox" id="linkBidirectional" checked><span>双向</span></label>
+        <label class="field-inline">代价
+          <input id="linkCost" type="number" min="0.01" step="0.1" value="1">
+        </label>
+        <button id="btnLinkSave" disabled>保存连接</button>
+        <button id="btnLinkClear">清空当前连接</button>
+        <span id="linkEditStatus" class="tb-act-hint">先选起点区域</span>
       </div>
       <div class="tb-act" data-mode="pick">
         <span class="tb-act-hint">点击地图读取坐标</span>
@@ -135,9 +176,11 @@
     <div id="layerPanel" class="layer-panel" aria-label="图层控制">
       <span class="layer-title">图层</span>
       <label class="layer-toggle"><span>底图</span><input type="checkbox" id="layerBase" checked></label>
+      <label class="layer-toggle"><span>分层</span><input type="checkbox" id="layerTier" checked></label>
       <label class="layer-toggle"><span>标记</span><input type="checkbox" id="layerMarkers" checked></label>
       <label class="layer-toggle"><span>网格</span><input type="checkbox" id="layerGrid" checked></label>
       <label class="layer-toggle"><span>选区</span><input type="checkbox" id="layerSelection" checked></label>
+      <label class="layer-toggle"><span>连接</span><input type="checkbox" id="layerLinks" checked></label>
       <label class="layer-toggle"><span>路径</span><input type="checkbox" id="layerPath" checked></label>
       <label class="opacity-control">透明度
         <input id="gridOpacity" type="range" min="0.15" max="1" step="0.05" value="0.82">
@@ -251,6 +294,11 @@
           <button id="btnEditLoad">载入</button>
         </div>
       </div>
+      <h3><span>分层连接</span><small>LAYER LINKS</small></h3>
+      <div class="panel">
+        <div id="linkListStatus" class="panel-note">先进入“连接”模式</div>
+        <div id="linkList"></div>
+      </div>
     </section>
 
     <section class="side-sec side-panel" data-panel="coords">
@@ -258,6 +306,12 @@
       <div class="panel">
         <div>最近坐标: <span id="coordsReadout">-</span></div>
         <div>点击坐标: <span id="pickReadout">-</span></div>
+      </div>
+      <div class="panel">
+        <div id="posStreamState">位置流: -</div>
+        <div class="button-row">
+          <button id="btnPosToggle" type="button">开启位置流</button>
+        </div>
       </div>
     </section>
 
@@ -297,11 +351,25 @@
             <path d="M4 10h16M10 4v16M16 4v16"></path>
           </svg>
         </button>
+        <button id="btnLink" class="rail-mode" type="button" data-rail-mode="link"
+                aria-label="连接" aria-pressed="false" title="连接">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 8h8v8H8z"></path>
+            <path d="M4 12h4M16 12h4M12 4v4M12 16v4"></path>
+          </svg>
+        </button>
         <button id="btnPick" class="rail-mode" type="button" data-rail-mode="pick"
                 aria-label="取坐标" aria-pressed="false" title="取坐标">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <circle cx="12" cy="12" r="3"></circle>
             <path d="M12 2v5M12 17v5M2 12h5M17 12h5"></path>
+          </svg>
+        </button>
+        <button id="btnPerspective" class="rail-mode" type="button"
+                aria-label="透视视图" aria-pressed="false" title="透视视图（3D）">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3 21 8v8l-9 5-9-5V8Z"></path>
+            <path d="M3 8l9 5 9-5M12 13v8"></path>
           </svg>
         </button>
       </div>
@@ -323,6 +391,70 @@
     <button id="calibOk">确定</button>
     <button id="calibCancel">取消</button>
   </div>
+</div>
+
+<div id="floorRegionDlg" role="dialog" aria-modal="true" aria-labelledby="floorRegionTitle">
+  <strong id="floorRegionTitle">标记重合区高度区间</strong>
+  <label class="floor-component">重合连通区
+    <select id="floorComponent"></select>
+  </label>
+  <label class="floor-component">重合地图网格
+    <select id="floorLayer"></select>
+  </label>
+  <div class="calib-fields">
+    <label>Y MIN <input id="floorYMin" type="number" step="any"></label>
+    <label>Y MAX <input id="floorYMax" type="number" step="any"></label>
+  </div>
+  <div class="floor-marked">
+    <div class="floor-marked-head">已标记区间
+      <span id="floorMarkedCount"></span>
+    </div>
+    <div id="floorMarkedList" class="floor-marked-list"></div>
+  </div>
+  <div id="floorRegionStatus" class="panel-note"></div>
+  <div class="dialog-actions">
+    <button id="floorSave">标记所选网格</button>
+    <button id="floorClear">清除所选网格区间</button>
+    <button id="floorCancel">取消</button>
+  </div>
+</div>
+
+<div id="overlapWarningDlg" role="dialog" aria-modal="true" aria-labelledby="overlapWarningTitle">
+  <strong id="overlapWarningTitle">黄色重合区尚未标注高度</strong>
+  <div id="overlapWarningList" class="panel-note"></div>
+  <div class="dialog-actions">
+    <button id="overlapWarningContinue">仍然保存</button>
+    <button id="overlapWarningCancel">返回标记</button>
+  </div>
+</div>
+
+<div id="pvView" class="pv-view" hidden>
+  <canvas id="pvCanvas"></canvas>
+  <div id="pvLabels" class="pv-labels" aria-hidden="true"></div>
+  <div class="pv-bar">
+    <span class="pv-title">透视视图</span>
+    <label class="pv-field">分层组
+      <select id="pvGroup"></select>
+    </label>
+    <label class="pv-field pv-field-range">垂直间距
+      <input id="pvSpacing" type="range" min="0" max="400" step="5" value="80">
+    </label>
+    <label class="pv-toggle"><input type="checkbox" id="pvBase" checked>底图</label>
+    <label class="pv-toggle"><input type="checkbox" id="pvLayers" checked>分层图片</label>
+    <label class="pv-toggle"><input type="checkbox" id="pvGrid" checked>网格</label>
+    <label class="pv-toggle"><input type="checkbox" id="pvMarks" checked>高度区间</label>
+    <label class="pv-toggle"><input type="checkbox" id="pvLinks" checked>连接</label>
+    <button id="pvReset" type="button">重置视角</button>
+    <button id="pvClose" type="button">关闭</button>
+  </div>
+  <div class="pv-legend">
+    <span><i style="background:#23c8af"></i>Free</span>
+    <span><i style="background:#dc4434"></i>Blocked</span>
+    <span><i style="background:#46beff"></i>高度区间</span>
+    <span><i style="background:#f0c66c"></i>连接</span>
+  </div>
+  <div class="pv-hint">左键旋转 · 右键平移 · 滚轮缩放</div>
+  <div id="pvStatus" class="pv-status"></div>
 </div>
 
 </body>
