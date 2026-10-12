@@ -35,6 +35,10 @@ from .io import (
 from .layers import (
     CATALOG_FILENAME,
     MAX_LAYER_IMAGE_BYTES,
+    build_level_index,
+    levels_index_path,
+    load_level_index,
+    write_level_index,
     builtin_layer_entries,
     find_layer,
     layer_cache_relpath,
@@ -1097,6 +1101,43 @@ class MapService:
             })
         return {"ok": True, "map": map_name, "zoom": zoom,
                 "level_id": level_id, "layers": out}
+
+    def sync_level_index(self) -> dict:
+        """把官方分层目录物化成 `nav-grid-data/levels.json`。
+
+        消费侧枚举「某个 level_id 声明了哪些层」时只能靠这份文件 —— 分层目录
+        （catalog.json）是 fetch-layers 的可重生缓存、不进版本库，而按网格文件反推
+        会把不同 level_id 的层混成一批。
+
+        **只在分层目录真的存在时才写**：目录缺失时 `_layer_entries()` 会退回内置的
+        Map02Lv002 兜底目录（7 条），拿它去覆盖已提交的完整索引就是数据丢失。
+        """
+        catalog = self.store.tiles_root / "layers" / CATALOG_FILENAME
+        if not catalog.is_file():
+            return {"ok": False, "error": "没有分层目录（先跑 fetch-layers）"}
+        try:
+            entries = load_layer_catalog(catalog)
+        except Exception as e:
+            return {"ok": False, "error": f"分层目录读取失败: {e}"}
+        doc = build_level_index(entries)
+        path = levels_index_path(self.grid2d_dir)
+        # 内容没变就不写：这份文件在版本库里，每次保存网格都刷新时间戳会一直脏。
+        existing = load_level_index(path)
+        if existing is not None and existing.get("layers") == doc["layers"]:
+            return {"ok": True, "path": str(path), "count": len(doc["layers"]),
+                    "unchanged": True}
+        doc["generated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        write_level_index(path, doc)
+        return {"ok": True, "path": str(path), "count": len(doc["layers"]),
+                "unchanged": False}
+
+    def get_level_index(self) -> dict:
+        """读层声明索引（消费侧/界面用）。没有就现算一份，不落盘。"""
+        path = levels_index_path(self.grid2d_dir)
+        existing = load_level_index(path)
+        if existing is not None:
+            return existing
+        return build_level_index(self._layer_entries())
 
     def _tier_grid_candidates(self, map_name: str, tier: str) -> list[Path]:
         """某层现有的全部网格文件，按文件名倒序（最新在前）。
@@ -2393,6 +2434,12 @@ class MapService:
                 _log(f"2D 网格导出失败 {out}: {e}")
                 return {"ok": False, "error": f"导出失败（未覆盖原文件）: {e}"}
         self._invalidate_grid_cache(out)
+        # 顺带把层声明索引物化到数据目录：新增的层要能被消费侧枚举到。尽力而为 ——
+        # 索引写不进去不该让网格保存失败。
+        try:
+            self.sync_level_index()
+        except Exception as e:  # noqa: BLE001
+            _log(f"层声明索引刷新失败: {e}")
         return {"ok": True, "saved": out.name, "path": str(out),
                 "dir": str(out.parent), "overwrote": existed,
                 "shape": [height, width],

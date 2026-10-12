@@ -19,10 +19,28 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .io import _path_lock, _replace_with_retry, _unique_tmp
 from .settings import valid_map_zoom
 
 
 CATALOG_FILENAME = "catalog.json"
+
+#: 落进导航网格目录的**层声明索引**。分层目录（catalog.json）是 fetch-layers 的
+#: 可重生本地缓存、不进版本库，所以消费侧拿不到「哪个 level_id 声明了哪些层」这件
+#: 事 —— 只能按网格文件反推，而那样会把不同 level_id 的层混成一批（map02 的目录里
+#: 有 9 个 level_id，只要有人给 lv002 画一张网格，按文件发现就会把 lv001 与 lv005
+#: 的候选混在一起）。这份索引把该声明物化到数据仓库里，让消费侧只读网格目录就够。
+LEVEL_INDEX_FILENAME = "levels.json"
+LEVEL_INDEX_SCHEMA_VERSION = 1
+#: 索引里保留的字段。bounds/path/source_url/entrances 那些是抓取用的，消费侧不需要。
+_LEVEL_INDEX_FIELDS = ("id", "map_name", "level_id", "name", "group",
+                       "map_category")
+
+_LEVEL_INDEX_NOTE = (
+    "level_id → 层 的**声明**索引（含还没有网格文件的层）。"
+    "由编辑器从官方分层目录物化，保存网格时自动刷新。"
+    "某层是否真有网格要另外看网格文件 —— 这份文件只说明官方声明了哪些层。"
+)
 
 #: 分层 PNG 的下载上限。服务端按需缓存（``MapService.get_layer_image``）与
 #: ``fetch-layers`` 预抓取必须用同一个值，否则中间尺寸的图会「CLI 抓得到、
@@ -194,3 +212,65 @@ def layer_cache_relpath(entry: dict) -> Path:
     if path.is_absolute() or ".." in path.parts:
         raise ValueError("layer cache path escapes tiles root")
     return Path("layers") / path
+
+
+def levels_index_path(grid2d_dir: Path) -> Path:
+    return Path(grid2d_dir) / LEVEL_INDEX_FILENAME
+
+
+def build_level_index(entries, generated_at: str = "") -> dict:
+    """把分层目录精简成「哪个 level_id 声明了哪些层」。
+
+    纯函数（时间戳由调用方给），方便测试逐字比对。``entries`` 是
+    :func:`load_layer_catalog` 的结果。
+
+    保留**没有网格文件**的层 —— 消费侧正是靠这个把「声明了但没有网格」与「这张图
+    压根没有分层」分开（两者该报不同的东西）。
+    """
+    layers = []
+    for item in entries or []:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        entry = {key: item[key] for key in _LEVEL_INDEX_FIELDS if key in item}
+        entry["id"] = str(entry["id"])
+        entry["map_name"] = str(entry.get("map_name") or "")
+        entry["level_id"] = str(entry.get("level_id") or "")
+        layers.append(entry)
+    layers.sort(key=lambda item: (
+        item["map_name"], item["level_id"], item["id"]))
+    return {
+        "schema_version": LEVEL_INDEX_SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "note": _LEVEL_INDEX_NOTE,
+        "layers": layers,
+    }
+
+
+def write_level_index(path: Path, data: dict) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _unique_tmp(path)
+    with _path_lock(path):
+        try:
+            tmp.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            _replace_with_retry(tmp, path)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+
+
+def load_level_index(path: Path) -> dict | None:
+    """读层声明索引；不存在或形状不对返回 None（调用方据此决定要不要重写）。"""
+    path = Path(path)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("layers"), list):
+        return None
+    return data

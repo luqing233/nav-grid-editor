@@ -236,11 +236,42 @@ uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 三元里，必然漏；现在 `tests/test_tier_spelling.py` 与
 `tests/test_tier_id_js.py`（含一条源码级守卫）盯着它。
 
+### 层声明索引 `levels.json`
+
+导航网格目录里除了网格与 `links.json`，还有一份 `levels.json`：
+
+```json
+{
+  "schema_version": 1,
+  "generated_at": "…",
+  "note": "level_id → 层 的**声明**索引（含还没有网格文件的层）…",
+  "layers": [
+    {"id": "scene_map02_lv005_layer_tips_7", "map_name": "map02",
+     "level_id": "map02_lv005", "name": "测试区", "group": "测试区",
+     "map_category": "layered"}
+  ]
+}
+```
+
+它解决的问题：分层目录 `catalog.json` 是 `fetch-layers` 的可重生本地缓存、**不进
+版本库**，所以消费侧拿不到「哪个 level_id 声明了哪些层」，只能按网格文件反推 —— 而
+map02 的目录里有 **9 个 level_id**、通常只有一两个有网格，按文件反推会把不同
+level_id 的层混成一批候选，对跟随器就是静默错层。
+
+所以这份索引把该**声明**物化进数据仓库（**包含还没有网格文件的层** —— 消费侧正是
+靠它把「声明了但没有网格」与「这张图压根没有分层」分开）。某层是否真有网格仍要看
+网格文件，索引只说明官方声明了哪些层。
+
+由编辑器在**保存网格时**从分层目录自动刷新（内容没变就不写，免得在版本库里一直
+脏）；分层目录不存在时**拒绝写** —— 那时只能退回内置的兜底目录，拿 7 条去覆盖完整
+索引就是数据丢失。
+
 ## 数据目录
 
 ```text
 assets/
 ├── nav-grid-data/       导航网格数据，随仓库发布
+│                        （网格 + links.json + levels.json）
 ├── tiles/
 │   ├── layers/          官方分层图片缓存，仅本地
 │   ├── latest/          最新合并瓦片，仅本地
