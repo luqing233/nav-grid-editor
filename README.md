@@ -221,6 +221,21 @@ uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 <地图>_<zoom>.grid.npz
 ```
 
+**主图的 tier 有两种拼写，转换只走 `disk_tier` / `api_tier`（JS 侧是
+`grid/tier-id.js` 的同名函数），别再内联判断：**
+
+| 口径 | 值 | 用在哪 |
+| --- | --- | --- |
+| API | `"__main__"` | `/api/nav-graph`、`/api/grid2d/floor-map`、SSE 的 `gridTierId`、`/api/grid2d` 的 `tier` 参数 |
+| 落盘 | `""` | 文件名与 `meta.tier`（`map02_4.grid.npz`，不带 tier 段） |
+
+两种都必须存在：文件名里不能出现 `__main__`，而 API 里空串又表达不出「就是主图」
+而不是「没选分层」。**少了转换是真的会出事** —— `valid_grid_tier("__main__")` 是
+`True`（它符合地图名白名单），所以校验拦不住，落盘路径会拼出
+`map02____main___4.grid.npz` 这种谁也不认识的伪文件名。这条转换以前散在 14 处内联
+三元里，必然漏；现在 `tests/test_tier_spelling.py` 与
+`tests/test_tier_id_js.py`（含一条源码级守卫）盯着它。
+
 ## 数据目录
 
 ```text

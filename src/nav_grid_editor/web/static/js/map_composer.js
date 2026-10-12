@@ -2,6 +2,7 @@
 
 import { CELL_BLOCKED, CELL_FREE, CELL_UNKNOWN, GridDocument } from "./grid/grid-document.js";
 import { GridRasterCache } from "./grid/grid-raster-cache.js";
+import { MAIN_TIER_ID, sameTier, toApiTier, toDiskTier } from "./grid/tier-id.js";
 import { loadGridDocument, saveGridDocument } from "./grid/grid-transport.js";
 import {
   WALK_POLICIES,
@@ -1523,7 +1524,7 @@ async function loadFloorPeerGrids(force = false) {
   );
   const loaded = new Map();
   await Promise.all(candidates.map(async layer => {
-    const requestTier = layer.tier_id === "__main__" ? "" : layer.tier_id;
+    const requestTier = toDiskTier(layer.tier_id);
     try {
       const result = await fetch(
         "/api/grid2d?map=" + encodeURIComponent(map) +
@@ -1612,7 +1613,7 @@ function clearSelection() {
 }
 
 function floorMarkingKey(layer, region) {
-  const tierId = (layer && layer.tier_id) || "__main__";
+  const tierId = toApiTier(layer && layer.tier_id);
   const index = ((layer && layer.floor_regions) || []).indexOf(region);
   return "m:" + tierId + ":" + index;
 }
@@ -1682,7 +1683,7 @@ function selectedFloorTarget() {
     const tierId = rest.slice(0, sep);
     const index = Number(rest.slice(sep + 1));
     const layer = (state.floorMap.layers || [])
-      .find(item => (item.tier_id || "__main__") === tierId);
+      .find(item => sameTier(item.tier_id, tierId));
     const region = layer && (layer.floor_regions || [])[index];
     return layer && region ? { kind: "marking", layer, region } : null;
   }
@@ -1813,7 +1814,7 @@ function selectedFloorLayerId() {
 }
 
 function currentGridKey() {
-  return currentTierId() || "__main__";
+  return toApiTier(currentTierId());
 }
 
 // 标记对话框停在画布中央，定位时把目标放到左侧偏下，免得被对话框挡住。
@@ -1845,7 +1846,7 @@ function focusFloorComponent(component) {
 
 function floorLayerKey(layer) {
   const tierId = layer && layer.tier_id;
-  return !tierId || tierId === "__main__" ? "" : tierId;
+  return toDiskTier(tierId);
 }
 
 function renderFloorMarkedList() {
@@ -2012,7 +2013,7 @@ async function onFloorLayerChange() {
     return;
   }
   const tierId = selectedFloorLayerId();
-  const next = tierId === "__main__" ? "" : tierId;
+  const next = toDiskTier(tierId);
   if (next !== (currentTierId() || "")) {
     const previous = target.component;
     $("floorRegionStatus").textContent = "正在切换到该分层的网格…";
@@ -2040,8 +2041,8 @@ function restoreFloorTarget(value) {
 async function onFloorTargetChange() {
   const target = selectedFloorTarget();
   if (target && target.kind === "marking") {
-    const tierId = target.layer.tier_id || "__main__";
-    const next = tierId === "__main__" ? "" : tierId;
+    const tierId = toApiTier(target.layer.tier_id);
+    const next = toDiskTier(tierId);
     if (next !== (currentTierId() || "")) {
       const regionIndex = (target.layer.floor_regions || [])
         .indexOf(target.region);
@@ -2051,7 +2052,7 @@ async function onFloorTargetChange() {
         if (restoreFloorTarget("m:" + tierId + ":" + regionIndex)) return;
         // 换到该分层自己视角后，这条标记多半已被某个连通区认领，直接选中它。
         const layer = (state.floorMap.layers || [])
-          .find(item => (item.tier_id || "__main__") === tierId);
+          .find(item => sameTier(item.tier_id, tierId));
         const region = layer && (layer.floor_regions || [])[regionIndex];
         const owner = region && (state.floorOverlap.components || [])
           .find(component =>
@@ -2934,7 +2935,7 @@ async function loadNavReadiness() {
     }
     const tiers = res.tiers || [];
     const counts = tiers
-      .map(t => (t.tier_id === "__main__" ? "大地图" : t.tier_id) +
+      .map(t => (t.tier_id === MAIN_TIER_ID ? "大地图" : t.tier_id) +
         " " + t.free_count + " 格")
       .join(" · ");
     if (res.ready) {
@@ -3495,10 +3496,10 @@ async function syncPositionLocation(data) {
   // 同一个 levelId 底下换楼层是常事，用它去重会把"同一条 levelId 内的楼层变化"整条
   // 丢掉 —— 实测就是这样：y=250 切到 tips_7 后，y=245（落到大地图）被当成重复消息
   // 忽略了。改成用服务端判出来的目标楼层。
-  const resolved = String(data.gridFloorStatus || "") === "unique"
-    ? String(data.gridTierId || "")
-    : (String(data.gridFloorStatus || "") === "main"
-        ? "" : "|" + String(data.gridFloorStatus || ""));
+  const floorStatusOf = String(data.gridFloorStatus || "");
+  const resolved = floorStatusOf === "unique"
+    ? toDiskTier(data.gridTierId)
+    : (floorStatusOf === "main" ? "" : "|" + floorStatusOf);
   const locationKey = mapId + "|" + resolved;
   if (locationKey === state.positionView.appliedKey) return;
 
@@ -3543,7 +3544,7 @@ async function syncPositionLocation(data) {
   const floorReason = String(data.gridFloorReason || "");
   let targetTierId = activeTierId;
   if (floorStatus === "unique") {
-    targetTierId = String(data.gridTierId || "");
+    targetTierId = toDiskTier(data.gridTierId);
   } else if (floorStatus === "main") {
     targetTierId = "";
     if (floorReason === "no_layers" && activeTierId) {
@@ -4448,7 +4449,7 @@ async function loadFloorRegionMap(force = false) {
 
 async function loadFloorOverlaps(force = false) {
   const key = state.activeKey;
-  const tierId = currentTierId() || "__main__";
+  const tierId = toApiTier(currentTierId());
   const levelId = state.floorMap.levelId;
   if (!key) {
     state.floorOverlap = {
@@ -4470,7 +4471,7 @@ async function loadFloorOverlaps(force = false) {
     ).then(response => response.json());
     if (!res.ok) throw new Error(res.error || "计算网格重合失败");
     if (state.activeKey !== key ||
-        (currentTierId() || "__main__") !== tierId) return;
+        !sameTier(currentTierId(), tierId)) return;
     const components = (res.components || []).map(component => {
       const resolved = component.layers.every(targetTier => {
         const layer = (state.floorMap.layers || [])

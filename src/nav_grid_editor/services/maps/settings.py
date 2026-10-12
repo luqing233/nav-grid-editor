@@ -150,6 +150,29 @@ def valid_grid_tier(tier: object) -> bool:
     return not text or valid_map_name(text)
 
 
+#: 主图在 **API 口径** 下的 tier_id。落盘/文件名口径是空串（`map02_4.grid.npz`）。
+#: 两种口径都必须存在（文件名不能带 `__main__`，而 API 里空串又表达不出"就是主图"
+#: 而不是"没选"），所以进出转换只走下面两个函数，别再内联。
+MAIN_TIER_ID = "__main__"
+
+
+def disk_tier(tier: object) -> str:
+    """把 API 口径的 tier 归一成**落盘口径**：主图 → 空串。
+
+    这是唯二该做的转换之一。`valid_grid_tier("__main__")` 是 True（它符合地图名
+    白名单），所以少了这一步，客户端传 `tier=__main__` 会拼出
+    `map02____main___4.grid.npz` 这种谁也不认识的伪文件名 —— 实测过。
+    """
+    text = str(tier or "")
+    return "" if text == MAIN_TIER_ID else text
+
+
+def api_tier(tier: object) -> str:
+    """把落盘口径的 tier 归一成 **API 口径**：空串 → `__main__`。"""
+    text = str(tier or "")
+    return MAIN_TIER_ID if not text else text
+
+
 # 模拟抓取参数
 SIM_MAP = "sim"
 SIM_ZOOM = "4"

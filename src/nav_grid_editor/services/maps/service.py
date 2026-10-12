@@ -51,6 +51,7 @@ from .links import (
     upsert_link,
 )
 from .settings import (
+    MAIN_TIER_ID,
     CELL_BLOCKED,
     CELL_FREE,
     CELL_UNKNOWN,
@@ -76,6 +77,8 @@ from .settings import (
     default_profile_dir,
     default_tiles_root,
     tile_pattern,
+    disk_tier,
+    api_tier,
     valid_map_zoom,
     valid_grid_tier,
 )
@@ -85,7 +88,9 @@ from .tiles import TileStore, merge_tiles
 _MAX_FLOOR_REGIONS = 256
 _MAX_FLOOR_REGION_CELLS = 50_000
 _GRID_ARRAY_CACHE_MAX = 4
-MAIN_GRID_KEY = "__main__"
+#: 主图的 tier 在 API 口径下是 __main__、落盘口径下是空串。两者只经
+#: settings.disk_tier / api_tier 转换，别再内联判断。
+MAIN_GRID_KEY = MAIN_TIER_ID
 _LAYER_HEADERS = {
     "Referer": MAP_URL,
     "User-Agent": "Mozilla/5.0 nav-grid-editor",
@@ -1034,12 +1039,14 @@ class MapService:
             return fallback("no_layers")
         matched = [entry["tier_id"] for entry in entries if entry["matched"]]
         if len(matched) == 1:
-            return {"status": "unique", "tier_id": matched[0],
-                    "matched": matched, "reason": "region_hit"}
+            return {"status": "unique", "tier_id": api_tier(matched[0]),
+                    "matched": [api_tier(t) for t in matched],
+                    "reason": "region_hit"}
         if len(matched) > 1:
             # 高度区间真的重叠了 —— 服务端不替调用方挑，交回去让它决定
             return {"status": "ambiguous", "tier_id": "",
-                    "matched": matched, "reason": "overlap"}
+                    "matched": [api_tier(t) for t in matched],
+                    "reason": "overlap"}
         return fallback("no_region_covers")
 
     def get_grid_floor_map(self, map_name: str, zoom: str,
@@ -1154,8 +1161,7 @@ class MapService:
         tier = raw_tier or MAIN_GRID_KEY
         zoom = str(endpoint.get("zoom") or "") or str(query_zoom or "")
         if zoom:
-            path = self.grid2d_path(
-                map_name, zoom, "" if tier == MAIN_GRID_KEY else tier)
+            path = self.grid2d_path(map_name, zoom, disk_tier(tier))
             if not path.is_file():
                 return None, f"网格不存在（{path.name}）"
             return path, ""
@@ -1545,9 +1551,7 @@ class MapService:
                 "y_min": y_min, "y_max": y_max,
             })
             write = self.save_grid_floor_regions(
-                map_name, zoom,
-                "" if target_tier == MAIN_GRID_KEY else target_tier,
-                regions)
+                map_name, zoom, disk_tier(target_tier), regions)
             if not write.get("ok"):
                 return write
             saved.append({
@@ -1886,6 +1890,8 @@ class MapService:
         单一位置，不再有"读哪写哪"的旧位置兼容分支：新格式文件名是
         <地图>_<zoom>.grid.npz（没有 _2d 中缀）。
         """
+        # 两种口径都收（客户端可能直接送 __main__），落盘一律用空串口径
+        tier = disk_tier(tier)
         if tier:
             return self.grid2d_dir / f"{map_name}__{tier}_{zoom}{GRID_SUFFIX}"
         return self.grid2d_dir / f"{map_name}_{zoom}{GRID_SUFFIX}"
@@ -2049,7 +2055,7 @@ class MapService:
 
         tiers = []
         for tier_id in self._grid_tier_ids(map_name, zoom):
-            tier = "" if tier_id == MAIN_GRID_KEY else tier_id
+            tier = disk_tier(tier_id)
             path = self.grid2d_path(map_name, zoom, tier)
             if not path.is_file():
                 continue
@@ -2182,8 +2188,7 @@ class MapService:
         return ids
 
     def _nav_tier_meta(self, map_name: str, zoom: str, tier_id: str) -> dict | None:
-        path = self.grid2d_path(
-            map_name, zoom, "" if tier_id == MAIN_GRID_KEY else tier_id)
+        path = self.grid2d_path(map_name, zoom, disk_tier(tier_id))
         cached = self._cached_grid(path) if path.is_file() else None
         return cached[1] if cached else None
 
@@ -2400,9 +2405,8 @@ class MapService:
     def save_grid_floor_regions(self, map_name: str, zoom: str, tier: str,
                                 raw_regions) -> dict:
         """Update only one grid file's floor_regions metadata."""
-        # 主地图在前端叫 __main__，落盘时要用无 tier 的文件名。
-        if tier == MAIN_GRID_KEY:
-            tier = ""
+        # 主地图在 API 口径下叫 __main__，落盘要用无 tier 的文件名
+        tier = disk_tier(tier)
         if not valid_map_zoom(map_name, zoom) or (
                 tier and not valid_grid_tier(tier)):
             return {"ok": False, "error": "非法地图名/zoom/tier"}
