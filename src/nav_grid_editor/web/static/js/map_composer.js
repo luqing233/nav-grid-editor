@@ -3,6 +3,12 @@
 import { CELL_BLOCKED, CELL_FREE, CELL_UNKNOWN, GridDocument } from "./grid/grid-document.js";
 import { GridRasterCache } from "./grid/grid-raster-cache.js";
 import { loadGridDocument, saveGridDocument } from "./grid/grid-transport.js";
+import {
+  WALK_POLICIES,
+  policyLabel,
+  walkableAnomalies as walkableAnomaliesOf,
+  walkableComponents as walkableComponentsOf,
+} from "./grid/walk-policy.js";
 import { pickLayerGroup, tierToBaseMatrix } from "./layers/tier-transform.js";
 import { RENDER_LAYERS, RenderScheduler } from "./render/render-scheduler.js";
 
@@ -3095,76 +3101,18 @@ async function deleteGridLink(linkId) {
   }
 }
 
-const D8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
-
-// 可行走格的连通块大小（降序）。用**规划器真实的邻域规则**：八连通，且斜向时
-// 两条正交邻格都必须非阻挡（否则算穿墙角），越界视为阻挡——与 grid_io.neighbors
-// 和对端校验器 verify_grid.py 完全一致，这样两边报出来的块数才永远是同一个数。
+// 可行走格的连通块与"孤立/被困"诊断都在 grid/walk-policy.js 里，按**命名的策略**
+// 取判据。这里只负责把当前文档与保存范围递进去。
+//
+// 以前这两段各自内联了「什么叫可走」，分块告警那处用的是「节点认 Free、守卫只查
+// Blocked」这组不匹配的判据，于是报出来的块数在产品默认策略下偏少（map02 报 11、
+// 规划器看 12；base01 报 5、看 8）。抽出去之后判据只有一个来源。
 function walkableComponents(e) {
-  if (!e.freeCount) return [];
-  const bb = savedBounds(e);
-  if (!bb) return [];
-  // 规划器口径的"阻挡"：被标为阻挡，或落在保存范围之外（越界格 grid_io 一律当阻挡）
-  const blockedAt = (x, z) =>
-    (x < bb.x0 || x > bb.x1 || z < bb.z0 || z > bb.z1) ||
-    e.getCell(x, z) === CELL_BLOCKED;
-  const seen = new Set();
-  const comps = [];
-  e.forEachCell((ix, iz, value) => {
-    if (value !== CELL_FREE) return;
-    const start = ix + "," + iz;
-    if (seen.has(start)) return;
-    seen.add(start);
-    const stack = [start];
-    let n = 0;
-    while (stack.length) {
-      const k = stack.pop();
-      n++;
-      const c = k.indexOf(",");
-      const ix = parseInt(k, 10), iz = +k.slice(c + 1);
-      for (const d of D8) {
-        const dx = d[0], dz = d[1], nx = ix + dx, nz = iz + dz;
-        const nk = nx + "," + nz;
-        if (e.getCell(nx, nz) !== CELL_FREE || seen.has(nk)) continue;
-        if (dx && dz && (blockedAt(ix + dx, iz) || blockedAt(ix, iz + dz))) continue;
-        seen.add(nk);
-        stack.push(nk);
-      }
-    }
-    comps.push(n);
-  });
-  comps.sort((a, b) => b - a);
-  return comps;
+  return walkableComponentsOf(e, savedBounds(e), WALK_POLICIES.noUnknown);
 }
 
-// 可行走格里值得提示的两类"异常"，**两档互斥**。
-//
-// 用**邻居事实**而不是图连通性：禁斜穿墙角是我们自己的保守策略，不是物理——
-// 沿图算会把"四正交被挡、只能斜着连过去"的格子误判成孤立（base01_3 实测 6 个
-// 单格块里有 5 个是这么来的），让用户去修其实没问题的格子。
-//
-// 互斥是必须的：八邻全阻挡的格子**必然**也没有可行走邻居，不排除就会让同一个
-// 格子被两条提示各报一次，用户看到"1 个孤立 + 1 个被困"会以为是两个格子。
-// 所以这里一次算完、用 else-if 分档，而不是两个独立函数各扫一遍。
 function walkableAnomalies(e) {
-  const bb = savedBounds(e);
-  if (!bb) return { lone: [], trapped: [] };
-  const lone = [], trapped = [];
-  e.forEachCell((ix, iz, value) => {
-    if (value !== CELL_FREE) return;
-    let hasFreeNb = false, allBlocked = true;
-    for (const d of D8) {
-      const nx = ix + d[0], nz = iz + d[1];
-      const neighbor = e.getCell(nx, nz);
-      if (neighbor === CELL_FREE) hasFreeNb = true;
-      if (nx < bb.x0 || nx > bb.x1 || nz < bb.z0 || nz > bb.z1) continue;  // 越界当阻挡
-      if (neighbor !== CELL_BLOCKED) allBlocked = false;
-    }
-    // 被困优先：八邻全是阻挡才是可靠的"误点"判据（邻里有未知格就还能冒险连出去）
-    if (allBlocked) trapped.push([ix, iz]);
-    else if (!hasFreeNb) lone.push([ix, iz]);
-  });
-  return { lone, trapped };
+  return walkableAnomaliesOf(e, savedBounds(e));
 }
 
 // 保存后的连通性提示文案。只提示、不阻断。措辞必须留有余地：
@@ -3176,8 +3124,13 @@ function connectivityWarning(e) {
   const parts = [];
   if (comps.length > 1) {
     const total = comps.reduce((a, b) => a + b, 0);
-    parts.push("可行走分成 " + comps.length + " 块，最大块 " + (comps[0] / total * 100).toFixed(1) +
-               "%：不冒险（穿未知格）到不了其它块");
+    // 必须写明口径：块数取决于"要不要冒穿过未知格的险"。不写清楚，这个数字会被
+    // 当成客观事实，而它只在产品默认（不穿未知格）下成立 —— 放宽口径时未知格变成
+    // 可走，划分只会更粗、块数只会更少。
+    parts.push("可行走分成 " + comps.length + " 块（" +
+               policyLabel(WALK_POLICIES.noUnknown) + "），最大块 " +
+               (comps[0] / total * 100).toFixed(1) +
+               "%：不冒险到不了其它块，允许穿越未知格则块数更少");
   }
   if (lone.length) parts.push(lone.length + " 个可行走格没有可行走邻居（与主体不连通，确认无用可删）");
   if (trapped.length) parts.push(trapped.length + " 个可行走格八邻全是阻挡（真正被困，多半是误点）");
