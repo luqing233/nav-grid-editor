@@ -69,15 +69,16 @@ class FloorResolutionTest(unittest.TestCase):
                  "y_min": 260, "y_max": 300},
             ])
 
-            upper = svc.resolve_position_floor("map02", "map02_lv005", 0, 230, 0)
-            lower = svc.resolve_position_floor("map02", "map02_lv005", 0, 280, 0)
-            gap = svc.resolve_position_floor("map02", "map02_lv005", 0, 255, 0)
+            upper = svc.resolve_tier_by_height("map02", 0, 230, 0)
+            lower = svc.resolve_tier_by_height("map02", 0, 280, 0)
+            gap = svc.resolve_tier_by_height("map02", 0, 255, 0)
 
             self.assertEqual(upper["status"], "unique")
             self.assertEqual(upper["tier_id"], "scene_map02_lv005_layer_tips_7")
             self.assertEqual(lower["status"], "unique")
             self.assertEqual(lower["tier_id"], "scene_map02_lv005_layer_tips_6")
-            self.assertEqual(gap["status"], "no_match")
+            self.assertEqual(gap["status"], "main")
+            self.assertEqual(gap["reason"], "no_region_covers")
         finally:
             temp.cleanup()
 
@@ -93,7 +94,7 @@ class FloorResolutionTest(unittest.TestCase):
             self._save_grid(
                 svc, "scene_map02_lv005_layer_tips_6", [region])
 
-            result = svc.resolve_position_floor("map02", "map02_lv005", 0, 230, 0)
+            result = svc.resolve_tier_by_height("map02", 0, 230, 0)
             self.assertEqual(result["status"], "ambiguous")
             self.assertEqual(set(result["matched"]), {
                 "scene_map02_lv005_layer_tips_7",
@@ -255,8 +256,7 @@ class FloorResolutionTest(unittest.TestCase):
                 saved_grid["data"]["floor_regions"][0]["component_id"],
                 component["id"],
             )
-            resolved = svc.resolve_position_floor(
-                "map02", "map02_lv005", 0.5, 110, 0.5)
+            resolved = svc.resolve_tier_by_height("map02", 0.5, 110, 0.5)
             self.assertEqual(resolved["status"], "unique")
             self.assertEqual(
                 resolved["tier_id"], "scene_map02_lv005_layer_tips_7")

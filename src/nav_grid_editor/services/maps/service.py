@@ -977,64 +977,70 @@ class MapService:
             region["y_min"] <= y <= region["y_max"]
         )
 
-    def resolve_position_floor(self, map_name: str, level_id: str,
+    def resolve_tier_by_height(self, map_name: str,
                                x: float, y: float, z: float) -> dict:
-        """Resolve a WS position to a tier using grid metadata height volumes."""
+        """由三维坐标判定玩家在哪一层 —— **只看坐标，不看 levelId**。
+
+        官方的 `levelId` 不可信（同一个 levelId 会被多个分层共用、也可能滞后于
+        玩家实际位置），所以候选层是「这张地图上**所有声明了 `floor_regions` 的
+        层**」（主图同样是候选，只要它自己标了区间），命中靠坐标落在区间里。
+
+        没有区间命中时报 `main`（大地图）而不是"不知道" —— 没有分层重叠的地方
+        本来就只能是大地图。`reason` 把原因带出来，因为这两种情况在界面上该有
+        不同的说明：
+
+        - `no_region_covers`：有层标了区间，但没有一个盖住这点；
+        - `no_layers`：这张地图一层都没标过区间（当前数据的常态，map02 只有
+          2 段各 39 格，所以绝大多数坐标都走这条兜底 —— 它是主路径，不是边角）。
+
+        返回 ``{status, tier_id, matched, reason}``；`status` 取值
+        `unique` / `ambiguous` / `main` / `invalid`。
+
+        `invalid` 单独一档（地图名非法、坐标不是有限数）：那不是"在地表"，是这条
+        位置消息本身不可用，调用方**不该**据此把视图切到大地图。
+        """
+        def fallback(reason: str) -> dict:
+            return {"status": "main", "tier_id": "", "matched": [], "reason": reason}
+
         if not valid_map_zoom(map_name, "4"):
-            return {"status": "no_match", "tier_id": "", "matched": []}
+            return {"status": "invalid", "tier_id": "", "matched": [],
+                    "reason": "invalid_map"}
         try:
             x, y, z = float(x), float(y), float(z)
         except (TypeError, ValueError, OverflowError):
-            return {"status": "no_match", "tier_id": "", "matched": []}
+            return {"status": "invalid", "tier_id": "", "matched": [],
+                    "reason": "invalid_position"}
         if not all(math.isfinite(value) for value in (x, y, z)):
-            return {"status": "no_match", "tier_id": "", "matched": []}
-
-        wanted_level = str(level_id or "").strip()
-        layers = [
-            layer for layer in self._layer_entries()
-            if str(layer.get("map_name") or "") == map_name
-            and str(layer.get("level_id") or "") == wanted_level
-        ]
-        if self._tier_grid_file(map_name, MAIN_GRID_KEY):
-            layers.append({
-                "id": MAIN_GRID_KEY,
-                "map_name": map_name,
-                "level_id": "",
-                "name": "大地图",
-            })
-        if not wanted_level or wanted_level == map_name or not layers:
-            return {"status": "main", "tier_id": "", "matched": []}
+            return {"status": "invalid", "tier_id": "", "matched": [],
+                    "reason": "invalid_position"}
 
         entries = []
-        for layer in layers:
-            tier = str(layer.get("id") or "")
-            meta = self._tier_grid_meta(map_name, tier)
+        for tier in self._grid_tier_ids(map_name, "4"):
+            meta = self._nav_tier_meta(map_name, "4", tier)
             if not meta:
                 continue
-            regions = meta.get("floor_regions") or []
             try:
-                regions = _normalize_floor_regions(regions)
+                regions = _normalize_floor_regions(meta.get("floor_regions") or [])
             except ValueError as e:
                 _log(f"网格楼层区间非法 {map_name}__{tier}: {e}")
                 regions = []
+            if not regions:
+                continue
             matched = any(self._region_contains(region, x, y, z)
                           for region in regions)
             entries.append({"tier_id": tier, "matched": matched})
 
         if not entries:
-            return {"status": "no_grid", "tier_id": "", "matched": []}
-        if len(entries) == 1:
-            return {
-                "status": "unique",
-                "tier_id": entries[0]["tier_id"],
-                "matched": [entries[0]["tier_id"]],
-            }
+            return fallback("no_layers")
         matched = [entry["tier_id"] for entry in entries if entry["matched"]]
         if len(matched) == 1:
-            return {"status": "unique", "tier_id": matched[0], "matched": matched}
+            return {"status": "unique", "tier_id": matched[0],
+                    "matched": matched, "reason": "region_hit"}
         if len(matched) > 1:
-            return {"status": "ambiguous", "tier_id": "", "matched": matched}
-        return {"status": "no_match", "tier_id": "", "matched": []}
+            # 高度区间真的重叠了 —— 服务端不替调用方挑，交回去让它决定
+            return {"status": "ambiguous", "tier_id": "",
+                    "matched": matched, "reason": "overlap"}
+        return fallback("no_region_covers")
 
     def get_grid_floor_map(self, map_name: str, zoom: str,
                            level_id: str) -> dict:
@@ -1554,18 +1560,20 @@ class MapService:
         return {"ok": True, "component_id": component["id"], "saved": saved}
 
     def _on_position(self, data: dict) -> None:
-        """官方 WS 收到位置 → 用网格判断楼层 → 广播 coords 事件。"""
+        """官方 WS 收到位置 → 用坐标判断楼层 → 广播 coords 事件。
+
+        判定**不看 levelId**（官方那个字段不可信），只用 x/y/z 落在哪一层的高度
+        区间里，见 :meth:`resolve_tier_by_height`。
+        """
         enriched = dict(data) if isinstance(data, dict) else {"value": data}
         pos = enriched.get("pos") if isinstance(enriched.get("pos"), dict) else enriched
         map_name = str(enriched.get("mapId") or "").strip()
-        level_id = str(enriched.get("levelId") or "").strip()
         if map_name and pos:
-            resolution = self.resolve_position_floor(
-                map_name, level_id,
-                pos.get("x"), pos.get("y"), pos.get("z"),
-            )
+            resolution = self.resolve_tier_by_height(
+                map_name, pos.get("x"), pos.get("y"), pos.get("z"))
             enriched["gridTierId"] = resolution["tier_id"]
             enriched["gridFloorStatus"] = resolution["status"]
+            enriched["gridFloorReason"] = resolution["reason"]
             enriched["gridFloorCandidates"] = resolution["matched"]
         self.bus.emit(type="coords", data=enriched)
 
@@ -2028,7 +2036,7 @@ class MapService:
     #      都是错的 —— 同一点在 X/Z 上同时属于地面和地下，叠起来等于凭空连边；
     #   3. 主地图**不挖洞**：地表那一格是真实可走的，地下房间在它下面。把主图
     #      挖成 Blocked 会删掉真实可走的表面。位置属于哪一层由 floor_regions 的
-    #      Y 区间判定（见 resolve_position_floor），不靠挖格子。
+    #      Y 区间判定（见 resolve_tier_by_height），不靠挖格子。
     # 于是「可导航」= 端点都有效 + 每处与主图/其它层重合的区域都标了高度区间。
     def nav_graph(self, map_name: str, zoom: str, summary: bool = False) -> dict:
         """汇总一层地图的导航输入，并给出就绪判定。

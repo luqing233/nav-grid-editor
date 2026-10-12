@@ -147,23 +147,33 @@ uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 
 ### 「坐标 → 第几层」的判定规则
 
-`MapService.resolve_position_floor(map, level_id, x, y, z)` 用各层网格的
-`floor_regions` 判断玩家在哪一层。消费侧（ok-end-field）的跟随器要能独立复刻这条
-判定，不能依赖编辑器进程，因此规则与测试向量是**跨仓库契约**：
+`MapService.resolve_tier_by_height(map, x, y, z)` 用各层网格的 `floor_regions` 判断
+玩家在哪一层。消费侧（ok-end-field）的跟随器要能独立复刻这条判定，不能依赖编辑器
+进程，因此规则与测试向量是**跨仓库契约**：
 
-- 规则说明与全部向量：`tests/data/floor_rule_vectors.json`
+- 规则说明与全部向量：`tests/data/floor_rule_vectors.json`（`schema_version: 2`）
 - 执行器：`tests/test_floor_rule_vectors.py`
 
 两边各跑同一份向量；任何一侧改了行为，另一侧会立刻失败。向量里 `contract: false`
 的用例是当前实现的偶然行为（允许改动），失败时只打印提醒、不判失败。
 
+**判定不看 `levelId`** —— 官方那个字段不可信（同一个 levelId 会被多个分层共用、
+也可能滞后于玩家实际位置），所以候选层是「这张地图上所有声明了 `floor_regions`
+的层」，主图只要自己标了区间同样是候选、没有特权。返回四种结果：
+
+| status | 含义 | 附带 |
+| --- | --- | --- |
+| `unique` | 恰好一层盖住这点 | `tier_id` 是该层 |
+| `ambiguous` | 多层盖住 | `matched` 列出全部，`tier_id` 为空 —— **不替调用方挑** |
+| `main` | 兜底大地图 | `reason` = `no_layers`（一层都没标过）/ `no_region_covers`（标了但没盖住这点） |
+| `invalid` | 地图名非法或坐标非有限数 | 这条位置消息本身不可用，**不该**据此切到大地图 |
+
 几个容易踩的点（都在向量里）：
 
-- **`level_id` 为空、或等于地图名** → 直接 `main`（不在任何分层场景里）；
-  但 `level_id` 是**未知值**且主图有网格时，主图会成为唯一候选而报
-  `unique` / `__main__` —— 同样是主图，两种 `tier_id` 拼写都会出现。
-- **只剩一个候选层时会直接报 `unique`，不校验坐标是否落在它的高度区间里**。
-  所以 `unique` 不等于「坐标确实在该层区间内」。这条是当前实现的偶然行为。
+- **兜底是主路径，不是边角**：当前 map02 只有 2 段各 39 格区间，所以绝大多数坐标
+  都走 `main`。`no_layers` 与 `no_region_covers` 要分开，界面上该说不同的话。
+- **只有一个候选层也要它真的盖住这点** 才报 `unique`（v1 里是「单候选无条件
+  unique」，那条 wart 在 v2 随 levelId 一起消失）。
 - `region.cells` 非空时**先要求命中某个 cell 的 X/Z**，再判外框与 Y；都是闭区间。
 - 区间非法（如 `x0 > x1`）时该层按「没有区间」处理，不抛错、不连累其它层。
 
@@ -278,8 +288,12 @@ Invoke-RestMethod -Method Post -ContentType "application/json" `
   -Body $body http://127.0.0.1:8877/api/grid2d/floor-regions
 ```
 
-同一位置命中唯一楼层时，SSE `coords` 事件会带 `gridFloorStatus="unique"` 和
-`gridTierId`；命中多层时返回 `ambiguous`，服务端不会随便选择楼层。
+SSE `coords` 事件会带上判定结果：`gridFloorStatus`（`unique` / `ambiguous` /
+`main` / `invalid`）、`gridTierId`、`gridFloorReason`（`region_hit` / `overlap` /
+`no_layers` / `no_region_covers` / `invalid_map` / `invalid_position`）与
+`gridFloorCandidates`。命中多层时是 `ambiguous`，服务端不会随便选择楼层；没有分层
+重叠时是 `main`（大地图），这才是当前数据下的常态 —— 判定规则见上文「坐标 → 第
+几层」一节。
 网格或连接模式中的“楼层区间”按钮会自动叠加同一区域的候选楼层：绿色为当前层，
 红色为 X/Z 与 Y 都重合，黄色为只有 X/Z 重合。先选择“重合连通区”，再选择
 “重合地图网格”，分别填写该层的 Y 范围并保存。所有涉及层级都已定义高度的

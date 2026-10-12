@@ -7,6 +7,9 @@
 
 向量文件里 ``contract: false`` 的用例是当前实现的偶然行为，允许改动；它们仍然跑，
 但失败时不会被当成契约破坏 —— 那正是提醒"这里被改过了"的信号。
+
+**v2 起判定不再看 `levelId`**（官方那个字段不可信），只用坐标落在哪一层的高度区间
+里。v1 的 levelId 用例已作废。
 """
 
 import json
@@ -61,14 +64,15 @@ class FloorRuleVectorsTest(unittest.TestCase):
     def test_vectors(self):
         payload = json.loads(VECTORS.read_text(encoding="utf-8"))
         self.assertTrue(payload.get("vectors"), "向量文件不该是空的")
+        self.assertEqual(payload.get("schema_version"), 2)
         soft_failures = []
         for vector in payload["vectors"]:
             with self.subTest(vector=vector["name"]):
                 with tempfile.TemporaryDirectory() as tmp:
                     svc = self._service(Path(tmp), vector)
                     query = vector["query"]
-                    got = svc.resolve_position_floor(
-                        query["map"], query["level_id"],
+                    got = svc.resolve_tier_by_height(
+                        query["map"],
                         _number(query["x"]), _number(query["y"]),
                         _number(query["z"]),
                     )
@@ -77,6 +81,7 @@ class FloorRuleVectorsTest(unittest.TestCase):
                     got["status"] == expect["status"]
                     and got["tier_id"] == expect["tier_id"]
                     and sorted(got["matched"]) == sorted(expect["matched"])
+                    and got.get("reason") == expect.get("reason")
                 )
                 if same:
                     continue

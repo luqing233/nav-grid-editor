@@ -3490,9 +3490,16 @@ function syncMapSelectors(mapId, preferredZoom = "") {
 async function syncPositionLocation(data) {
   if (!data || typeof data !== "object") return;
   const mapId = String(data.mapId || "").trim();
-  const levelId = String(data.levelId || "").trim();
   if (!mapId) return;
-  const locationKey = mapId + "|" + levelId;
+  // 去重键**不能**用 levelId：楼层判定现在只看坐标（服务端 resolve_tier_by_height），
+  // 同一个 levelId 底下换楼层是常事，用它去重会把"同一条 levelId 内的楼层变化"整条
+  // 丢掉 —— 实测就是这样：y=250 切到 tips_7 后，y=245（落到大地图）被当成重复消息
+  // 忽略了。改成用服务端判出来的目标楼层。
+  const resolved = String(data.gridFloorStatus || "") === "unique"
+    ? String(data.gridTierId || "")
+    : (String(data.gridFloorStatus || "") === "main"
+        ? "" : "|" + String(data.gridFloorStatus || ""));
+  const locationKey = mapId + "|" + resolved;
   if (locationKey === state.positionView.appliedKey) return;
 
   const currentKey = state.activeKey || "";
@@ -3529,18 +3536,23 @@ async function syncPositionLocation(data) {
   if (requestId !== state.positionView.requestId || state.activeKey !== key) return;
 
   const activeTierId = currentTierId();
+  // 楼层判定只看坐标不看 levelId（服务端 resolve_tier_by_height）。三种结果里
+  // `main` 现在是**最常见**的那种：没标过高度区间的地方本来就只能是大地图，
+  // 不是"判不出来"。reason 区分"没有层标过区间"和"标了但没盖住这点"。
   const floorStatus = String(data.gridFloorStatus || "");
+  const floorReason = String(data.gridFloorReason || "");
   let targetTierId = activeTierId;
   if (floorStatus === "unique") {
     targetTierId = String(data.gridTierId || "");
   } else if (floorStatus === "main") {
     targetTierId = "";
+    if (floorReason === "no_layers" && activeTierId) {
+      addLog("这张地图还没有任何分层标过高度区间，按大地图处理", "t-warn");
+    } else if (floorReason === "no_region_covers" && activeTierId) {
+      addLog("坐标没有落在任何已标的高度区间里，按大地图处理", "t-warn");
+    }
   } else if (floorStatus === "ambiguous") {
-    addLog("WS 三维位置命中多个网格楼层，保持当前楼层不自动切换", "t-warn");
-    state.positionView.appliedKey = locationKey;
-    return;
-  } else if (floorStatus === "no_grid" || floorStatus === "no_match") {
-    addLog("当前区域没有可匹配的网格高度区间，保持当前楼层", "t-warn");
+    addLog("坐标同时落在多层的高度区间里，保持当前楼层不自动切换", "t-warn");
     state.positionView.appliedKey = locationKey;
     return;
   }
