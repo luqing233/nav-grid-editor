@@ -145,6 +145,28 @@ uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 
 `cross_tier_edges_from` 恒为 `links` —— 响应里不会出现任何隐式跨层邻接。
 
+### 「坐标 → 第几层」的判定规则
+
+`MapService.resolve_position_floor(map, level_id, x, y, z)` 用各层网格的
+`floor_regions` 判断玩家在哪一层。消费侧（ok-end-field）的跟随器要能独立复刻这条
+判定，不能依赖编辑器进程，因此规则与测试向量是**跨仓库契约**：
+
+- 规则说明与全部向量：`tests/data/floor_rule_vectors.json`
+- 执行器：`tests/test_floor_rule_vectors.py`
+
+两边各跑同一份向量；任何一侧改了行为，另一侧会立刻失败。向量里 `contract: false`
+的用例是当前实现的偶然行为（允许改动），失败时只打印提醒、不判失败。
+
+几个容易踩的点（都在向量里）：
+
+- **`level_id` 为空、或等于地图名** → 直接 `main`（不在任何分层场景里）；
+  但 `level_id` 是**未知值**且主图有网格时，主图会成为唯一候选而报
+  `unique` / `__main__` —— 同样是主图，两种 `tier_id` 拼写都会出现。
+- **只剩一个候选层时会直接报 `unique`，不校验坐标是否落在它的高度区间里**。
+  所以 `unique` 不等于「坐标确实在该层区间内」。这条是当前实现的偶然行为。
+- `region.cells` 非空时**先要求命中某个 cell 的 X/Z**，再判外框与 Y；都是闭区间。
+- 区间非法（如 `x0 > x1`）时该层按「没有区间」处理，不抛错、不连累其它层。
+
 ### 「可走」只有一个来源
 
 编辑器里所有连通性派生量（保存网格时的分块告警、孤立/被困诊断）都从
