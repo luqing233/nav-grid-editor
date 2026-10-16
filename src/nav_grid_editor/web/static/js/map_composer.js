@@ -76,7 +76,7 @@ const brushCursorLabel = $("brushCursorLabel");
 
 const MAP_DISPLAY_NAMES = {
   base01: "帝江号",
-  map01: "四号谷底",
+  map01: "四号谷地",
   map02: "武陵",
 };
 
@@ -2791,7 +2791,7 @@ function endpointFromRect(rect) {
   const e = ed();
   const [map, zoom] = (state.activeKey || "@").split("@");
   if (!e || !map) return null;
-  return {
+  const endpoint = {
     map,
     tier: currentTierId(),
     zoom: zoom || "",
@@ -2802,6 +2802,74 @@ function endpointFromRect(rect) {
       z1: e.origin[1] + (rect.z1 + 1) * e.cellSize,
     },
   };
+  return withLinkEndpointY(endpoint, rect.x0, rect.z0);
+}
+
+// ---------------- 端点高度（可选，schema v3） ----------------
+//
+// 端点过去只有 X/Z，于是「这两点是不是通向同一处空间」在格式层面无法校验、两层的落差
+// 也只能从 floor_regions 区间去推（那是区间不是点）。这里让人**显式**标：标了就是量
+// 出来的，没标就保持"不知道"，不替谁猜。
+const LINK_Y_FIELDS = {
+  from: ["linkFromYMin", "linkFromYMax"],
+  to: ["linkToYMin", "linkToYMax"],
+};
+
+function linkEndpointY(side) {
+  const [minId, maxId] = LINK_Y_FIELDS[side];
+  const raw = [$(minId).value, $(maxId).value].map(v => String(v).trim());
+  if (!raw[0] && !raw[1]) return null;
+  const low = Number(raw[0] || raw[1]);
+  const high = Number(raw[1] || raw[0]);
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return null;
+  return low <= high ? [low, high] : [high, low];
+}
+
+function setLinkEndpointY(side, endpoint) {
+  const [minId, maxId] = LINK_Y_FIELDS[side];
+  const yMin = endpoint && Number.isFinite(Number(endpoint.y_min))
+    ? endpoint.y_min : "";
+  const yMax = endpoint && Number.isFinite(Number(endpoint.y_max))
+    ? endpoint.y_max : "";
+  $(minId).value = yMin === "" ? "" : String(yMin);
+  $(maxId).value = yMax === "" ? "" : String(yMax);
+}
+
+// 把工具栏里的 Y 并进端点对象：框的那一端对应哪组输入框，按当前阶段定。
+function withLinkEndpointY(endpoint) {
+  return withEndpointYFromForm(endpoint, link.stage === "target" ? "to" : "from");
+}
+
+// 保存时按 **side 显式**取 Y —— 起点读起点那组、终点读终点那组，不受当前阶段影响。
+function withEndpointYFromForm(endpoint, side) {
+  if (!endpoint) return endpoint;
+  const { y_min, y_max, ...rest } = endpoint;
+  const y = linkEndpointY(side);
+  return y ? { ...rest, y_min: y[0], y_max: y[1] } : rest;
+}
+
+// 用该端点所在层**已标的高度区间**填入。明确是"用层区间填"，不是自动推断 ——
+// 区间是层的属性、不是这个端点的实测高度，所以由人按一下按钮才算数。
+function fillLinkEndpointYFromLayer(side) {
+  const endpoint = side === "from" ? link.source : link.target;
+  if (!endpoint) return "还没选" + (side === "from" ? "起点" : "终点");
+  const wanted = toApiTier(endpoint.tier);
+  const layer = (state.floorMap.layers || [])
+    .find(item => toApiTier(item.tier_id) === wanted);
+  const regions = (layer && layer.floor_regions) || [];
+  if (!regions.length) {
+    return "该层没有已标的高度区间（先用「楼层区间」标一段）";
+  }
+  const cx = (Number(endpoint.rect.x0) + Number(endpoint.rect.x1)) / 2;
+  const cz = (Number(endpoint.rect.z0) + Number(endpoint.rect.z1)) / 2;
+  const hit = regions.find(region =>
+    Number(region.x0) <= cx && cx <= Number(region.x1) &&
+    Number(region.z0) <= cz && cz <= Number(region.z1));
+  if (!hit) return "该端点不在任何已标区间范围内";
+  const [minId, maxId] = LINK_Y_FIELDS[side];
+  $(minId).value = String(hit.y_min);
+  $(maxId).value = String(hit.y_max);
+  return null;
 }
 
 function clearLinkDraft() {
@@ -2810,6 +2878,8 @@ function clearLinkDraft() {
   link.drag = null;
   link.editingId = null;
   link.stage = "source";
+  setLinkEndpointY("from", null);
+  setLinkEndpointY("to", null);
   updateLinkEditorUi();
   renderLinkList();
   requestRender(RENDER_LAYERS.LINK);
@@ -2971,7 +3041,7 @@ function renderLinkList() {
       "<b>" + endpointLabel(item.from) + "</b> → <b>" +
       endpointLabel(item.to) + "</b><br><small>" +
       linkKindLabel(item.kind) + " · " + (item.bidirectional ? "双向" : "单向") +
-      " · cost " + item.cost +
+      " · cost " + item.cost + dropLabel(item) +
       (invalid ? '<br><span class="t-err">端点无效：' +
         (item.checks.issue || "") + "</span>" : "") +
       "</small>";
@@ -3046,6 +3116,8 @@ async function editGridLink(item) {
     $("linkBidirectional").checked = !!item.bidirectional;
   }
   if ($("linkCost")) $("linkCost").value = item.cost;
+  setLinkEndpointY("from", item.from);
+  setLinkEndpointY("to", item.to);
   updateLinkEditorUi();
   requestRender(RENDER_LAYERS.LINK);
   renderLinkList();
@@ -3059,6 +3131,16 @@ async function editGridLink(item) {
   await focusGridLink(item);
 }
 
+// 落差只在两端都标了高度时才有 —— 没有就什么都不写，不用"推断值"凑数。
+function dropLabel(item) {
+  const drop = item.checks && item.checks.drop;
+  if (!drop) return "";
+  const value = Number(drop.drop);
+  if (!Number.isFinite(value)) return "";
+  const rounded = Math.round(value * 10) / 10;
+  return " · 落差 " + (rounded > 0 ? "+" : "") + rounded + " m";
+}
+
 async function saveGridLink() {
   if (!link.source || !link.target) return;
   const payload = {
@@ -3068,6 +3150,8 @@ async function saveGridLink() {
     kind: $("linkKind").value,
     bidirectional: $("linkBidirectional").checked,
     cost: parseFloat($("linkCost").value) || 1,
+    from: withEndpointYFromForm(link.source, "from"),
+    to: withEndpointYFromForm(link.target, "to"),
   };
   try {
     const res = await fetch("/api/grid-links", {
@@ -3467,8 +3551,17 @@ async function startMarks() {
   renderMarksPanel();
 }
 
-// ---------------- 玩家位置流（官方地图 WS） ----------------
-// 服务端直接连 wss://ws.skland.com/.../endfield/map，这里只读状态、控制启停。
+// ---------------- 玩家位置流（默认抓包后端，官方 WS 可选） ----------------
+// 服务端读坐标（默认轮询 endfield-capture-backend 的 /api/state），这里只读状态、
+// 控制启停；具体用哪个源由服务端决定，页面按 /api/position/status 的 source 显示。
+const POSITION_SOURCE_LABELS = { capture: "抓包后端", ws: "官方 WS" };
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[ch]));
+}
+
 function syncMapSelectors(mapId, preferredZoom = "") {
   const zooms = (state.tileMaps[mapId] || []).slice().sort((a, b) => +a - +b);
   const selM = $("selMap"), selZ = $("selZoom");
@@ -3582,22 +3675,31 @@ function renderPositionPanel() {
   const p = state.position;
   const el = $("posStreamState");
   if (!p || !el) return;
+  const label = POSITION_SOURCE_LABELS[p.source] || p.source || "";
+  const portTag = p.capture_port ? label + " :" + p.capture_port : label;
   let line;
   if (p.connected) {
-    line = '位置流: <b class="t-ok">已连接</b>';
+    line = '位置流: <b class="t-ok">已连接</b>' +
+      (label ? ' <span class="t-time">' + portTag + "</span>" : "");
+    if (p.source === "capture" && Number.isFinite(Number(p.age_seconds))) {
+      line += ' <span class="t-time">' + Number(p.age_seconds).toFixed(1) + "s 前</span>";
+    }
     if (p.last_position) {
       const q = p.last_position;
       line += ' <span class="t-time">(' + q.x.toFixed(1) + ", " + q.z.toFixed(1) + ")</span>";
     }
-  } else if (!p.credential_ready) {
-    line = '位置流: <b class="t-warn">缺凭证</b> —— 需要 configs/hg_content.txt';
-  } else if (p.running) {
-    line = "位置流: 连接中…";
-  } else {
+  } else if (!p.running) {
     line = "位置流: 未开启";
+  } else {
+    // 抓到端口就带上（"抓包后端 :8764 · …"）；没抓到就只说"没找到"，不重复报来源名
+    const prefix = p.source === "capture"
+      ? (p.capture_port ? portTag + " · " : "")
+      : (label ? label + " · " : "");
+    line = '位置流: <b class="t-warn">' +
+      escapeHtml(prefix + (p.hint || "连接中…")) + "</b>";
   }
-  if (!p.connected && p.last_error) {
-    line += '<br><span class="t-err">' + p.last_error + "</span>";
+  if (!p.connected && p.last_error && p.last_error !== p.hint) {
+    line += '<br><span class="t-err">' + escapeHtml(p.last_error) + "</span>";
   }
   el.innerHTML = line;
   const btn = $("btnPosToggle");
@@ -4961,6 +5063,17 @@ $("btnLinkSource").onclick = () => setLinkStage("source");
 $("btnLinkTarget").onclick = () => setLinkStage("target");
 $("btnLinkSave").onclick = () => void saveGridLink();
 $("btnLinkClear").onclick = clearLinkDraft;
+$("btnLinkFillY").onclick = () => {
+  const problems = ["from", "to"]
+    .map(side => fillLinkEndpointYFromLayer(side))
+    .filter(Boolean);
+  if (problems.length) {
+    setStatus("填入端点高度：" + problems.join("；"), "warning");
+  } else {
+    setStatus("已用各层已标区间填入端点高度", "ok");
+  }
+  updateLinkEditorUi();
+};
 $("btnEditLoad").onclick = () => loadGrid2D(true);
 $("btnEditSave").onclick = saveGrid2D;
 $("btnSelFree").onclick = () => applySelection("free");

@@ -39,6 +39,8 @@ uv run nav-grid-editor
 | `--tiles-root` | 瓦片目录，默认 `<data-root>/assets/tiles` |
 | `--profile-dir` | Playwright 登录态目录，默认 `<data-root>/browser_profile` |
 | `--grid2d-dir` | 2D 网格输出目录，默认 `<data-root>/assets/nav-grid-data` |
+| `--position-source` | 玩家位置源：`capture`（抓包后端，默认）/ `ws`（官方地图 WS 兜底） |
+| `--capture-url` | 显式指定抓包后端地址；不给就从 `127.0.0.1:8765` 升序探到 `8775` |
 
 示例：
 
@@ -47,8 +49,12 @@ uv run nav-grid-editor --port 8765 --data-root D:/nav-data
 uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 ```
 
-对应环境变量包括 `NAV_DATA_ROOT`、`NAV_TILES_ROOT`、`NAV_PROFILE_DIR`
-和 `NAV_GRID2D_DIR`。
+对应环境变量包括 `NAV_DATA_ROOT`、`NAV_TILES_ROOT`、`NAV_PROFILE_DIR`、
+`NAV_GRID2D_DIR`、`NAV_POSITION_SOURCE` 和 `NAV_CAPTURE_URL`。
+
+> 本服务默认也监听 `8765`，而抓包后端的默认端口同样是 `8765`——两个都要跑时，
+> 用 `--port`（本服务）或后端 `serve --port`（后端）把其中一个错开。后端换了端口
+> 也不用改这里的配置：位置源会从 `8765` 起自动探测（见下文「玩家位置源」）。
 
 > 数据根目录默认取当前工作目录。建议始终在项目根目录启动，或显式传入
 > `--data-root`。
@@ -74,10 +80,11 @@ uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 - **地图标定**：在地图上选择特征点并输入游戏坐标 X/Z。系统使用仿射最小二乘
   和 RANSAC 计算像素与世界坐标的映射，结果写入对应地图的
   `<地图>_<zoom>_mapping.json`。
-- **玩家定位**：标定完成后，服务端用 `configs/hg_content.txt` 里的凭证直接连
-  官方地图 WebSocket `wss://ws.skland.com/ws/v1/game/endfield/map`，把实时坐标
-  经 SSE 推给网页，显示玩家位置，不再依赖本地 WS 中继。`POST /api/coords`
-  仍保留为外部客户端的备用上报口。
+- **玩家定位**：默认轮询抓包后端 `endfield-capture-backend` 的
+  `GET http://127.0.0.1:8765/api/state`，把 `lastPosition` 经 SSE 推给网页，
+  显示玩家位置、按坐标自动切楼层，不再依赖本地 WS 中继与账号凭证。
+  官方地图 WS 实现保留为可选兜底（`NAV_POSITION_SOURCE=ws`）。`POST /api/coords`
+  仍保留为外部客户端的备用上报口。详见下文「玩家位置源」。
 - **路径标记**：粘贴 `(x,z)` 坐标序列后生成路径折线。起点为绿色，终点为
   红色，途经点显示编号。
 - **坐标读取**：点击地图即可查看游戏世界坐标，以及对应的 2D 网格格子坐标。
@@ -85,6 +92,49 @@ uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
   面板在浏览、网格和取坐标模式下可用，标定模式下隐藏。
 - **2D 网格编辑**：在已标定的地图上绘制 `Free`、`Blocked` 和未知格子。
   支持画笔宽度、区域框选和批量填充。
+
+### 玩家位置源
+
+位置流默认来自抓包后端 **endfield-capture-backend**：本服务只读它暴露的
+`GET http://127.0.0.1:<端口>/api/state`，用标准库 `urllib` 轮询，不新增依赖，
+也不启动 / 重启 / 干预后端进程。官方地图 WS（`services/endfield_ws.py`，需要
+`configs/hg_content.txt` 里的账号凭证）保留为可选兜底，设
+`NAV_POSITION_SOURCE=ws` 切回去。页面上的「位置流」开关、
+`GET /api/position/status` 与 `POST /api/position/start|stop` 对两种源是同一套行为。
+
+**端口自动探测。** 没有显式配置 `--capture-url` / `NAV_CAPTURE_URL` 时，位置源从
+`127.0.0.1:8765` **升序**探到 `8775`，锁定第一个 `/api/state` 答得像抓包后端的
+端口，并把它写进状态（`capture_port`）与页面（「已连接 · 抓包后端 :8766」）。
+没找到就在日志和面板里报「已探测 8765–8775」。
+只认返回体里有 `flows` / `lastPosition` 的响应，所以本服务自己占着 `8765` 时
+（它对 `/api/state` 回 404）不会被误判。探测是只读的，不会启动后端；锁定的端口
+掉线后会重新扫描（5 秒冷却），后端换端口 / 重启也能自己接上。
+显式给了 `--capture-url` 就钉死用那个地址、不再探测。
+
+**后端必须先于游戏主连接启动。** 会话密钥只在登录握手那一刻出现一次，中途启动的
+后端整条流都推不出坐标，只会报「缺少连接起点，请重新启动游戏」——这时重启后端也没用，
+只能重开游戏逼出一条新连接。抓包只过滤 30000 / 40000 两个端口。
+
+**判「真的接上了」看 `flows[]`，不看 `lastPosition`。** `lastPosition` 一旦有值就
+永远保留，重登录、退游戏都不会清空；`flows[]` 里有一条 `status` 为「正在解码」且
+`lastPacket` 还在更新的连接，才算接上。坐标所属的连接已经结束（终态，或超过 30 秒
+没收到任何报文）时，这份坐标**不会**画到地图上——它描述的是上一局的位置。
+
+**不要拿「多久没更新」当断线依据。** 上报是事件驱动的：移动中约 0.27 秒一条，
+完全静止时没有位置包。所以静止时 `age_seconds` 会变大，但连接仍然活着；界面上的
+「N s 前」只作提示。
+
+| `health` | 含义 |
+| --- | --- |
+| `decoding` | 有条连接正在解码 —— 唯一算「已连接」的状态 |
+| `handshake_pending` | 连接已发现，登录握手还没完成 |
+| `missed_handshake` | 抓包晚于这条连接（后端被重启过 / 起晚了），只能重开游戏 |
+| `no_connection` | 后端在跑，但没有仍在继续的连接 |
+| `backend_down` | 连不上抓包后端 |
+
+地图名按后端的场景表来：`mapId` 有值（如 `map02`）就直接用；`levelId` 非空但
+`mapId` 为空表示这个场景**不属于任何大地图**（试炼场等），此时不会按坐标范围去猜，
+页面明确报「没有网格」，而不是加载一张错的网格。
 
 ### 网格状态
 
@@ -103,6 +153,7 @@ uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 
 - 起点和终点可以是大地图、分层地图或独立地图；
 - 端点保存世界坐标区域（外加所属 `zoom`），不依赖易漂移的格子下标；
+- 端点可以带**可选的高度范围** `y_min` / `y_max`（见下）；
 - 支持双向、单向、楼梯、电梯、传送、门、绳索和通行代价；
 - 编辑器中进入“连接”模式，依次框选起点区域、切换分层、框选终点区域并保存；
   已存在的连接在“分层连接”面板里点“编辑”可以只重选端点，不必删掉重画。
@@ -114,8 +165,23 @@ uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 读取时不改数据：已存在的连接如果端点无效，会在响应里带上 `checks`（`valid` 与
 `issue`），编辑器把这条连接标红、列表里也写明原因，由用户决定怎么修。
 
-`links.json` 目前是 `schema_version: 2`；v1 的端点没有 `zoom`，读出来会补成 `""`
-并按查询的 `zoom` 解析（磁盘上的版本等下次写入才升上去）。
+**端点高度（`y_min` / `y_max`，可选）。** 端点过去只有 X/Z，于是“这两点是不是通向
+同一处空间”在格式层面**无法校验**，两层的落差也只能从各自的 `floor_regions` 区间去
+推 —— 那是区间不是点，“按落差定价”更无从下手。加上这两个字段后落差是**量出来的**：
+
+- 两端都给 → 响应里带 `checks.drop`（`from_center` / `to_center` / `drop` / 两个
+  `span`），编辑器在连接列表里显示“落差 ±N m”；
+- 只给一端、或都不给 → `drop` 是 `null`。**不给就是不猜** —— 缺一端时拿层区间凑一个
+  数会让人以为它是实测的；
+- 两个键要么都给要么都不给，且必须有限、`y_min <= y_max`，否则拒绝保存。
+
+编辑器里那四个 Y 输入框按“起点 / 终点”分成两组，跟着框选阶段走；“用层区间填入”
+按钮把该端点所在层**已标的高度区间**填进去（明确是“用层区间填”，不是自动推断 ——
+区间是层的属性，不是这个端点的实测高度，所以由人按一下才算数）。
+
+`links.json` 目前是 `schema_version: 3`。v1 的端点没有 `zoom`，读出来会补成 `""` 并按
+查询的 `zoom` 解析；v1/v2 都没有端点高度，读出来保持缺失（“不知道”是个合法状态）。
+磁盘上的版本等下次写入才升上去。
 
 ### 分层导航的约定
 
@@ -304,8 +370,8 @@ GitHub 仓库只跟踪以下内容：
 `meta` 包含 `origin`、`cell_size`、`magic`、`schema_version` 和
 `axis_convention`。`origin` 表示 `cells[0,0]` 最小角的世界坐标。
 
-分层网格还可以在 `meta.floor_regions` 中保存三维高度区间。服务端收到 WS
-位置后，用这些区间判断玩家所在楼层：
+分层网格还可以在 `meta.floor_regions` 中保存三维高度区间。服务端收到位置流
+坐标后，用这些区间判断玩家所在楼层：
 
 ```json
 {
@@ -425,7 +491,7 @@ assets/tiles/layers/
 | 内部 ID | 显示名称 |
 | --- | --- |
 | `base01` | 帝江号 |
-| `map01` | 四号谷底 |
+| `map01` | 四号谷地 |
 | `map02` | 武陵 |
 
 ## 项目结构
@@ -439,7 +505,8 @@ src/nav_grid_editor/
 │   └── fetch_marks.py           命令行地图标记抓取
 ├── services/
 │   ├── maps/                    瓦片、事件、网格、标定与服务编排
-│   ├── endfield_ws.py           官方地图 WS 位置流（认证复用 marks.py）
+│   ├── capture_position.py      抓包后端位置源（默认，轮询 /api/state）
+│   ├── endfield_ws.py           官方地图 WS 位置流（可选兜底，认证复用 marks.py）
 │   └── marks.py                 地图标记抓取、OAuth 签名与校验
 ├── integrations/smsdk/          设备 ID、指纹与 SMSdk 运行资源
 └── web/

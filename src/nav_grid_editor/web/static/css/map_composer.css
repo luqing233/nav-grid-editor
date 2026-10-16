@@ -5629,3 +5629,13 @@ body.side-collapsed #sidePanel {
   opacity: 0.42;
   filter: grayscale(0.45);
 }
+
+/* 连接端点的可选高度：四个窄输入并排，别把工具栏撑开 */
+.link-y-input {
+  width: 62px;
+  min-width: 0;
+}
+
+.link-y-sep {
+  color: var(--text-muted);
+}

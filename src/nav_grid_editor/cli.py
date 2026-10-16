@@ -45,9 +45,13 @@
 ``assets/items/``（地图标记数据）。``browser_profile/``（登录态）与
 ``configs/``（设备ID）是凭证类目录，刻意留在 ``assets/`` 外面。
 
-玩家位置不再依赖本地 ``ws://127.0.0.1:3001`` 中继：服务启动后直接用
-``configs/hg_content.txt`` 里的凭证连官方地图 WebSocket
-``wss://ws.skland.com/ws/v1/game/endfield/map``，把实时坐标经 SSE 推给网页。
+玩家位置不再依赖本地 ``ws://127.0.0.1:3001`` 中继：默认轮询抓包后端
+``endfield-capture-backend`` 的 ``GET /api/state``，把实时坐标经 SSE 推给网页。
+后端端口默认自动探测——从 ``127.0.0.1:8765`` 升序探到 ``8775``，取第一个应答的
+抓包后端；显式 ``--capture-url`` 则钉死不再探测。后端必须先于游戏主连接
+启动（否则那条流永远报「缺少连接起点」）；本应用只读状态，不会拉起或重启它。
+官方地图 WS 那条实现保留在 ``services/endfield_ws.py``，设
+``NAV_POSITION_SOURCE=ws`` 可切回兜底。
 
 可用 ``--data-root`` / ``NAV_DATA_ROOT`` 换根目录，或用 ``--tiles-root`` /
 ``--profile-dir`` / ``--grid2d-dir`` 单独覆盖。
@@ -85,6 +89,14 @@ def _run_server(argv: list[str] | None = None) -> int:
     ap.add_argument("--grid2d-dir", default="",
                     help="2D 网格输出目录（默认 <data-root>/assets/nav-grid-data，"
                          "可用环境变量 NAV_GRID2D_DIR）")
+    ap.add_argument("--position-source", default="",
+                    choices=("", "capture", "ws"),
+                    help="玩家位置源：capture=抓包后端（默认），ws=官方地图 WS 兜底。"
+                         "也可用环境变量 NAV_POSITION_SOURCE")
+    ap.add_argument("--capture-url", default="",
+                    help="抓包后端地址，显式指定就不再探测（也可用环境变量 "
+                         "NAV_CAPTURE_URL）。默认从 127.0.0.1:8765 升序探到 8775，"
+                         "取第一个应答的抓包后端")
     args = ap.parse_args(argv)
 
     svc = MapService(
@@ -92,6 +104,8 @@ def _run_server(argv: list[str] | None = None) -> int:
         tiles_root=Path(args.tiles_root) if args.tiles_root else None,
         profile_dir=Path(args.profile_dir) if args.profile_dir else None,
         grid2d_dir=Path(args.grid2d_dir) if args.grid2d_dir else None,
+        position_source=args.position_source or None,
+        capture_url=args.capture_url or None,
     )
     # 把服务实例挂到 server 模块，路由直接使用（与原来挂给 Handler 的用法一致）
     api_app.service = svc
@@ -107,9 +121,15 @@ def _run_server(argv: list[str] | None = None) -> int:
     if map_service.Image is None:
         print("提示: 未安装 Pillow，WebP 瓦片转换与总图落盘不可用")
 
-    # 位置流默认关闭，避免启动即消耗凭证和网络；需要时在页面手动开启。
-    print("玩家位置流:              默认关闭"
-          "（页面手动开启，凭证 configs/hg_content.txt）")
+    # 位置流默认关闭，避免启动即轮询；需要时在页面手动开启。
+    if svc.position_source == "ws":
+        print("玩家位置流:              默认关闭（页面手动开启，官方地图 WS，"
+              "凭证 configs/hg_content.txt）")
+    elif svc.capture_url:
+        print(f"玩家位置流:              默认关闭（页面手动开启，抓包后端 {svc.capture_url}）")
+    else:
+        print("玩家位置流:              默认关闭（页面手动开启，抓包后端端口自动探测 "
+              "127.0.0.1:8765→8775）")
 
     # uvicorn 自带 HTTP/1.1 keep-alive（原来用 stdlib 得手工设 protocol_version，
     # 否则 Chrome 每个请求新开 socket、还要在 socket 池里等约 300ms）。

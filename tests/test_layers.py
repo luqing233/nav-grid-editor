@@ -16,11 +16,36 @@ from nav_grid_editor.services.maps.layers import (
 )
 from nav_grid_editor.services.maps.io import solid_png
 from nav_grid_editor.services.maps.service import MapService
+from nav_grid_editor.commands import fetch_layers
 from nav_grid_editor.commands.fetch_layers import (
+    MAP_DISPLAY_NAMES,
     _extract_mapping,
     audit_entrance_markers,
     collect_layer_entries,
 )
+
+
+class MapDisplayNameTest(unittest.TestCase):
+    """地图显示名要和客户端文本表一致——旧写法在客户端里根本不存在。"""
+
+    def test_map01_matches_client_text(self):
+        # I18nTextTable_CN 里「四号谷地」760 条、「四号谷底」0 条
+        self.assertEqual(MAP_DISPLAY_NAMES["map01"], "四号谷地")
+        self.assertEqual(MAP_DISPLAY_NAMES["map02"], "武陵")
+
+    def test_stale_spelling_is_not_reintroduced(self):
+        repo_root = Path(fetch_layers.__file__).resolve().parents[3]
+        targets = [
+            repo_root / "README.md",
+            *sorted((repo_root / "src").rglob("*.py")),
+            *sorted((repo_root / "src").rglob("*.js")),
+        ]
+        stale = [
+            str(path.relative_to(repo_root))
+            for path in targets
+            if path.is_file() and "四号谷底" in path.read_text(encoding="utf-8", errors="ignore")
+        ]
+        self.assertEqual(stale, [], "客户端文本表里没有「四号谷底」，别把这个写法写回来")
 
 
 class LayerCatalogTest(unittest.TestCase):

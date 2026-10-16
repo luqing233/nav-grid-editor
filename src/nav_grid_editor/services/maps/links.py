@@ -15,8 +15,8 @@ from .settings import valid_grid_tier, valid_map_name, valid_map_zoom
 
 
 # v2 起端点带 zoom：网格文件是按 <地图>__<tier>_<zoom>.grid.npz 分档的，缺了
-# zoom 消费方只能硬编码。v1 文件读进来时把 zoom 补成 ""（含义见 _endpoint）。
-LINK_SCHEMA_VERSION = 2
+# zoom 消费方只能硬编码。v3 起端点可带高度范围（可选），见 _optional_y_range。
+LINK_SCHEMA_VERSION = 3
 LINK_KINDS = frozenset(("stairs", "elevator", "portal", "door", "rope", "other"))
 _links_guard = threading.RLock()
 
@@ -32,9 +32,10 @@ def empty_links() -> dict:
 def load_links(path: Path) -> dict:
     """读连接，并把内存里的形状统一到当前 schema。
 
-    v1 的端点没有 zoom。补齐成 ""（含义：按查询的 zoom 解析，见
-    ``MapService._link_endpoint_grid``），schema_version 也报当前值 —— 调用方
-    拿到的永远是同一套形状，不用分两版分支。磁盘上的版本要等下一次写入才升上去。
+    v1 的端点没有 zoom，补齐成 ""（含义：按查询的 zoom 解析，见
+    ``MapService._link_endpoint_grid``）；v1/v2 都没有可选的端点高度，缺了就保持
+    缺失（"不知道"是个合法状态，不能编一个）。schema_version 一律报当前值 ——
+    调用方拿到的永远是同一套形状，不用分版本分支。磁盘上的版本等下一次写入才升上去。
     """
     path = Path(path)
     if not path.is_file():
@@ -68,6 +69,32 @@ def _finite_rect(raw) -> dict:
     return {"x0": x0, "z0": z0, "x1": x1, "z1": z1}
 
 
+def _optional_y_range(raw: dict) -> dict:
+    """端点的可选高度范围，返回 ``{"y_min":…, "y_max":…}`` 或空字典。
+
+    为什么需要它：端点过去只有 X/Z，于是「这两点是不是通向同一处空间」在格式层面
+    **无法校验**，两层的落差也只能从各自的 `floor_regions` 区间去推 —— 那是区间不是
+    点，"按落差定价"更无从下手。加上这个范围后，落差可以是量出来的。
+
+    可选是因为老数据没有；两个键要么都给、要么都不给（只给一个基本是标错了）。
+    """
+    has_min = "y_min" in raw
+    has_max = "y_max" in raw
+    if not has_min and not has_max:
+        return {}
+    if not (has_min and has_max):
+        raise ValueError("端点高度要么 y_min/y_max 都给，要么都不给")
+    try:
+        y_min, y_max = float(raw["y_min"]), float(raw["y_max"])
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("端点高度必须是数字") from None
+    if not (math.isfinite(y_min) and math.isfinite(y_max)):
+        raise ValueError("端点高度必须是有限数")
+    if y_min > y_max:
+        raise ValueError("端点 y_min 不能大于 y_max")
+    return {"y_min": y_min, "y_max": y_max}
+
+
 def _endpoint(raw) -> dict:
     if not isinstance(raw, dict):
         raise ValueError("连接端点必须是对象")
@@ -80,10 +107,12 @@ def _endpoint(raw) -> dict:
     zoom = str(raw.get("zoom") or "")
     if zoom and not valid_map_zoom(map_name, zoom):
         raise ValueError("连接端点 zoom 非法")
-    return {
+    endpoint = {
         "map": map_name, "tier": tier, "zoom": zoom,
         "rect": _finite_rect(raw.get("rect")),
     }
+    endpoint.update(_optional_y_range(raw))
+    return endpoint
 
 
 def normalize_link(raw: dict, link_id: str = "") -> dict:

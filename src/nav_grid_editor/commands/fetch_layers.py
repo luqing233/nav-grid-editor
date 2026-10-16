@@ -27,7 +27,7 @@ ASSET_BASE = "https://assets.skland.com/game-map/endfield/"
 LAYER_ENTRANCE_TID = "feec2fbd748b3d10131a07971b25baf2"
 MAP_DISPLAY_NAMES = {
     "base01": "帝江号",
-    "map01": "四号谷底",
+    "map01": "四号谷地",
     "map02": "武陵",
 }
 INDEPENDENT_MAP_NAMES = {

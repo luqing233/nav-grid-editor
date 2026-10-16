@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from .. import marks as marks_mod
+from ..capture_position import CAPTURE_SOURCE_NAME, CapturePositionClient
 from ..endfield_ws import EndfieldPositionClient
 from .calibration import _fit_affine_ransac, _invert_affine, _mat_vec
 from .events import EventBus
@@ -271,7 +272,9 @@ class MapService:
     def __init__(self, tiles_root: Path | None = None,
                  profile_dir: Path | None = None,
                  grid2d_dir: Path | None = None,
-                 data_root: Path | None = None):
+                 data_root: Path | None = None,
+                 position_source: str | None = None,
+                 capture_url: str | None = None):
         #: 数据根目录：browser_profile/ configs/ 以及 assets/ 的父目录
         self.data_root = Path(data_root) if data_root else default_data_root()
         self.bus = EventBus()
@@ -294,17 +297,40 @@ class MapService:
         # 地图标记抓取（认证口径）：{"running","stats","error"}
         self._marks: dict | None = None
         self._marks_thread: threading.Thread | None = None
-        # 官方地图 WS 位置流：直接连 wss://ws.skland.com/...，不再依赖本地 3001 中继
-        self._position = EndfieldPositionClient(
-            on_position=self._on_position,
-            on_state=self._on_position_state,
-            log=self._position_log,
-        )
+        # 玩家位置流：默认读抓包后端（endfield-capture-backend）的 /api/state，
+        # 不再依赖官方地图 WS 凭证；NAV_POSITION_SOURCE=ws 可切回官方 WS 兜底。
+        self.position_source = (
+            position_source or os.environ.get("NAV_POSITION_SOURCE", "") or CAPTURE_SOURCE_NAME
+        ).strip().lower()
+        # 空串 = 没显式配置：由客户端从 8765 往下自动探测端口（见 capture_position）
+        self.capture_url = (
+            capture_url or os.environ.get("NAV_CAPTURE_URL", "")
+        ).strip().rstrip("/")
+        self._position = self._build_position_client()
         self._layer_catalog_cache: tuple[int, list[dict]] | None = None
         self._floor_grid_cache: dict[Path, tuple[int, dict]] = {}
         # 解开的网格数组（判连接端点是否落在可走格上要按格看内容，光有元数据不够）。
         # npz 是整块压缩，读一次就得全解开，map02@4 是 5 MB 上下，所以只留最近几个。
         self._grid_array_cache: dict[Path, tuple[int, tuple]] = {}
+
+    def _build_position_client(self):
+        """按 ``position_source`` 建位置源客户端（两者 start/stop/status 同接口）。
+
+        - ``capture``（默认）：轮询 endfield-capture-backend 的 ``/api/state``；
+        - ``ws``：``endfield_ws`` 的官方地图 WS，仅作兜底（需要账号凭证）。
+        """
+        if self.position_source == "ws":
+            return EndfieldPositionClient(
+                on_position=self._on_position,
+                on_state=self._on_position_state,
+                log=self._position_log,
+            )
+        return CapturePositionClient(
+            on_position=self._on_position,
+            on_state=self._on_position_state,
+            log=self._position_log,
+            base_url=self.capture_url or None,
+        )
 
     # ---------- 状态快照 ----------
     def status(self) -> dict:
@@ -912,25 +938,28 @@ class MapService:
             self.bus.emit(type="log", text=f"标记抓取失败: {e}")
 
     # =========================================================
-    # 玩家位置：官方地图 WS 客户端 + 坐标中继
+    # 玩家位置：抓包后端位置源（默认）/ 官方地图 WS（可选兜底）+ 坐标中继
     # =========================================================
 
     def start_position_stream(self) -> dict:
-        """启动官方地图 WS 位置流（连 skland，不再依赖本地 ws 服务器）。"""
+        """启动位置流（默认轮询抓包后端，不再依赖本地 ws 服务器 / 账号凭证）。"""
         res = self._position.start()
         if res.get("started"):
             self.bus.emit(type="position_state", state=self._position.status())
-            self.bus.emit(type="log", text="位置流：官方地图 WebSocket 客户端已启动")
+            self.bus.emit(type="log", text=f"位置流：{self._position_source_label()}已启动")
         return res
 
     def stop_position_stream(self) -> dict:
         res = self._position.stop()
         self.bus.emit(type="position_state", state=self._position.status())
-        self.bus.emit(type="log", text="位置流：官方地图 WebSocket 客户端已停止")
+        self.bus.emit(type="log", text=f"位置流：{self._position_source_label()}已停止")
         return res
 
     def position_status(self) -> dict:
         return self._position.status()
+
+    def _position_source_label(self) -> str:
+        return "官方地图 WebSocket 客户端" if self.position_source == "ws" else "抓包后端位置源"
 
     def _tier_grid_meta(self, map_name: str, tier: str) -> dict | None:
         if not valid_map_zoom(map_name, "4") or (
@@ -1228,6 +1257,8 @@ class MapService:
             "zoom": str(endpoint.get("zoom") or ""),
             "grid": "",
             "rect": dict(endpoint.get("rect") or {}),
+            # 端点高度是 v3 的可选字段；缺失就是"不知道"，不能编
+            "y_min": endpoint.get("y_min"), "y_max": endpoint.get("y_max"),
             "free": 0, "blocked": 0, "unknown": 0,
             "outside": False, "issue": "",
         }
@@ -1605,10 +1636,13 @@ class MapService:
         return {"ok": True, "component_id": component["id"], "saved": saved}
 
     def _on_position(self, data: dict) -> None:
-        """官方 WS 收到位置 → 用坐标判断楼层 → 广播 coords 事件。
+        """位置源收到一条坐标 → 用坐标判断楼层 → 广播 coords 事件。
 
         判定**不看 levelId**（官方那个字段不可信），只用 x/y/z 落在哪一层的高度
         区间里，见 :meth:`resolve_tier_by_height`。
+
+        抓包后端与官方 WS 的位置都走这里：上游只要给 ``mapId`` + ``pos(x,y,z)``
+        （抓包后端还额外带真实高度、yaw、speed），事件形状对两者一致。
         """
         enriched = dict(data) if isinstance(data, dict) else {"value": data}
         pos = enriched.get("pos") if isinstance(enriched.get("pos"), dict) else enriched
@@ -2020,11 +2054,45 @@ class MapService:
                 f"{'起点' if side == 'from' else '终点'}：{checks[side]['issue']}"
                 for side in ("from", "to") if checks[side].get("issue")
             ]
+            checks["drop"] = self._link_drop(link)
             links.append({**link, "checks": {
-                "from": checks["from"], "to": checks["to"],
+                "from": checks["from"], "to": checks["to"], "drop": checks["drop"],
                 "valid": not problems, "issue": "；".join(problems),
             }})
         return {**data, "links": links}
+
+    @classmethod
+    def _link_drop(cls, link: dict) -> dict | None:
+        """两端都标了高度时才给落差，否则 None（"不知道"不能被编出来）。
+
+        落差是**量出来的**，不是从两层的 `floor_regions` 区间推的 —— 那是区间不是点。
+        端点过去只有 X/Z，所以「这两点接不接得上」在格式层面无法校验，这条也没法算。
+        """
+        spans = [cls._y_span(link.get(side)) for side in ("from", "to")]
+        if any(span is None for span in spans):
+            return None
+        from_center, from_span = spans[0]
+        to_center, to_span = spans[1]
+        return {
+            "from_center": from_center, "to_center": to_center,
+            "from_span": from_span, "to_span": to_span,
+            "drop": to_center - from_center,
+        }
+
+    @staticmethod
+    def _y_span(endpoint) -> tuple[float, float] | None:
+        if not isinstance(endpoint, dict):
+            return None
+        y_min, y_max = endpoint.get("y_min"), endpoint.get("y_max")
+        if y_min is None or y_max is None:
+            return None
+        try:
+            low, high = float(y_min), float(y_max)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not (math.isfinite(low) and math.isfinite(high)):
+            return None
+        return (low + high) / 2.0, high - low
 
     @staticmethod
     def _link_matches(link: dict, map_name: str, zoom: str) -> bool:

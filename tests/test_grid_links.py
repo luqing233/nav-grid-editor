@@ -7,6 +7,7 @@ from pathlib import Path
 
 from nav_grid_editor.services.maps import MapService
 from nav_grid_editor.services.maps.links import (
+    LINK_SCHEMA_VERSION,
     delete_link,
     links_path,
     load_links,
@@ -94,7 +95,7 @@ class GridLinkStoreTest(unittest.TestCase):
             })
 
     def test_v1_file_loads_with_zoom_filled_in(self):
-        """v1 的端点没有 zoom：读出来要补齐，形状和 v2 一致。"""
+        """v1 的端点没有 zoom：读出来要补齐，形状和当前 schema 一致。"""
         path = links_path(self.root)
         path.write_text(
             '{"schema_version": 1, "links": [{"id": "a", "from": '
@@ -105,9 +106,43 @@ class GridLinkStoreTest(unittest.TestCase):
             encoding="utf-8",
         )
         data = load_links(path)
-        self.assertEqual(data["schema_version"], 2)
+        self.assertEqual(data["schema_version"], LINK_SCHEMA_VERSION)
         self.assertEqual(data["links"][0]["from"]["zoom"], "")
         self.assertEqual(data["links"][0]["to"]["zoom"], "")
+        # v3 的端点高度是**可选**的：老数据没有就保持缺失，"不知道"不能被编出来
+        self.assertNotIn("y_min", data["links"][0]["from"])
+        self.assertNotIn("y_max", data["links"][0]["to"])
+
+    def test_endpoint_y_range_is_optional_but_validated(self):
+        """端点高度（v3）：两个键要么都给要么都不给，且必须有限、有序。"""
+        path = links_path(self.root)
+        base = {
+            "from": {"map": "map02", "tier": "", "zoom": "4",
+                     "rect": {"x0": 0, "z0": 0, "x1": 1, "z1": 1}},
+            "to": {"map": "map02", "tier": "tier_a", "zoom": "4",
+                   "rect": {"x0": 2, "z0": 2, "x1": 3, "z1": 3}},
+        }
+        # 不填 → 端点里就没有这两个键
+        link = upsert_link(path, dict(base))
+        self.assertNotIn("y_min", link["from"])
+        # 都填 → 原样保留
+        link = upsert_link(path, {
+            **base,
+            "from": {**base["from"], "y_min": 249, "y_max": 251},
+            "to": {**base["to"], "y_min": 239, "y_max": 241},
+        })
+        self.assertEqual(link["from"]["y_min"], 249.0)
+        self.assertEqual(link["to"]["y_max"], 241.0)
+        # 只给一个 / 逆序 / 非有限 → 拒绝
+        for label, extra in (("只给 y_min", {"y_min": 1}),
+                             ("逆序", {"y_min": 9, "y_max": 1}),
+                             ("非有限", {"y_min": float("nan"), "y_max": 1})):
+            with self.subTest(label=label):
+                with self.assertRaises(ValueError):
+                    upsert_link(path, {
+                        **base,
+                        "from": {**base["from"], **extra},
+                    })
 
 
 class LinkEndpointValidationTest(unittest.TestCase):
@@ -200,6 +235,46 @@ class LinkEndpointValidationTest(unittest.TestCase):
         self.assertEqual(links[0]["checks"]["to"]["free"], 1)
         on_disk = load_links(links_path(self.root / "grids"))["links"]
         self.assertNotIn("checks", on_disk[0])
+
+    def test_drop_is_computed_only_when_both_ends_carry_y(self):
+        """落差是**量出来的**：两端都标了高度才算，否则 None。
+
+        从 floor_regions 区间去推落差是另一回事（区间不是点），所以少一端就明确不
+        给，不拿推断值凑。
+        """
+        def save(extra_from, extra_to, link_id):
+            saved = self.svc.save_grid_link({
+                "id": link_id,
+                "from": {"map": "map02", "tier": "", "zoom": "4",
+                         "rect": {"x0": 0, "z0": 0, "x1": 1, "z1": 1},
+                         **extra_from},
+                "to": {"map": "map02",
+                       "tier": "scene_map02_lv005_layer_tips_7",
+                       "zoom": "4",
+                       "rect": {"x0": 101, "z0": 101, "x1": 102, "z1": 102},
+                       **extra_to},
+            })
+            self.assertTrue(saved["ok"], saved)
+            return saved["link"]["id"]
+
+        both = save({"y_min": 300, "y_max": 302},
+                    {"y_min": 250, "y_max": 252}, "both")
+        only_from = save({"y_min": 300, "y_max": 302}, {}, "only-from")
+        neither = save({}, {}, "neither")
+
+        by_id = {item["id"]: item for item in
+                 self.svc.get_grid_links("map02", "4")["links"]}
+        drop = by_id[both]["checks"]["drop"]
+        self.assertIsNotNone(drop)
+        self.assertAlmostEqual(drop["from_center"], 301.0)
+        self.assertAlmostEqual(drop["to_center"], 251.0)
+        self.assertAlmostEqual(drop["drop"], -50.0)
+        self.assertAlmostEqual(drop["from_span"], 2.0)
+        self.assertIsNone(by_id[only_from]["checks"]["drop"])
+        self.assertIsNone(by_id[neither]["checks"]["drop"])
+        # Y 也会出现在端点校验结果里，供界面显示
+        self.assertEqual(by_id[both]["checks"]["from"]["y_min"], 300.0)
+        self.assertIsNone(by_id[neither]["checks"]["from"]["y_min"])
 
     def test_legacy_endpoint_without_zoom_resolves_by_query_zoom(self):
         """v1 端点没写 zoom：按查询的 zoom 解析，不能拿别的档次顶替。"""

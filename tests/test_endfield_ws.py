@@ -156,6 +156,18 @@ class MapServicePositionTest(unittest.TestCase):
             st = svc.status()["position"]
         self.assertFalse(st["running"])
         self.assertFalse(st["connected"])
+        # 默认位置源是抓包后端；官方 WS 只剩 NAV_POSITION_SOURCE=ws 的可选兜底。
+        self.assertEqual(st["source"], "capture")
+        self.assertIn("hint", st)
+
+    def test_ws_source_can_still_be_selected(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            svc = MapService(data_root=root, tiles_root=root / "t",
+                             profile_dir=root / "p", grid2d_dir=root / "g",
+                             position_source="ws")
+            st = svc.status()["position"]
+        self.assertEqual(st["source"], "ws")
         self.assertIn("credential_ready", st)
 
 

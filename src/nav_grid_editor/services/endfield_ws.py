@@ -161,9 +161,20 @@ class EndfieldPositionClient:
 
     def status(self) -> dict:
         with self._lock:
+            running = bool(self._thread and self._thread.is_alive())
+            if self._connected:
+                hint = ""
+            elif not self._credential_ready:
+                hint = "缺凭证：需要 configs/hg_content.txt"
+            elif self._last_error:
+                hint = self._last_error
+            else:
+                hint = "连接中…" if running else "未开启"
             return {
-                "running": bool(self._thread and self._thread.is_alive()),
+                "running": running,
                 "connected": self._connected,
+                "source": "ws",
+                "hint": hint,
                 "credential_ready": self._credential_ready,
                 "role": dict(self._role) if self._role else None,
                 "map_id": self._map_id,

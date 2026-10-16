@@ -117,7 +117,7 @@
         <button id="btnReset" title="清除当前地图画布">清空</button>
         <button id="btnDownload" title="下载当前地图总图 PNG">下载</button>
         <label class="toggle"><input type="checkbox" id="chkFollow" checked><span>跟随</span></label>
-        <label class="toggle" title="官方地图 WebSocket 位置流：实时获取玩家坐标">
+        <label class="toggle" title="玩家位置流：实时获取玩家坐标（默认读抓包后端；具体数据源由服务端决定）">
           <span class="status-dot" id="wsDot" aria-hidden="true"></span>
           <input type="checkbox" id="chkWs">
           <span>位置流</span>
@@ -165,6 +165,14 @@
         <label class="field-inline">代价
           <input id="linkCost" type="number" min="0.01" step="0.1" value="1">
         </label>
+        <span class="field-inline" title="端点高度（可选）。留空表示未标注 —— 落差只能从两端算出，不标就不猜。">Y
+          <input id="linkFromYMin" class="link-y-input" type="number" step="any" aria-label="起点 Y 下界">
+          <input id="linkFromYMax" class="link-y-input" type="number" step="any" aria-label="起点 Y 上界">
+          <span class="link-y-sep">→</span>
+          <input id="linkToYMin" class="link-y-input" type="number" step="any" aria-label="终点 Y 下界">
+          <input id="linkToYMax" class="link-y-input" type="number" step="any" aria-label="终点 Y 上界">
+        </span>
+        <button id="btnLinkFillY" type="button" title="把两端所在层的已标高度区间填进上面的 Y（没有区间就填不了）">用层区间填入</button>
         <button id="btnLinkSave" disabled>保存连接</button>
         <button id="btnLinkClear">清空当前连接</button>
         <span id="linkEditStatus" class="tb-act-hint">先选起点区域</span>
