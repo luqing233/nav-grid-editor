@@ -38,6 +38,7 @@ export async function saveGridDocument(map, zoom, tier, document) {
         origin: [document.origin[0], 0, document.origin[1]],
         shape: document.shape,
         cell_size: document.cellSize,
+        preserve_floor_regions: true,
         floor_regions: document.floorRegions || [],
         source_tier: document.sourceTier || "",
         cells: sparse.cells,

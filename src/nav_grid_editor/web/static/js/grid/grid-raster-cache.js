@@ -74,15 +74,15 @@ export class GridRasterCache {
         });
         continue;
       }
-      const built = this.buildChunk(cx, cz, chunk);
+      const built = this.buildChunk(cx, cz, chunk, chunks.get(key)?.canvas);
       chunks.set(key, built);
       changed.push({ key, ...built });
     }
     return changed;
   }
 
-  buildChunk(cx, cz, chunk) {
-    const canvas = document.createElement("canvas");
+  buildChunk(cx, cz, chunk, reusable) {
+    const canvas = reusable || document.createElement("canvas");
     canvas.width = CHUNK_SIZE;
     canvas.height = CHUNK_SIZE;
     const context = canvas.getContext("2d");

@@ -5,6 +5,7 @@ export const CELL_BLOCKED = 2;
 
 const CHUNK_AREA = CHUNK_SIZE * CHUNK_SIZE;
 const HISTORY_LIMIT = 100;
+const HISTORY_BYTES = 32 * 1024 * 1024;
 
 function floorDiv(value, divisor) {
   return Math.floor(value / divisor);
@@ -279,7 +280,10 @@ export class GridDocument {
       metaBefore: metaChanged ? beforeMeta : null,
       metaAfter: metaChanged ? afterMeta : null,
     });
-    if (this.history.undo.length > HISTORY_LIMIT) this.history.undo.shift();
+    let bytes = this.history.undo.reduce((n, op) => n + op.changes.length * 48, 0);
+    while (this.history.undo.length > 1 && (this.history.undo.length > HISTORY_LIMIT || bytes > HISTORY_BYTES)) {
+      bytes -= this.history.undo.shift().changes.length * 48;
+    }
     this.history.redo.length = 0;
     return true;
   }
@@ -309,6 +313,10 @@ export class GridDocument {
     return true;
   }
 
+  markSaved() { this.savedHead = this.history.undo.at(-1) || null; }
+
+  isAtSavedState() { return (this.history.undo.at(-1) || null) === (this.savedHead || null); }
+
   clearHistory() {
     this.history.undo.length = 0;
     this.history.redo.length = 0;
@@ -334,6 +342,12 @@ export class GridDocument {
     this.forEachCell((ix, iz, value) => {
       next.setCell(ix - dx, iz - dz, value, { record: false });
     });
+    for (const operation of [...this.history.undo, ...this.history.redo]) {
+      for (const cell of operation.changes) { cell[0] -= dx; cell[1] -= dz; }
+      for (const meta of [operation.metaBefore, operation.metaAfter]) {
+        if (meta) { meta.origin[0] += dx * this.cellSize; meta.origin[1] += dz * this.cellSize; }
+      }
+    }
     this.chunks = next.chunks;
     this.dirtyChunks = next.dirtyChunks;
     this.freeCount = next.freeCount;

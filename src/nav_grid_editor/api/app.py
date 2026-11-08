@@ -302,9 +302,10 @@ def overview(request: Request, map: str = "", zoom: str = "") -> Response:
 
 @app.get("/api/layer-image")
 def layer_image(request: Request, map: str = "", zoom: str = "",
-                tier: str = "") -> Response:
+                tier: str = "", x: int = -1, y: int = -1, edge: int = 0) -> Response:
     """官方分层 PNG；首次访问由服务端下载并缓存到 assets/tiles/layers/。"""
-    data = _svc().get_layer_image(map, zoom, tier)
+    data = (_svc().get_layer_part(map, zoom, tier, x, y, edge or 2048)
+            if edge or x >= 0 or y >= 0 else _svc().get_layer_image(map, zoom, tier))
     if data is None:
         return Response("layer image not found", status_code=404,
                         media_type="text/plain; charset=utf-8")

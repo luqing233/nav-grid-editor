@@ -1,5 +1,5 @@
 // Disk-snapshot export: the server owns the job across page reloads.
-export function initDatasetExport({ hasUnsaved = () => false, onOpen = () => {} } = {}) {
+export function initDatasetExport({ hasUnsaved = () => false, onOpen = () => {}, unsavedNames = () => [], saveAll = null } = {}) {
   const target = document.getElementById("datasetTarget");
   const button = document.getElementById("btnDatasetExport");
   const status = document.getElementById("datasetExportStatus");
@@ -36,7 +36,7 @@ export function initDatasetExport({ hasUnsaved = () => false, onOpen = () => {} 
   button.onclick = async () => {
     if (starting || button.disabled) return;
     if (hasUnsaved()) {
-      status.textContent = "请先保存网格修改，再导出数据包。";
+      status.textContent = "请先保存网格修改，再导出数据包。" + unsavedNames().join("、");
       return;
     }
     ++requestId;
@@ -71,6 +71,16 @@ export function initDatasetExport({ hasUnsaved = () => false, onOpen = () => {} 
   };
   document.getElementById("btnDatasetPanel").onclick = () => { onOpen(); target.focus(); void poll(); };
   try { target.value = localStorage.getItem("nav-grid-export-target") || ""; } catch { /* Optional preference. */ }
+  if (saveAll) {
+    const saveButton = document.createElement("button"); saveButton.textContent = "保存全部并导出";
+    button.after(saveButton);
+    saveButton.onclick = async () => {
+      saveButton.disabled = true;
+      try { await saveAll(); if (hasUnsaved()) throw new Error("仍有未保存修改"); await button.onclick(); }
+      catch (error) { status.textContent = error.message; }
+      finally { saveButton.disabled = false; }
+    };
+  }
   void poll();
   return { poll, stop: () => clearTimeout(timer) };
 }

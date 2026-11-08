@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import hashlib
 import math
 import os
@@ -250,6 +251,11 @@ class MapService:
         self._floor_grid_cache: dict[Path, tuple[int, dict]] = {}
         # 解开的网格数组（判连接端点是否落在可走格上要按格看内容，光有元数据不够）。
         # npz 是整块压缩，读一次就得全解开，map02@4 是 5 MB 上下，所以只留最近几个。
+        self._overlap_cache = {}
+        self._sparse_cache = {}
+        self._image_preview_cache = {}
+        self._layer_image_lock = threading.Lock()
+        self._decoded_layer = None
         self._grid_array_cache: dict[Path, tuple[int, tuple]] = {}
 
     def _build_position_client(self):
@@ -1247,11 +1253,29 @@ class MapService:
                                tier_id: str, level_id: str) -> dict:
         if not valid_map_zoom(map_name, zoom) or not valid_grid_tier(tier_id):
             return {"ok": False, "error": "非法地图名/zoom/tier"}
+        paths = sorted(self.grid2d_dir.glob(f"{map_name}*_{zoom}.grid.npz"))
+        catalog = self.store.tiles_root / "layers" / "catalog.json"
+        signature = tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size)
+                          for p in [*paths, catalog] if p.is_file())
+        key = (map_name, zoom, tier_id, level_id, signature)
+        if key not in self._overlap_cache:
+            result = self._compute_grid_overlaps_uncached(map_name, zoom, tier_id, level_id)
+            if result.get("ok"):
+                if len(self._overlap_cache) >= 16:
+                    self._overlap_cache.clear()
+                self._overlap_cache[key] = result
+            return result
+        return copy.deepcopy(self._overlap_cache[key])
+
+    def _compute_grid_overlaps_uncached(self, map_name: str, zoom: str,
+                               tier_id: str, level_id: str) -> dict:
+        if not valid_map_zoom(map_name, zoom) or not valid_grid_tier(tier_id):
+            return {"ok": False, "error": "非法地图名/zoom/tier"}
         current_path = self._tier_grid_file(map_name, tier_id, zoom)
         if not current_path:
             return {"ok": True, "components": [], "tier_id": tier_id}
         try:
-            current, current_meta, _warnings = _load_grid_npz(current_path)
+            current, current_meta = self._cached_grid(current_path)
             current_regions = _normalize_floor_regions(
                 current_meta.get("floor_regions") or [])
         except Exception as e:
@@ -1282,6 +1306,7 @@ class MapService:
         cell_sources: dict[tuple[int, int], set[str]] = {}
         cell_y_overlap: dict[tuple[int, int], bool] = {}
         cell_matches: dict[tuple[int, int], dict[str, tuple[int, int]]] = {}
+        current_rows, current_cols = np.nonzero(current)
         for layer in layers:
             other_tier = str(layer.get("id") or "")
             if not other_tier or other_tier == tier_id:
@@ -1290,7 +1315,7 @@ class MapService:
             if not other_path:
                 continue
             try:
-                other, other_meta, _warnings = _load_grid_npz(other_path)
+                other, other_meta = self._cached_grid(other_path)
                 other_regions = _normalize_floor_regions(
                     other_meta.get("floor_regions") or [])
                 tier_meta[other_tier] = other_meta
@@ -1312,7 +1337,11 @@ class MapService:
                 rows, cols = np.nonzero((current != CELL_UNKNOWN)
                                         & (other != CELL_UNKNOWN))
             else:
-                rows, cols = np.nonzero(current)
+                xs = current_origin[0] + (current_cols + 0.5) * current_size
+                zs = current_origin[2] + (current_rows + 0.5) * current_size
+                inside = ((xs >= other_origin[0]) & (xs < other_origin[0] + other.shape[1] * other_size)
+                          & (zs >= other_origin[2]) & (zs < other_origin[2] + other.shape[0] * other_size))
+                rows, cols = current_rows[inside], current_cols[inside]
             for iz, ix in zip(rows.tolist(), cols.tolist()):
                 wx = current_origin[0] + (ix + 0.5) * current_size
                 wz = current_origin[2] + (iz + 0.5) * current_size
@@ -1622,6 +1651,44 @@ class MapService:
         """列出当前底图可用的官方分层图片。"""
         return list_layer_catalog(map_name, zoom, self._layer_entries())
 
+    def get_layer_part(self, map_name, zoom, layer_id, x=-1, y=-1, edge=2048):
+        if x < -1 or y < -1 or x > 100 or y > 100 or edge not in (1024, 2048):
+            return None
+        entry = find_layer(map_name, zoom, layer_id, self._layer_entries())
+        if not entry:
+            return None
+        source = self.store.tiles_root / layer_cache_relpath(entry)
+        data = self.get_layer_image(map_name, zoom, layer_id)
+        if data is None:
+            return None
+        signature = (str(source), source.stat().st_mtime_ns, len(data))
+        key = (signature, x, y, edge)
+        with self._layer_image_lock:
+            if key in self._image_preview_cache:
+                return self._image_preview_cache[key]
+            if self._decoded_layer is None or self._decoded_layer[0] != signature:
+                if self._decoded_layer:
+                    self._decoded_layer[1].close()
+                image = Image.open(BytesIO(data)).convert("RGBA")
+                self._decoded_layer = (signature, image)
+            image = self._decoded_layer[1]
+            if x >= 0 and y >= 0:
+                left, top = x * 1024, y * 1024
+                if left >= image.width or top >= image.height:
+                    return None
+                part = image.crop((left, top, min(left+1024, image.width), min(top+1024, image.height)))
+            else:
+                part = image.copy()
+                part.thumbnail((edge, edge), Image.Resampling.LANCZOS)
+            output = BytesIO()
+            part.save(output, format="PNG")
+            part.close()
+            result = output.getvalue()
+            if sum(map(len, self._image_preview_cache.values())) + len(result) > 16 * 1024 * 1024:
+                self._image_preview_cache.clear()
+            self._image_preview_cache[key] = result
+            return result
+
     def get_layer_image(self, map_name: str, zoom: str, layer_id: str) -> bytes | None:
         """读取官方分层图片；首次访问时缓存到 tiles/layers/。"""
         entry = find_layer(map_name, zoom, layer_id, self._layer_entries())
@@ -1917,6 +1984,10 @@ class MapService:
         p = self.grid2d_path(map_name, zoom, tier)
         if not p.is_file():
             return {"data": None, "source": None}
+        signature = (p.stat().st_mtime_ns, p.stat().st_size)
+        cache_key = (str(p), signature)
+        if cache_key in self._sparse_cache:
+            return copy.deepcopy(self._sparse_cache[cache_key])
         try:
             arr, meta, warnings = _load_grid_npz(p)
         except Exception as e:
@@ -1933,7 +2004,7 @@ class MapService:
         if touched > EDIT_CELL_LIMIT:
             warnings.append(f"已涂格子 {touched} 超过编辑器上限 {EDIT_CELL_LIMIT}，"
                             "只能查看，保存会被拒绝")
-        return {
+        result = {
             "data": {
                 "origin": [float(v) for v in meta["origin"]],
                 "cell_size": float(meta["cell_size"]),
@@ -1946,6 +2017,10 @@ class MapService:
             "source": str(p),
             "warnings": warnings,
         }
+        if len(self._sparse_cache) >= 8:
+            self._sparse_cache.clear()
+        self._sparse_cache[cache_key] = copy.deepcopy(result)
+        return result
 
     # ---------- 跨层连接（网格 via） ----------
     def get_grid_links(self, map_name: str = "", zoom: str = "") -> dict:
@@ -2415,6 +2490,9 @@ class MapService:
         tmp = _unique_tmp(out)
         with _path_lock(out):
             try:
+                if data.get("preserve_floor_regions") and out.is_file():
+                    _arr, latest_meta, _warnings = _load_grid_npz(out)
+                    meta["floor_regions"] = _normalize_floor_regions(latest_meta.get("floor_regions") or [])
                 with open(tmp, "wb") as fh:
                     # meta 用 numpy 字符串数组存（0 维），读方才能不开 allow_pickle
                     np.savez_compressed(fh, cells=grid,

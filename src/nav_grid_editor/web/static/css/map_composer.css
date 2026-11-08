@@ -5642,3 +5642,32 @@ body.side-collapsed #sidePanel {
 
 .dataset-export-panel input { width: 100%; box-sizing: border-box; margin: 6px 0; }
 #datasetExportStatus { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.quick-tools {
+  position: absolute;
+  top: 60px;
+  left: calc(var(--rail-w) + 16px);
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  z-index: 12;
+  max-width: calc(100% - var(--rail-w) - 180px);
+  background: rgba(12, 18, 16, .88);
+  padding: 6px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+.quick-tools button { padding: 5px 8px; }
+.quick-tools input { width: 72px; padding: 5px; }
+.quick-tools input[placeholder="搜索分层"] { width: 110px; }
+body.side-open .quick-tools {
+  left: calc(var(--rail-w) + var(--panel-w) + 16px);
+  max-width: calc(100% - var(--rail-w) - var(--panel-w) - 180px);
+}
+body.side-open .canvas-toolbar {
+  left: calc((100% + var(--rail-w) + var(--panel-w)) / 2);
+  max-width: calc(100% - var(--rail-w) - var(--panel-w) - 32px);
+}
+.floor-batch-row { display: flex; gap: 6px; align-items: center; margin: 6px 0; }
+.floor-batch-row span { flex: 1; }
+.floor-batch-row input[type="number"] { width: 80px; }

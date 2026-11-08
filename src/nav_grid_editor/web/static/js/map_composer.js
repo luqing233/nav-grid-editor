@@ -1,5 +1,8 @@
+import {storeDraft, removeDraft, listDrafts} from "./grid/drafts.js";
 "use strict";
 
+import { diagnoseGrid } from "./grid/diagnostics.js";
+import { sharedJson } from "./grid/requests.js";
 import { initDatasetExport } from "./dataset-export.js";
 
 import { CELL_BLOCKED, CELL_FREE, CELL_UNKNOWN, GridDocument } from "./grid/grid-document.js";
@@ -145,6 +148,8 @@ function noteTile(map, zoom, x, y, kind) {
 function setActive(key) {
   if (state.activeKey === key) return;
   const previousKey = state.activeKey;
+  const previousView = state.views.get(previousKey);
+  if (previousView) previousView.viewport = { ...mapView };
   if (state.activeTier && state.activeTier.key !== key) {
     clearActiveTier(false, previousKey);
   }
@@ -160,7 +165,9 @@ function setActive(key) {
   }
   state.activeKey = key;
   redrawActive();
-  fitView();
+  const restored = state.views.get(key)?.viewport;
+  if (restored) { Object.assign(mapView, restored); applyView(true); }
+  else fitView();
   updateCurBar();
   const [activeMap] = key.split("@");
   setStatus("当前视图: " + mapDisplayName(activeMap) +
@@ -332,6 +339,9 @@ function cachePut(key, val) {
   }
 }
 function clearTileCache() {
+  for(const controller of bitmapControllers) controller.abort();
+  bitmapJobs.length=0;
+  bitmapFailures.clear();
   tileCacheGeneration++;
   for (const value of tileCache.values()) {
     if (value && typeof value.close === "function") value.close();
@@ -371,27 +381,45 @@ function forgetAllMissing() {
   if (hit) requestRender(RENDER_LAYERS.BASE);
 }
 
-function requestTileBitmap(map, zoom, x, y) {
-  const key = TILE_KEY(map, zoom, x, y);
-  const cur = tileCache.get(key);
-  // 位图 / 正在下载 / 已确认这次没有 -> 都不重复发请求
-  if (isBitmap(cur) || cur === "loading" || isMissing(cur)) return;
+const bitmapJobs = [];
+const bitmapControllers = new Set();
+const bitmapFailures = new Map();
+let bitmapInFlight = 0;
+function requestQueuedBitmap(key, url, activeKey) {
+  if (tileCache.has(key)) return;
+  const failure = bitmapFailures.get(key);
+  if (failure && performance.now() < failure.retryAt) return;
   cachePut(key, "loading");
-  const generation = tileCacheGeneration;
-  fetch("/tiles/" + map + "/" + zoom + "/" + x + "_" + y + ".png")
-    .then(r => r.ok ? r.blob() : Promise.reject(new Error("HTTP " + r.status)))
-    .then(blob => window.createImageBitmap ? createImageBitmap(blob) : loadImageFromBlob(blob))
-    .then(bmp => {
-      if (generation !== tileCacheGeneration) {
-        if (bmp && typeof bmp.close === "function") bmp.close();
-        return;
-      }
-      cachePut(key, bmp);
-      if (state.activeKey === viewKey(map, zoom)) requestRender(RENDER_LAYERS.BASE);
+  bitmapJobs.push({key,url,activeKey,generation:tileCacheGeneration});
+  pumpBitmaps();
+}
+function pumpBitmaps() {
+  while(bitmapInFlight < 6 && bitmapJobs.length) {
+    const job=bitmapJobs.shift();
+    if(job.generation!==tileCacheGeneration) continue;
+    const controller=new AbortController(); bitmapControllers.add(controller); bitmapInFlight++;
+    fetch(job.url,{signal:controller.signal}).then(async response=>{
+      if(!response.ok) { if(response.status===404 && job.generation===tileCacheGeneration) cachePut(job.key,{missing:true}); throw new Error("HTTP "+response.status); }
+      return createImageBitmap(await response.blob());
+    }).then(bitmap=>{
+      if(job.generation!==tileCacheGeneration || state.activeKey!==job.activeKey) {bitmap.close();return;}
+      bitmapFailures.delete(job.key);
+      cachePut(job.key,bitmap);requestRender(RENDER_LAYERS.BASE);
+    }).catch(()=>{
+      if(job.generation!==tileCacheGeneration || tileCache.get(job.key)!=="loading") return;
+      tileCache.delete(job.key);
+      const attempts = (bitmapFailures.get(job.key)?.attempts || 0) + 1;
+      const delay = Math.min(30000, 1000 * 2 ** Math.min(attempts - 1, 5));
+      bitmapFailures.set(job.key, {attempts, retryAt:performance.now() + delay});
+      setTimeout(() => {
+        if(job.generation===tileCacheGeneration && state.activeKey===job.activeKey) requestRender(RENDER_LAYERS.BASE);
+      }, delay);
     })
-    .catch(() => {
-      if (generation === tileCacheGeneration) cachePut(key, { missing: true });
-    });
+      .finally(()=>{bitmapControllers.delete(controller);bitmapInFlight--;pumpBitmaps();});
+  }
+}
+function requestTileBitmap(map, zoom, x, y) {
+  requestQueuedBitmap(TILE_KEY(map,zoom,x,y),`/tiles/${map}/${zoom}/${x}_${y}.png`,viewKey(map,zoom));
 }
 
 async function loadOverview(map, zoom) {
@@ -411,7 +439,8 @@ async function loadOverview(map, zoom) {
       return;
     }
     const v = state.views.get(key);
-    if (!v) return;
+    if (!v || state.activeKey !== key) { bmp.close?.(); return; }
+    v.overview?.close?.();
     v.overview = bmp;
     if (state.activeKey === key) requestRender(RENDER_LAYERS.BASE);
   } catch (e) {
@@ -443,12 +472,37 @@ function drawTierOverlay(g, vis) {
   g.imageSmoothingEnabled = true;
   g.transform(matrix[0], matrix[1], matrix[2],
               matrix[3], matrix[4], matrix[5]);
+  tier.visibleTiles = [];
+  if (mapView.scale >= TIER_FULL_MIN_SCALE) {
+    const [a,b,c,d,e,f] = matrix;
+    const det = a*d-b*c;
+    if (Math.abs(det) > 1e-12) {
+      const points = [[vis.x,vis.y],[vis.x+vis.w,vis.y],[vis.x,vis.y+vis.h],[vis.x+vis.w,vis.y+vis.h]]
+        .map(([x,y]) => [(d*(x-e)-c*(y-f))/det,(-b*(x-e)+a*(y-f))/det]);
+      const x0=Math.max(0,Math.floor(Math.min(...points.map(p=>p[0]))/1024));
+      const y0=Math.max(0,Math.floor(Math.min(...points.map(p=>p[1]))/1024));
+      const x1=Math.min(Math.ceil(tier.meta.width/1024)-1,Math.floor(Math.max(...points.map(p=>p[0]))/1024));
+      const y1=Math.min(Math.ceil(tier.meta.height/1024)-1,Math.floor(Math.max(...points.map(p=>p[1]))/1024));
+      tier.visibleTiles = [];
+      for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++) {
+        const key = `layer/${tier.key}/${tier.id}/${x}/${y}`;
+        const bitmap=cacheGet(key);
+        tier.visibleTiles.push({bitmap:isBitmap(bitmap)?bitmap:null,x,y});
+        if(!isBitmap(bitmap)) requestQueuedBitmap(key, `/api/layer-image?map=${encodeURIComponent(tier.key.split("@")[0])}&zoom=${encodeURIComponent(tier.key.split("@")[1])}&tier=${encodeURIComponent(tier.id)}&x=${x}&y=${y}`,tier.key);
+      }
+    }
+  }
   const bitmap = tier.bitmap || tier.preview;
   if (!bitmap) {
     g.restore();
     return;
   }
-  g.drawImage(bitmap, 0, 0, tier.meta.width, tier.meta.height);
+  if (!tier.visibleTiles.length) g.drawImage(bitmap, 0, 0, tier.meta.width, tier.meta.height);
+  for (const tile of tier.visibleTiles) {
+    const x=tile.x*1024,y=tile.y*1024,w=Math.min(1024,tier.meta.width-x),h=Math.min(1024,tier.meta.height-y);
+    if(tile.bitmap) g.drawImage(tile.bitmap,x,y);
+    else g.drawImage(bitmap,x*bitmap.width/tier.meta.width,y*bitmap.height/tier.meta.height,w*bitmap.width/tier.meta.width,h*bitmap.height/tier.meta.height,x,y,w,h);
+  }
   g.restore();
 }
 
@@ -1528,7 +1582,7 @@ async function loadFloorPeerGrids(force = false) {
   await Promise.all(candidates.map(async layer => {
     const requestTier = toDiskTier(layer.tier_id);
     try {
-      const result = await fetch(
+      const result = await sharedJson(
         "/api/grid2d?map=" + encodeURIComponent(map) +
         "&zoom=" + encodeURIComponent(zoom) +
         "&tier=" + encodeURIComponent(requestTier),
@@ -1907,7 +1961,6 @@ async function removeFloorRegion(layer, region) {
     await postFloorRegions(
       layer, (layer.floor_regions || []).filter(item => item !== region));
     await loadFloorRegionMap(true);
-    await loadFloorOverlaps(true);
     renderFloorMarkedList();
     $("floorRegionStatus").textContent = "已删除 1 条已标记区间";
   } catch (e) {
@@ -1959,14 +2012,15 @@ function fillFloorHeightFromSelection() {
       "（改完点“标记所选网格”即覆盖旧区间）；涉及 " +
       component.layer_names.join(" / ");
   } else {
-    const y = Number(lastPos && lastPos.y);
-    $("floorYMin").value = Number.isFinite(y) ? y - 20 : "";
-    $("floorYMax").value = Number.isFinite(y) ? y + 20 : "";
+    const y = lastPos && Number(lastPos.y);
+    $("floorYMin").value = lastPos && Number.isFinite(y) ? y - 20 : "";
+    $("floorYMax").value = lastPos && Number.isFinite(y) ? y + 20 : "";
     $("floorRegionStatus").textContent =
       (component.resolved ? "该重合区各层都已标记；" : "") +
       "此层尚未标记该重合区；涉及 " +
       component.layer_names.join(" / ");
   }
+  renderFloorBatch();
   requestRender(RENDER_LAYERS.SELECTION);
 }
 
@@ -2008,26 +2062,7 @@ function selectFloorComponentBySignature(component) {
   return options.slice().sort((a, b) => distance(a) - distance(b))[0];
 }
 
-async function onFloorLayerChange() {
-  const target = selectedFloorTarget();
-  if (!target || target.kind !== "component") {
-    fillFloorHeightFromSelection();
-    return;
-  }
-  const tierId = selectedFloorLayerId();
-  const next = toDiskTier(tierId);
-  if (next !== (currentTierId() || "")) {
-    const previous = target.component;
-    $("floorRegionStatus").textContent = "正在切换到该分层的网格…";
-    await switchFloorTier(next, () => {
-      const match = selectFloorComponentBySignature(previous);
-      if (match) $("floorComponent").value = "c:" + match.id;
-      fillFloorHeightFromSelection();
-    });
-    return;
-  }
-  fillFloorHeightFromSelection();
-}
+async function onFloorLayerChange() { fillFloorHeightFromSelection(); }
 
 function restoreFloorTarget(value) {
   const select = $("floorComponent");
@@ -2082,13 +2117,14 @@ function openFloorRegionDialog() {
 
 function closeFloorRegionDialog() {
   $("floorRegionDlg").style.display = "none";
-  if (state.floorMap.key && state.floorMap.key !== mapKey) {
+  {
     state.floorHighlight = { componentId: "", layerId: "" };
   }
   requestRender(RENDER_LAYERS.SELECTION);
 }
 
 function floorHeightFromInputs() {
+  if (!$("floorYMin").value.trim() || !$("floorYMax").value.trim()) throw new Error("请填写两个高度值");
   const yMin = Number($("floorYMin").value);
   const yMax = Number($("floorYMax").value);
   if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) {
@@ -2120,8 +2156,7 @@ async function saveFloorRegion() {
     try {
       await postFloorRegions(layer, regions);
       await loadFloorRegionMap(true);
-      await loadFloorOverlaps(true);
-      renderFloorMarkedList();
+        renderFloorMarkedList();
       $("floorRegionStatus").textContent =
         "已更新该标记为 Y " + height.y_min + " ~ " + height.y_max;
     } catch (e) {
@@ -2162,7 +2197,6 @@ async function saveFloorRegion() {
     }).then(response => response.json());
     if (!res.ok) throw new Error(res.error || "保存失败");
     await loadFloorRegionMap(true);
-    await loadFloorOverlaps(true);
     renderFloorMarkedList();
     const remaining = unmarkedYellowComponents().length;
     $("floorRegionStatus").textContent =
@@ -2205,7 +2239,6 @@ async function clearFloorRegions() {
   try {
     await postFloorRegions(layer, regions);
     await loadFloorRegionMap(true);
-    await loadFloorOverlaps(true);
     renderFloorMarkedList();
     $("floorRegionStatus").textContent = target.kind === "marking"
       ? "已删除该已标记区间"
@@ -2449,22 +2482,32 @@ function hasSelection() {
 }
 
 // 对选中的格子批量执行画笔操作
-function applySelection(brush) {
+async function applySelection(brush) {
   const v = state.views.get(state.activeKey);
   const e = v.edit;
   const rect = e && e.selRect;
   if (!rect) { addLog("没有选中的格子", "t-err"); return; }
   const total = (rect.x1 - rect.x0 + 1) * (rect.z1 - rect.z0 + 1);
+  if (e.busy || e.saving || edit.painting) return;
+  if (brush !== "erase" && total + e.size > 300000) { setStatus("选区可能超过 30 万已涂格，请缩小选区", "warning"); return; }
+  e.busy = true;
   beginEditTransaction(e);
   const stateValue = brush === "free" ? CELL_FREE
     : brush === "blocked" ? CELL_BLOCKED
       : CELL_UNKNOWN;
-  for (let ix = rect.x0; ix <= rect.x1; ix++) {
-    for (let iz = rect.z0; iz <= rect.z1; iz++) {
-      e.setCell(ix, iz, stateValue);
+  let work = 0, slice = performance.now();
+  try {
+    for (let ix = rect.x0; ix <= rect.x1; ix++) {
+      for (let iz = rect.z0; iz <= rect.z1; iz++) {
+        e.setCell(ix, iz, stateValue);
+        if (++work % 512 === 0 && performance.now() - slice > 8) {
+          setStatus(`正在填充 ${work}/${total} 格…`, "active");
+          await new Promise(resolve => setTimeout(resolve, 0)); slice = performance.now();
+        }
+      }
     }
-  }
-  commitEditTransaction(e);
+  } finally { commitEditTransaction(e); e.busy = false; }
+  if (ed() !== e) { e.unsaved = true; return; }
   setGridDirty(true);
   e.selRect = null;
   updateEditStats();
@@ -2542,13 +2585,13 @@ function refreshAfterGridHistory() {
 
 function undoGridEdit() {
   const e = ed();
-  if (!e) return false;
+  if (!e || e.busy) return false;
   if (!e.undo()) {
     setStatus("没有可撤销的网格操作", "idle");
     return false;
   }
   e.selRect = null;
-  setGridDirty(true);
+  setGridDirty(!e.isAtSavedState());
   refreshAfterGridHistory();
   setStatus("已撤销网格操作", "ready");
   return true;
@@ -2556,13 +2599,13 @@ function undoGridEdit() {
 
 function redoGridEdit() {
   const e = ed();
-  if (!e) return false;
+  if (!e || e.busy) return false;
   if (!e.redo()) {
     setStatus("没有可重做的网格操作", "idle");
     return false;
   }
   e.selRect = null;
-  setGridDirty(true);
+  setGridDirty(!e.isAtSavedState());
   refreshAfterGridHistory();
   setStatus("已重做网格操作", "ready");
   return true;
@@ -2626,6 +2669,7 @@ function updateEditStats() {
 function setGridDirty(value) {
   if (ed()) ed().unsaved = value;
   edit.dirty = value;
+  queueDraftSave();
   const chip = $("dirtyState");
   chip.dataset.dirty = String(value);
   chip.textContent = value ? "未保存" : "已保存";
@@ -2694,11 +2738,19 @@ async function loadGrid2D(force) {
   const [map, zoom] = (wantKey || "").split("@");
   if (!map || !zoom) return;
   const v = state.views.get(wantKey) || getView(map, zoom);
+  v.documents ||= new Map();
+  if (v.edit) v.documents.set(v.edit.sourceTier, v.edit);
+  const cachedDocument = v.documents.get(wantTier);
+  const restoredDocument = cachedDocument && cachedDocument !== v.edit;
+  if (restoredDocument) v.edit = cachedDocument;
+  if (force && !restoredDocument && v.edit?.unsaved && sameTier(v.edit.sourceTier, wantTier)) {
+    setStatus("当前文档有未保存修改，请先保存；重新载入已取消", "warning"); return;
+  }
   const requestId = v.gridLoadRequestId = (v.gridLoadRequestId || 0) + 1;
   if (!v.edit) {
     v.edit = new GridDocument({ sourceTier: wantTier });
   }
-  if (v.edit.loaded && !force && sameTier(v.edit.sourceTier, wantTier)) {
+  if (v.edit.loaded && (!force || restoredDocument) && sameTier(v.edit.sourceTier, wantTier)) {
     adoptViewEdit(v);
     return;
   }
@@ -2740,6 +2792,11 @@ async function loadGrid2D(force) {
       }
     }
     v.edit.loaded = true;
+    v.documents.set(wantTier, v.edit);
+    for (const [tier, document] of v.documents) {
+      if (v.documents.size <= 12) break;
+      if (document !== v.edit && !document.unsaved && !document.saving) { gridRasterCache.clear(document); v.documents.delete(tier); }
+    }
     invalidateGridLayer();
     // origin 可能变了，取坐标用的基准与统计都得跟着失效重算
     v.pickRef = null;
@@ -2754,7 +2811,7 @@ async function loadGrid2D(force) {
   if (state.activeKey === wantKey) {
     adoptViewEdit(v);
     setGridDirty(false);
-    if (edit.mode || link.mode) void loadFloorRegionMap(true);
+
     scheduleFloorOverlapLiveRefresh();
   }
 }
@@ -2951,7 +3008,6 @@ function setLinkMode(on) {
     if (edit.mode) setEditMode(false);
     if (pick.mode) setPickMode(false);
     setCalibMode(false);
-    link.stage = "source";
     loadGrid2D(false);
     void loadFloorRegionMap(true);
     void loadGridLinks();
@@ -2959,9 +3015,6 @@ function setLinkMode(on) {
     setStatus("连接模式：选择起点区域，切换分层后选择终点区域", "active");
   } else {
     link.drag = null;
-    link.source = null;
-    link.target = null;
-    link.editingId = null;
     editCanvasEl.width = 1;
     editCanvasEl.height = 1;
     invalidateGridLayer();
@@ -2976,10 +3029,12 @@ function setLinkMode(on) {
 }
 
 async function loadGridLinks() {
+  const key = state.activeKey;
   const [map] = (state.activeKey || "@").split("@");
   if (!map) return;
   try {
     const res = await fetch("/api/grid-links?map=" + encodeURIComponent(map)).then(r => r.json());
+    if (state.activeKey !== key) return;
     state.gridLinks = res.ok ? (res.links || []) : [];
     const broken = state.gridLinks.filter(item => item.checks && !item.checks.valid);
     $("linkListStatus").textContent = res.ok
@@ -2989,6 +3044,7 @@ async function loadGridLinks() {
       : ("读取失败: " + (res.error || "未知错误"));
     $("linkListStatus").classList.toggle("t-err", broken.length > 0);
   } catch (e) {
+    if (state.activeKey !== key) return;
     state.gridLinks = [];
     $("linkListStatus").textContent = "读取失败: " + e.message;
   }
@@ -3000,6 +3056,7 @@ async function loadGridLinks() {
 // 「这张图现在能不能拿去导航」——就绪判定由服务端算（/api/nav-graph），这里只显示。
 // 之前这个判定只有 curl 能看，属于做了功能却没接上界面。
 async function loadNavReadiness() {
+  const capturedKey = state.activeKey;
   const el = $("navReadyStatus");
   const list = $("navReadyList");
   if (!el || !list) return;
@@ -3015,6 +3072,7 @@ async function loadNavReadiness() {
       "/api/nav-graph?map=" + encodeURIComponent(map) +
       "&zoom=" + encodeURIComponent(zoom) + "&summary=1",
     ).then(r => r.json());
+    if (state.activeKey !== capturedKey) return;
     if (!res.ok) {
       el.textContent = "分层导航：" + (res.error || "无法判定");
       el.classList.remove("t-ok");
@@ -3040,6 +3098,7 @@ async function loadNavReadiness() {
       .map(text => '<div class="nav-blocker">' + text + "</div>")
       .join("");
   } catch (e) {
+    if (state.activeKey !== capturedKey) return;
     el.textContent = "分层导航：读取失败 " + e.message;
     list.innerHTML = "";
   }
@@ -3181,9 +3240,6 @@ async function saveGridLink() {
     if (!res.ok) throw new Error(res.error || "保存失败");
     addLog("已保存分层连接: " + res.link.id, "t-ok");
     setStatus("已保存分层连接", "ok");
-    link.source = null;
-    link.target = null;
-    link.editingId = null;
     link.stage = "source";
     await loadGridLinks();
     updateLinkEditorUi();
@@ -3280,12 +3336,12 @@ async function saveGrid2D() {
   if (!map || !zoom || !e) { addLog("没有可保存的网格数据", "t-err"); return; }
   // 同一文档串行保存，避免两个响应以不同的坐标基准回写内存。
   if (e.saving) return;
+  if (e.busy) { setStatus("批量操作尚未完成", "warning"); return; }
   e.saving = true;
+  setStatus("正在检查并保存网格…", "active");
   const isCurrent = () => state.activeKey === key && sameTier(currentTierId(), tier) && ed() === e;
   try {
     await loadFloorRegionMap(true);
-    if (!isCurrent()) return;
-    await loadFloorOverlaps(true);
     if (!isCurrent()) return;
     const unmarked = unmarkedYellowComponents();
     if (unmarked.length) {
@@ -3314,13 +3370,16 @@ async function saveGrid2D() {
       }
       if (res.origin) e.origin = [res.origin[0], res.origin[2]];
       if (res.shape) e.shape = [res.shape[0], res.shape[1]];
-      e.clearHistory();
+      e.markSaved();
     }
     e.unsaved = changed;
+    queueDraftSave();
     addLog("网格已保存: " + res.path + (changed ? "（仍有新修改未保存）" : ""), "t-ok");
     if (!isCurrent()) return;
     setGridDirty(changed);
-    const cw = connectivityWarning(e);
+    const diagnosticRevision = e.revision;
+    const cw = await diagnoseGrid(e).catch(error => "诊断未完成：" + error.message);
+    if (!isCurrent() || e.revision !== diagnosticRevision) return;
     $("editStatus").innerHTML = "已保存: <b>" + res.path + "</b>" +
       (res.shape ? "（" + res.shape[0] + "×" + res.shape[1] + " 格）" : "") +
       (res.overwrote ? "（覆盖原文件）" : "（新建）") +
@@ -3335,6 +3394,7 @@ async function saveGrid2D() {
     addLog("保存失败: " + err.message, "t-err");
   } finally {
     e.saving = false;
+    syncHistoryButtons();
   }
 }
 
@@ -3463,7 +3523,7 @@ async function ensurePickRef() {
   v.pickRefPending = (async () => {
     try {
       const [map, zoom] = (state.activeKey || "").split("@");
-      const resp = await fetch(
+      const resp = await sharedJson(
         "/api/grid2d?map=" + encodeURIComponent(map) +
         "&zoom=" + encodeURIComponent(zoom) +
         "&tier=" + encodeURIComponent(currentTierId()),
@@ -4466,58 +4526,7 @@ async function decodeTierBitmap(blob, meta, maxEdge = 0) {
   });
 }
 
-function syncTierResolution() {
-  const tier = state.activeTier;
-  if (!tier || tier.key !== state.activeKey || !tier.blob) return;
-  if (mapView.scale >= TIER_FULL_MIN_SCALE &&
-      !tier.bitmap && !tier.fullLoading) {
-    tier.fullLoading = true;
-    const requestId = state.tierRequestId;
-    decodeTierBitmap(tier.blob, tier.meta).then(bitmap => {
-      if (requestId !== state.tierRequestId || state.activeTier !== tier) {
-        if (bitmap && typeof bitmap.close === "function") bitmap.close();
-        return;
-      }
-      if (mapView.scale < TIER_FULL_RELEASE_SCALE) {
-        if (bitmap && typeof bitmap.close === "function") bitmap.close();
-        tier.fullLoading = false;
-        return;
-      }
-      tier.bitmap = bitmap;
-      if (tier.preview && typeof tier.preview.close === "function") {
-        tier.preview.close();
-      }
-      tier.preview = null;
-      tier.previewLoading = false;
-      tier.fullLoading = false;
-      requestRender(RENDER_LAYERS.BASE);
-    }).catch(e => {
-      tier.fullLoading = false;
-      addLog("分层高清图加载失败: " + e.message, "t-warn");
-    });
-  } else if (mapView.scale < TIER_FULL_RELEASE_SCALE && tier.bitmap) {
-    if (typeof tier.bitmap.close === "function") tier.bitmap.close();
-    tier.bitmap = null;
-    tier.fullLoading = false;
-    requestRender(RENDER_LAYERS.BASE);
-  }
-  if (mapView.scale < TIER_FULL_MIN_SCALE &&
-      !tier.preview && !tier.previewLoading) {
-    tier.previewLoading = true;
-    const requestId = state.tierRequestId;
-    decodeTierBitmap(tier.blob, tier.meta, TIER_PREVIEW_MAX).then(preview => {
-      if (requestId !== state.tierRequestId || state.activeTier !== tier) {
-        if (preview && typeof preview.close === "function") preview.close();
-        return;
-      }
-      tier.preview = preview;
-      tier.previewLoading = false;
-      requestRender(RENDER_LAYERS.BASE);
-    }).catch(() => {
-      tier.previewLoading = false;
-    });
-  }
-}
+function syncTierResolution() { /* Full resolution is fetched as visible 1024px tiles by drawTierOverlay. */ }
 
 function clearActiveTier(render = true, key = state.activeKey) {
   state.tierRequestId++;
@@ -4554,6 +4563,20 @@ async function loadTierCatalog() {
   renderLinkList();
 }
 
+function syncFloorDocuments(key, layers) {
+  const view = state.views.get(key);
+  const documents = new Set([view?.edit, ...[...(view?.documents?.values() || [])]]);
+  for (const document of documents) {
+    if (!document || !document.loaded) continue;
+    const layer = layers.find(item => sameTier(item.tier_id, document.sourceTier));
+    if (!layer) continue;
+    document.floorRegions = structuredClone(layer.floor_regions || []);
+    for (const op of [...document.history.undo, ...document.history.redo]) {
+      for (const meta of [op.metaBefore, op.metaAfter]) if (meta) meta.floorRegions = structuredClone(document.floorRegions);
+    }
+  }
+}
+
 async function loadFloorRegionMap(force = false) {
   const key = state.activeKey;
   if (!key) return;
@@ -4567,7 +4590,7 @@ async function loadFloorRegionMap(force = false) {
   state.floorPeerGrids = new Map();
   const [map, zoom] = key.split("@");
   try {
-    const res = await fetch(
+    const res = await sharedJson(
       "/api/grid2d/floor-map?map=" + encodeURIComponent(map) +
       "&zoom=" + encodeURIComponent(zoom) +
       "&level_id=" + encodeURIComponent(levelId),
@@ -4580,8 +4603,10 @@ async function loadFloorRegionMap(force = false) {
       layers: res.layers || [],
       error: null,
     };
+    syncFloorDocuments(key, state.floorMap.layers);
     await loadFloorOverlaps(true);
   } catch (e) {
+    if (state.activeKey !== key) return;
     state.floorMap = {
       key: mapKey, levelId, layers: [], error: e.message,
     };
@@ -4606,7 +4631,7 @@ async function loadFloorOverlaps(force = false) {
   if (!force && state.floorOverlap.key === mapKey) return;
   const [map, zoom] = key.split("@");
   try {
-    const res = await fetch(
+    const res = await sharedJson(
       "/api/grid2d/overlaps?map=" + encodeURIComponent(map) +
       "&zoom=" + encodeURIComponent(zoom) +
       "&tier=" + encodeURIComponent(tierId) +
@@ -4645,6 +4670,7 @@ async function loadFloorOverlaps(force = false) {
     renderFloorMarkedList();
     void loadFloorPeerGrids(true);
   } catch (e) {
+    if (state.activeKey !== key) return;
     state.floorOverlap = {
       key: mapKey, xzOnly: new Set(), threeD: new Set(),
       resolved: new Set(), components: [],
@@ -4660,13 +4686,19 @@ async function setActiveTier(layerId) {
   const key = state.activeKey;
   if (!key) return;
   const oldTierId = currentTierId();
-  if ((edit.mode || link.mode) && edit.dirty && oldTierId !== layerId) {
+  if (oldTierId === layerId && !state.tierLoading) return;
+  if (oldTierId !== layerId) state.previousTier = oldTierId;
+  const tierView = state.views.get(key);
+  if (tierView) { tierView.tierViewports ||= new Map(); tierView.tierViewports.set(oldTierId, {...mapView}); }
+  if (ed()?.busy) {
     setStatus("切换分层前请先保存当前层网格", "warning");
     populateTierSelect();
     return;
   }
   if (!layerId) {
     clearActiveTier();
+    const savedView = tierView?.tierViewports?.get("");
+    if (savedView) { Object.assign(mapView, savedView); applyView(true); }
     if (edit.mode || link.mode) void loadGrid2D(true);
     await loadFloorRegionMap(true);
     requestRender(RENDER_LAYERS.LINK);
@@ -4693,10 +4725,10 @@ async function setActiveTier(layerId) {
   try {
     const resp = await fetch("/api/layer-image?map=" + encodeURIComponent(map) +
                              "&zoom=" + encodeURIComponent(zoom) +
-                             "&tier=" + encodeURIComponent(layerId));
+                             "&tier=" + encodeURIComponent(layerId) + "&edge=2048");
     if (!resp.ok) throw new Error("HTTP " + resp.status);
     const blob = await resp.blob();
-    const preview = await decodeTierBitmap(blob, layer, TIER_PREVIEW_MAX);
+    const preview = await createImageBitmap(blob);
     if (requestId !== state.tierRequestId || state.activeKey !== key) {
       if (preview && typeof preview.close === "function") preview.close();
       return;
@@ -4708,7 +4740,7 @@ async function setActiveTier(layerId) {
     };
     state.tierLoading = false;
     const v = state.views.get(key);
-    if (v) v.tierId = layerId;
+    if (v) { v.tierId = layerId; const savedView = v.tierViewports?.get(layerId); if (savedView) { Object.assign(mapView, savedView); applyView(true); } }
     populateTierSelect();
     syncTierResolution();
     requestRender(RENDER_LAYERS.BASE);
@@ -4768,6 +4800,7 @@ async function loadTileMaps() {
 
 // 下拉选择后：内存视图 → 已存总图 → 自动流式合成，依次尝试显示
 async function openSelectedMap({ preserveFollow = false } = {}) {
+  if (ed()?.busy) { setStatus("请等待批量操作完成", "warning"); return; }
   const map = $("selMap").value, zoom = $("selZoom").value;
   if (!map || !zoom) return;
   const displayName = mapDisplayName(map);
@@ -4781,7 +4814,7 @@ async function openSelectedMap({ preserveFollow = false } = {}) {
   const v0 = state.views.get(key);
   if (hasBounds(v0) && v0.pasted.size > 0) {
     setActive(key);
-    fitView();
+    if (!v0.viewport) fitView();
     setStatus("已显示 " + displayName + " / L" + zoom + "（内存视图）", "ready");
     return;
   }
@@ -4792,6 +4825,7 @@ async function openSelectedMap({ preserveFollow = false } = {}) {
   try {
     const resp = await fetch("/api/maps?map=" + encodeURIComponent(map) + "&zoom=" + encodeURIComponent(zoom));
     const info = await resp.json();
+    if (state.activeKey !== key) return;
     if (info && info.file && info.minX !== undefined) {
       getView(map, zoom, { minX: info.minX, maxX: info.maxX, minY: info.minY, maxY: info.maxY });
       redrawActive();
@@ -4806,6 +4840,7 @@ async function openSelectedMap({ preserveFollow = false } = {}) {
     addLog("加载总图信息失败: " + e.message, "t-err");
   }
 
+  if (state.activeKey !== key) return;
   // 3) 都没有 → 自动流式合成（瓦片逐张贴上，可实时观察）
   setStatus("该地图无已存总图，自动开始合成…", "active");
   startCompose();
@@ -4947,9 +4982,9 @@ function isTextEditingTarget(target) {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (perspectiveView && perspectiveView.open) closePerspective();
-    else if (isSidePanelOpen()) setSidePanel(false);
     else if ($("calibDlg").style.display === "block") closeCalibDialog();
     else if ($("floorRegionDlg").style.display === "block") closeFloorRegionDialog();
+    else if (isSidePanelOpen()) setSidePanel(false);
     else if (edit.mode) clearSelection();
     return;
   }
@@ -4957,9 +4992,10 @@ document.addEventListener("keydown", (e) => {
   const mod = e.ctrlKey || e.metaKey;
   const key = e.key.toLowerCase();
   if (mod && !e.altKey && key === "s") {
-    if (!edit.mode && !calib.mode) return;
+    if (!edit.mode && !calib.mode && !link.mode) return;
     e.preventDefault();
-    if (edit.mode) saveGrid2D();
+    if (link.mode) saveGridLink();
+    else if (edit.mode) saveGrid2D();
     else if (!$("btnCalibSave").disabled) saveCalib();
     else setStatus("至少需要 3 个启用中的控制点才能保存标定", "warning");
     return;
@@ -5230,6 +5266,7 @@ $("gridOpacity").oninput = () => {
 
 // ---------------- 总图拖动 / 缩放 / 涂色 交互 ----------------
 canvasWrap.addEventListener("pointerdown", (e) => {
+  if (ed()?.busy || ((edit.mode || link.mode) && !sameTier(ed()?.sourceTier, currentTierId()))) return;
   gestureRect = canvasWrap.getBoundingClientRect();
   // 网格/连接模式下，入口徽章优先于涂格和连线框选：点它只负责切层。
   if ((edit.mode || link.mode) && openLayerEntranceFromEvent(e)) return;
@@ -5484,6 +5521,9 @@ window.__NAV_GRID_EDITOR__ = {
       overviewBytes,
       tierBytes,
       canvasBytes,
+      rasterBytes: [...gridRasterCache.caches.values()].reduce((n,chunks)=>n+chunks.size*256*256*4,0),
+      historyEstimatedBytes: allDocuments().reduce((n,{document})=>n+[...document.history.undo,...document.history.redo].reduce((v,op)=>v+op.changes.length*48,0),0),
+      documentCount: allDocuments().length,
       markerPoints: state.markers ? state.markers.points.length : 0,
       markupNodes: document.getElementsByTagName("*").length,
     };
@@ -5496,7 +5536,9 @@ window.__NAV_GRID_EDITOR__ = {
 
 window.addEventListener("load", () => {
   initDatasetExport({
-    hasUnsaved: () => edit.dirty || [...state.views.values()].some(view => view.edit && view.edit.unsaved),
+    hasUnsaved: () => allDocuments().some(({document}) => document.unsaved || document.busy || document.saving),
+    unsavedNames: () => allDocuments().filter(({document}) => document.unsaved).map(({key,document}) => key + "/" + (document.sourceTier || "主图")),
+    saveAll: saveAllDocuments,
     onOpen: () => { setSideTab("capture", { syncMode: false }); setSidePanel(true); },
   });
   refreshUiMetrics();
@@ -5508,4 +5550,125 @@ window.addEventListener("load", () => {
   loadPositionStatus();
   loadTileMaps();
   connect();
+});
+
+function allDocuments() {
+  return [...state.views].flatMap(([key, view]) => [...new Set([view.edit, ...(view.documents?.values() || [])])].filter(Boolean).map(document => ({key, document})));
+}
+async function saveAllDocuments() {
+  for (const {key, document} of allDocuments()) {
+    if (document.busy || document.saving) throw new Error("仍有操作或保存进行中，请稍后重试");
+    if (!document.unsaved) continue;
+    const [map, zoom] = key.split("@");
+    const revision = document.revision;
+    document.saving = true;
+    try {
+      const result = await saveGridDocument(map, zoom, document.sourceTier, document);
+      if (!result.ok) throw new Error(result.error);
+      if (document.revision !== revision || document.history.active) throw new Error("保存时产生了新修改，请重试");
+      document.unsaved = false; document.markSaved();
+      await removeDraft(key + "|" + document.sourceTier);
+    } finally { document.saving = false; }
+  }
+  if (ed()) { setGridDirty(!!ed().unsaved); syncHistoryButtons(); }
+  setStatus("已保存全部网格", "ready");
+}
+window.addEventListener("beforeunload", event => {
+  if (allDocuments().some(({document}) => document.unsaved || document.busy || document.saving) || link.source || link.target) {
+    event.preventDefault(); event.returnValue = "";
+  }
+});
+window.addEventListener("load", () => {
+  const tools = document.createElement("div"); tools.className = "quick-tools";
+  tools.innerHTML = '<button id="quickFit">适应窗口</button><button id="quickBack">上一分层</button><input id="tierSearch" aria-label="搜索分层" placeholder="搜索分层"><input id="jumpX" type="number" aria-label="定位 X" placeholder="X"><input id="jumpZ" type="number" aria-label="定位 Z" placeholder="Z"><button id="jumpGo">定位</button><button id="quickHelp">快捷键</button>';
+  canvasWrap.appendChild(tools);
+  for(const type of ["pointerdown","pointermove","pointerup","dblclick","wheel"]) tools.addEventListener(type,event=>event.stopPropagation());
+  $("quickFit").onclick = fitView;
+  $("quickBack").onclick = () => { if (state.previousTier !== undefined) void setActiveTier(state.previousTier); };
+  $("tierSearch").oninput = event => { for (const option of $("selTier").options) option.hidden = !!option.value && !option.textContent.includes(event.target.value.trim()); };
+  $("jumpGo").onclick = () => { if (!$("jumpX").value || !$("jumpZ").value) return; const x=Number($("jumpX").value),z=Number($("jumpZ").value); if(Number.isFinite(x)&&Number.isFinite(z)) focusWorldBounds({x0:x-10,x1:x+10,z0:z-10,z1:z+10},0.5,0.5); };
+  $("quickHelp").onclick = () => setStatus("1/2/3 切画笔或填选区 · 按住数字+滚轮调宽 · Shift+左键框选 · 右键平移 · Ctrl+S 保存当前模式 · Ctrl+Z/Y 撤销重做 · Esc 关闭窗口", "ready");
+});
+
+let draftTimer;
+function queueDraftSave() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(async () => {
+    try {
+      for (const {key,document} of allDocuments()) {
+        if (document.busy || document.saving || document.history.active) continue;
+        const id=key+"|"+document.sourceTier;
+        if (!document.unsaved) { await removeDraft(id); continue; }
+        await storeDraft({id,key,tier:document.sourceTier,updated:Date.now(),data:{...document.exportSparse(),...document.metadataSnapshot()}});
+      }
+    } catch(error) { setStatus("本地草稿备份失败："+error.message,"warning"); }
+  }, 1500);
+}
+function renderFloorBatch() {
+  const container=$("floorBatch"); if(!container) return;
+  const target=selectedFloorTarget(); container.replaceChildren();
+  if(target?.kind!=="component") return;
+  for(const tier of target.component.layers) {
+    const layer=state.floorMap.layers.find(item=>item.tier_id===tier);
+    const region=floorRegionForComponent(layer,target.component);
+    const row=document.createElement("label"); row.className="floor-batch-row";row.dataset.tier=tier;
+    const check=document.createElement("input");check.type="checkbox";check.setAttribute("aria-label", "提交 "+(layer?.name||tier));
+    const name=document.createElement("span");name.textContent=layer?.name||tier;
+    row.append(check,name);
+    for(const field of ["y_min","y_max"]) {const input=document.createElement("input");input.type="number";input.step="any";input.dataset.field=field;input.setAttribute("aria-label",(layer?.name||tier)+" "+field);input.value=region?.[field]??"";row.append(input);}
+    container.append(row);
+  }
+}
+async function saveFloorBatch() {
+  const target=selectedFloorTarget();if(target?.kind!=="component") return;
+  const assignments=[];
+  try {
+    for(const row of $("floorBatch").children) {
+      if(!row.querySelector('[type="checkbox"]').checked)continue;
+      const values=[...row.querySelectorAll('[type="number"]')].map(input=>input.value.trim());
+      const [y_min,y_max]=values.map(Number);
+      if(values.some(value=>!value)||!Number.isFinite(y_min)||!Number.isFinite(y_max)||y_min>y_max)throw new Error("请填写合法的高度上下界");
+      assignments.push({tier_id:row.dataset.tier,y_min,y_max});
+    }
+    if(!assignments.length) throw new Error("请勾选需要提交的层");
+    const [map,zoom]=state.activeKey.split("@");
+    const response=await fetch("/api/grid2d/overlap-components/height",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({map,zoom,tier:currentGridKey(),level_id:state.floorMap.levelId,component_id:target.component.id,assignments})}).then(r=>r.json());
+    await loadFloorRegionMap(true);
+    if(!response.ok)throw new Error(response.error+"；请核对已标记列表后重试");
+    $("floorRegionStatus").textContent="已保存 "+assignments.length+" 层的高度区间";
+    renderFloorBatch();void loadNavReadiness();
+  }catch(error){$("floorRegionStatus").textContent=error.message;}
+}
+window.addEventListener("load",()=>{
+  const batch=document.createElement("div");batch.id="floorBatch";$("floorRegionStatus").before(batch);
+  const save=document.createElement("button");save.textContent="保存勾选层高度";save.onclick=saveFloorBatch;batch.after(save);
+  const next=document.createElement("button");next.textContent="下一个未完成区";next.onclick=()=>{
+    const component=unmarkedYellowComponents().find(item=>item.id!==selectedFloorComponent()?.id);
+    if(!component){$("floorRegionStatus").textContent="没有其它未完成区";return;}
+    $("floorComponent").value="c:"+component.id;fillFloorHeightFromSelection();
+  };save.after(next);
+  const restore=document.createElement("button");restore.textContent="恢复当前层草稿";restore.onclick=async()=>{
+    try {
+      const key=state.activeKey,tier=currentTierId();const draft=(await listDrafts()).find(item=>item.id===key+"|"+tier);
+      if(state.activeKey!==key || currentTierId()!==tier) return;
+      if(!draft){setStatus("当前层没有备份草稿","idle");return;}
+      if(ed()?.unsaved||ed()?.saving||ed()?.busy){setStatus("请先保存当前修改再恢复草稿","warning");return;}
+      const view=state.views.get(key);view.edit=GridDocument.fromSparse(draft.data);view.edit.loaded=true;view.edit.unsaved=true;
+      view.documents ||=new Map();view.documents.set(tier,view.edit);adoptViewEdit(view);invalidateGridLayer();requestRender();
+      setStatus("已恢复本地草稿，请检查后保存","warning");
+    }catch(error){setStatus("恢复失败："+error.message,"warning");}
+  };document.querySelector(".quick-tools").append(restore);
+  for(const width of [1,3,5,10,25,50]) {
+    const button=document.createElement("button");button.textContent=String(width);button.title="画笔宽度 "+width;
+    button.onclick=()=>setBrushSize(width);$("editBrush").parentElement.append(button);
+  }
+  const card=document.createElement("div");card.id="linkEndpointCards";$("linkList").before(card);
+  for(const [side,label] of [["source","起点"],["target","终点"]]) {
+    const button=document.createElement("button");button.textContent="定位"+label;button.onclick=async()=>{
+      const endpoint=link[side];if(!endpoint)return;
+      if(state.activeKey!==viewKey(endpoint.map,endpoint.zoom)){syncMapSelectors(endpoint.map,endpoint.zoom);await openSelectedMap();await loadMappingForCurrent();}
+      await setActiveTier(toDiskTier(endpoint.tier));focusWorldBounds(endpoint.rect,0.5,0.5);
+    };card.append(button);
+  }
+  void listDrafts().then(drafts=>{if(drafts.length)setStatus("发现 "+drafts.length+" 份本地草稿；选中对应层后可恢复","warning");}).catch(()=>{});
 });

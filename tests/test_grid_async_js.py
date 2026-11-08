@@ -46,6 +46,8 @@ function harness() {
     updateEditStats: noop, updateSelBar: noop, syncEditCanvas: noop,
     scheduleFloorOverlapLiveRefresh: noop, loadFloorRegionMap: async () => {},
     loadFloorOverlaps: async () => {}, unmarkedYellowComponents: () => [],
+    queueDraftSave: noop,
+    setStatus: noop, syncHistoryButtons: noop, diagnoseGrid: async () => "",
     connectivityWarning: () => "", addLog: noop, requestRender: noop,
     loadNavReadiness: noop, RENDER_LAYERS: {GRID: 1, SELECTION: 2},
   };
@@ -68,6 +70,20 @@ async function posted(pending) {
 
 @unittest.skipUnless(shutil.which("node"), "Node.js is required for frontend tests")
 class GridAsyncJsTest(unittest.TestCase):
+    def test_dirty_tier_document_survives_round_trip(self):
+        self.run_js(r"""
+const {c,pending,view}=harness();
+c.tier="A";const a=c.loadGrid2D(true);pending[0].respond(loaded("A"));await a;
+const original=view.edit;
+original.beginTransaction();original.setCell(1,1,CELL_FREE);original.commitTransaction();c.setGridDirty(true);
+c.tier="B";const b=c.loadGrid2D(true);pending[1].respond(loaded("B"));await b;
+c.tier="A";await c.loadGrid2D(true);
+assert.equal(pending.length,2);
+assert.equal(view.edit,original);
+assert.equal(c.edit.dirty,true);
+assert.equal(original.history.undo.length,1);
+""")
+
     def run_js(self, script):
         prelude = PRELUDE.replace("DOCUMENT_URI", (JS / "grid/grid-document.js").as_uri())
         prelude = prelude.replace("TRANSPORT_URI", (JS / "grid/grid-transport.js").as_uri())
@@ -126,7 +142,7 @@ const {c, pending, doc} = harness();
 c.setGridDirty(true);
 doc.beginTransaction(); doc.setCell(1, 1, CELL_FREE); doc.commitTransaction();
 const a = c.loadGrid2D(true);
-pending[0].respond({error: "读取失败"}); await a;
+assert.equal(pending.length, 0, "未保存文档禁止强制重载"); await a;
 assert.equal(c.edit.dirty, true);
 assert.equal(doc.history.undo.length, 1);
 """)
@@ -152,7 +168,9 @@ const again = c.saveGrid2D(); await posted(pending);
 assert.equal(pending[0].body.data.cells.length, 2);
 pending[0].respond(saved); await again;
 assert.equal(c.edit.dirty, false);
-assert.equal(doc.history.undo.length, 0);
+assert.equal(doc.history.undo.length, 1);
+assert(doc.undo()); assert.equal(doc.getCell(2, 2), 0);
+assert(doc.redo());
 assert.deepEqual(Array.from(doc.origin), [-1, -1]);
 assert.equal(doc.getCell(2, 2), CELL_FREE);
 """)
