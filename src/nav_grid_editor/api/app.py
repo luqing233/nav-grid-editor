@@ -196,6 +196,18 @@ def grid2d_get(map: str = "", zoom: str = "", tier: str = "") -> JSONResponse:
     return JSONResponse({"ok": True, **_svc().get_grid2d(map, zoom, tier)})
 
 
+@app.post("/api/pr-review/load")
+async def pr_review_load(request: Request) -> JSONResponse:
+    body = await request.json()
+    if not isinstance(body, dict) or not isinstance(body.get("pr"), str):
+        return JSONResponse({"ok": False, "error": "请提供 PR 编号或链接"}, status_code=400)
+    try:
+        result = await run_in_threadpool(_svc().pr_review.load, body["pr"])
+        return JSONResponse(result)
+    except Exception as error:
+        return JSONResponse({"ok": False, "error": str(error)}, status_code=400)
+
+
 @app.get("/api/grid2d/floor-map")
 def grid2d_floor_map(map: str = "", zoom: str = "",
                      level_id: str = "") -> JSONResponse:

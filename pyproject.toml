@@ -46,6 +46,7 @@ where = ["src"]
     "web/static/js/grid/*.js",
     "web/static/js/layers/*.js",
     "web/static/js/render/*.js",
+    "web/static/js/review/*.js",
     "web/static/js/three/*.js",
     "web/static/js/vendor/three/*.js",
 ]

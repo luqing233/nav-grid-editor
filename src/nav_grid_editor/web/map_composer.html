@@ -7,6 +7,7 @@
 <meta name="theme-color" content="#111411">
 <title>终末地地图采集 / 标定 / 网格编辑</title>
 <link rel="stylesheet" href="/static/css/map_composer.css">
+<link rel="stylesheet" href="/static/css/workbench.css">
 <script type="importmap">
 {
   "imports": {
@@ -56,6 +57,8 @@
     </div>
 
     <div class="tb-global" role="group" aria-label="全局操作">
+      <button id="btnCapturePanel" type="button" title="打开地图采集、合成与维护">采集</button>
+      <button id="btnPRReview" type="button">审阅 data PR</button>
       <button id="btnDatasetPanel" type="button" title="导出所有已保存地图、标定与网格">导出数据包</button>
       <button id="btnUndo" class="icon-button" type="button" title="撤销（Ctrl+Z）" disabled>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 4 12l5 5M5 12h9a6 6 0 0 1 6 6"></path></svg>
@@ -63,15 +66,6 @@
       <button id="btnRedo" class="icon-button" type="button" title="重做（Ctrl+Y / Ctrl+Shift+Z）" disabled>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 7 5 5-5 5m4-5h-9a6 6 0 0 0-6 6"></path></svg>
       </button>
-    </div>
-
-    <div class="tb-fetch">
-      <span id="fetchDot" class="status-dot" aria-hidden="true"></span>
-      <span id="fetchState">空闲</span>
-      <button id="btnFetch" class="button-primary"
-              title="用 Playwright 打开游戏地图页面并抓取瓦片">开始抓取</button>
-      <button id="btnFetchStop" class="button-quiet" disabled>停止</button>
-      <label class="toggle"><input type="checkbox" id="chkHeadless"><span>无头</span></label>
     </div>
 
   </div>
@@ -110,13 +104,7 @@
     </div>
     <div id="canvasToolbar" class="canvas-toolbar" aria-label="上下文工具栏">
       <div class="tb-act" data-mode="browse">
-        <button id="btnCompose" title="把当前地图/zoom 的已有瓦片逐张贴上总图">合成总图</button>
-        <button id="btnSim" title="不落盘的模拟抓取，用来演示实时贴图">模拟抓取</button>
-        <button id="btnMarksAuth"
-                title="抓取官方地图标记；认证口径包含玩家自建结构">抓取标记</button>
-        <button id="btnFit" title="缩放并居中显示整张总图">适应窗口</button>
-        <button id="btnReset" title="清除当前地图画布">清空</button>
-        <button id="btnDownload" title="下载当前地图总图 PNG">下载</button>
+        <button id="btnDownload" title="下载当前地图总图 PNG">下载总图</button>
         <label class="toggle"><input type="checkbox" id="chkFollow" checked><span>跟随</span></label>
         <label class="toggle" title="玩家位置流：实时获取玩家坐标（默认读抓包后端；具体数据源由服务端决定）">
           <span class="status-dot" id="wsDot" aria-hidden="true"></span>
@@ -130,6 +118,7 @@
         <span class="tb-act-hint">至少 3 个控制点</span>
       </div>
       <div class="tb-act" data-mode="edit">
+        <div class="edit-paint-tools" role="group" aria-label="画笔与保存">
         <button class="brushBtn on" data-brush="free"
                 title="涂成 Free（快捷键 1，按住滚轮调粗细）">Free</button>
         <button class="brushBtn" data-brush="blocked"
@@ -140,14 +129,17 @@
           <input id="editBrush" type="number" min="1" max="50" value="1"
                  title="画笔宽度（格子数）">
         </label>
-        <div class="tb-sep"></div>
+        <button id="btnFloorRegion" title="为当前分层网格标记 X/Z 重合区域和高度区间">楼层区间</button>
+        <button id="btnEditSave" aria-label="保存网格" title="保存网格（Ctrl+S）">保存网格 <kbd>Ctrl S</kbd></button>
+        </div>
+        <div class="edit-selection-tools" role="group" aria-label="选区填充" hidden>
         <span class="selection-count">选中 <b id="selCount" class="num">0</b></span>
         <button id="btnSelFree" title="把选中的格子填成 Free">填充 Free</button>
         <button id="btnSelBlocked" title="把选中的格子填成 Blocked">填充 Blocked</button>
         <button id="btnSelErase" title="把选中的格子擦成未知">填充未知</button>
         <button id="btnSelClear" title="取消框选（快捷键 Esc）">取消选择</button>
-        <button id="btnFloorRegion" title="为当前分层网格标记 X/Z 重合区域和高度区间">楼层区间</button>
-        <button id="btnEditSave" title="保存网格（Ctrl+S）">保存网格</button>
+        </div>
+        <span class="edit-selection-hint">Shift + 拖动框选 · 右键平移 · 滚轮缩放</span>
       </div>
       <div class="tb-act" data-mode="link">
         <button id="btnLinkSource" class="on">选起点</button>
@@ -183,7 +175,8 @@
       </div>
     </div>
     <div id="layerPanel" class="layer-panel" aria-label="图层控制">
-      <span class="layer-title">图层</span>
+      <div class="layer-panel-heading"><span class="layer-title">显示图层</span><button id="btnLayerCollapse" type="button" aria-label="收起图层控制" aria-expanded="true" title="收起图层控制">−</button></div>
+      <div id="layerPanelContent">
       <label class="layer-toggle"><span>底图</span><input type="checkbox" id="layerBase" checked></label>
       <label class="layer-toggle"><span>分层</span><input type="checkbox" id="layerTier" checked></label>
       <label class="layer-toggle"><span>标记</span><input type="checkbox" id="layerMarkers" checked></label>
@@ -194,6 +187,7 @@
       <label class="opacity-control">透明度
         <input id="gridOpacity" type="range" min="0.15" max="1" step="0.05" value="0.82">
       </label>
+      </div>
     </div>
     <div id="brushCursor" class="brush-cursor" aria-hidden="true">
       <span id="brushCursorLabel">1</span>
@@ -208,7 +202,7 @@
     <div id="sidePanel">
     <div id="sideHeader">
       <div>
-        <span class="side-kicker">CONTROL / CURRENT MODE</span>
+        <span class="side-kicker">当前工作模式</span>
         <strong><span id="sideModeCode">01</span><span id="sideModeLabel">浏览</span></strong>
       </div>
     </div>
@@ -229,6 +223,22 @@
 
     <div id="sideContent">
     <section class="side-sec side-panel" data-panel="capture">
+      <h3><span>地图采集</span><small>CAPTURE</small></h3>
+      <div class="panel capture-tools">
+        <div class="tb-fetch">
+          <span id="fetchDot" class="status-dot" aria-hidden="true"></span><span id="fetchState">空闲</span>
+          <button id="btnFetch" class="button-primary" title="用 Playwright 打开游戏地图页面并抓取瓦片">开始抓取</button>
+          <button id="btnFetchStop" class="button-quiet" disabled>停止</button>
+          <label class="toggle"><input type="checkbox" id="chkHeadless"><span>后台运行</span></label>
+        </div>
+        <div class="capture-action-grid">
+          <button id="btnCompose" title="把当前地图/zoom 的已有瓦片逐张贴上总图">合成总图</button>
+          <button id="btnMarksAuth" title="抓取官方地图标记；认证口径包含玩家自建结构">抓取标记</button>
+          <button id="btnSim" title="不落盘的模拟抓取，用来演示实时贴图">模拟抓取</button>
+          <button id="btnFit" title="缩放并居中显示整张总图">适应窗口</button>
+        </div>
+        <details class="capture-maintenance"><summary>画布维护</summary><button id="btnReset" class="button-danger" title="清除当前地图的内存视图">清空画布</button><p class="panel-note">重置当前地图的内存视图，不删除已保存文件。</p></details>
+      </div>
       <div class="panel dataset-export-panel">
         <h3>发布数据包</h3>
         <label for="datasetTarget">目标文件夹（新目录或空目录）</label>

@@ -4,6 +4,7 @@ import {storeDraft, removeDraft, listDrafts} from "./grid/drafts.js";
 import { diagnoseGrid } from "./grid/diagnostics.js";
 import { sharedJson } from "./grid/requests.js";
 import { initDatasetExport } from "./dataset-export.js";
+import { initPRReview } from "./review/pr-review.js";
 
 import { CELL_BLOCKED, CELL_FREE, CELL_UNKNOWN, GridDocument } from "./grid/grid-document.js";
 import { GridRasterCache } from "./grid/grid-raster-cache.js";
@@ -74,6 +75,7 @@ const canvasHolder = $("canvasHolder");
 const canvas = $("composeCanvas");
 const calibOverlay = $("calibOverlay");
 const gridRasterCache = new GridRasterCache();
+let prReview = null;
 const gridLayerState = { valid: false, key: "", width: 0, height: 0 };
 const gridBoundsEl = $("gridBounds");
 const brushCursor = $("brushCursor");
@@ -590,6 +592,8 @@ function render(layers = RENDER_LAYERS.ALL) {
 
     // 2.5) 地图标记层：画在瓦片之上、网格/路径之下
     if (state.layers.markers) drawMarkers(g);
+    prReview?.draw(g, vis, state.activeKey, document =>
+      calib.mapping && calib.key === state.activeKey ? gridCellToPixelTransform(document) : null);
   }
 
   // 3) 网格层在编辑和连接模式都显示；选择层仍然只属于编辑模式。
@@ -1033,6 +1037,10 @@ function setSideTab(name, { syncMode = true } = {}) {
 }
 
 function setMode(name) {
+  if (state.prReviewActive && name !== "browse") {
+    setStatus("请先关闭只读 PR 审阅，再进入编辑模式", "warning");
+    return;
+  }
   // 关掉除目标外的模式，一律委托给各自的 setter，保留它们的清理副作用
   // （setEditMode(false) 要清画笔/框选/选区并归零覆盖画布）。
   if (name !== "edit") setEditMode(false);
@@ -1145,6 +1153,8 @@ async function saveCalib() {
 
 // 切换视图/地图时加载该地图已有标定
 async function loadMappingForCurrent() {
+  const requestId = (calib.loadRequestId || 0) + 1;
+  calib.loadRequestId = requestId;
   const [map, zoom] = (state.activeKey || "").split("@");
   const wantKey = state.activeKey;  // 请求期间用户可能又切走了
   calib.points = []; calib.mapping = null; calib.key = wantKey;
@@ -1163,7 +1173,7 @@ async function loadMappingForCurrent() {
     // 会晚于 B 到达。这时候 calib.key 已经是 B 而 mapping 是 A，所有
     // `calib.key !== state.activeKey` 的守卫都会通过，于是用错图的仿射矩阵去
     // 换算——涂的格子、路径和玩家标记全部落到错误的世界坐标。
-    if (wantKey !== state.activeKey) return;
+    if (wantKey !== state.activeKey || requestId !== calib.loadRequestId) return;
     if (res.ok && res.matrix) {
       calib.mapping = res;
       calib.points = (res.control_points || []).map(cp => ({
@@ -1180,7 +1190,7 @@ async function loadMappingForCurrent() {
       $("calibStatus").textContent = "未标定（开标定模式后点击地图添加控制点）";
     }
   } catch (e) {
-    if (wantKey !== state.activeKey) return;
+    if (wantKey !== state.activeKey || requestId !== calib.loadRequestId) return;
     $("calibStatus").textContent = "标定加载失败";
   }
   renderCalibList(); renderCalibMarks();
@@ -1659,6 +1669,8 @@ function updateSelBar() {
   const r = selRectOf();
   // 选择只可能是矩形，面积 O(1) 算出，不需要展开为逐格集合。
   $("selCount").textContent = r ? (r.x1 - r.x0 + 1) * (r.z1 - r.z0 + 1) : 0;
+  document.querySelector(".edit-selection-tools").hidden = !r;
+  document.querySelector(".edit-selection-hint").hidden = !!r;
 }
 
 function clearSelection() {
@@ -3683,6 +3695,7 @@ function syncMapSelectors(mapId, preferredZoom = "") {
 }
 
 async function syncPositionLocation(data) {
+  if (state.prReviewActive) return;
   if (!data || typeof data !== "object") return;
   const mapId = String(data.mapId || "").trim();
   if (!mapId) return;
@@ -4874,6 +4887,10 @@ $("btnSim").onclick = async () => {
 };
 $("btnReset").onclick = () => {
   if (state.activeKey) {
+    if (allDocuments().some(({key, document}) => key === state.activeKey && (document.unsaved || document.busy || document.saving))) {
+      setStatus("当前地图有未保存或正在处理的网格，请先保存后再清空画布", "warning");
+      return;
+    }
     const [map, zoom] = state.activeKey.split("@");
     clearView(map, zoom);
     addLog("已清空画布: " + state.activeKey);
@@ -4900,6 +4917,7 @@ $("mpNone").onclick = () => setAllMarkItems(false);
 $("mpReset").onclick = resetMarkFilter;
 $("btnFit").onclick = fitView;
 $("btnSideToggle").onclick = () => setSidePanel(!isSidePanelOpen());
+$("btnCapturePanel").onclick = () => { if(state.prReviewActive)return;setSideTab("capture");setSidePanel(true);$("sideContent").scrollTop=0; };
 $("btnUndo").onclick = () => {
   if (edit.mode) undoGridEdit();
   else if (calib.mode) undoCalibEdit();
@@ -4980,6 +4998,10 @@ function isTextEditingTarget(target) {
 }
 
 document.addEventListener("keydown", (e) => {
+  if ($("shortcutDialog")?.open) {
+    if (e.key === "Escape") { e.preventDefault(); $("shortcutDialog").close(); }
+    return;
+  }
   if (e.key === "Escape") {
     if (perspectiveView && perspectiveView.open) closePerspective();
     else if ($("calibDlg").style.display === "block") closeCalibDialog();
@@ -5063,8 +5085,10 @@ function brushLabel(name) {
 // 画笔 = 左键涂什么，也决定"填充选中"填什么（快捷键 1/2/3 走同一个入口）
 function setBrush(name) {
   edit.brush = name;
-  document.querySelectorAll(".brushBtn").forEach(x =>
-    x.classList.toggle("on", x.dataset.brush === name));
+  document.querySelectorAll(".brushBtn").forEach(x => {
+    x.classList.toggle("on", x.dataset.brush === name);
+    x.setAttribute("aria-pressed", String(x.dataset.brush === name));
+  });
   if (heldBrushKeys.size) showBrushHud();   // 按住时改画笔，HUD 跟着换
   if (edit.cursorCell) updateBrushCursor(edit.cursorCell[0], edit.cursorCell[1]);
 }
@@ -5073,6 +5097,7 @@ function setBrush(name) {
 function setBrushSize(n) {
   edit.brushSize = Math.max(1, Math.min(50, parseInt(n, 10) || 1));
   $("editBrush").value = edit.brushSize;
+  for (const button of document.querySelectorAll("[data-brush-size]")) button.setAttribute("aria-pressed",String(Number(button.dataset.brushSize)===edit.brushSize));
   if (heldBrushKeys.size) showBrushHud();
   if (edit.cursorCell) updateBrushCursor(edit.cursorCell[0], edit.cursorCell[1]);
 }
@@ -5462,7 +5487,77 @@ window.addEventListener("resize", () => {
   clampPan();
   applyView();
 });
+
+// PR snapshots have their own documents and raster cache; never adopt them as edit.v.
+window.addEventListener("load", () => {
+  let previous = null;
+  const lockControls = locked => {
+    for (const selector of [".tb-context", ".tb-fetch", "#btnCapturePanel", "#btnDatasetPanel", "#btnUndo", "#btnRedo"]) {
+      document.querySelector(selector).inert = locked;
+    }
+  };
+  prReview = initPRReview({
+    container: canvasWrap,
+    mapLabel: mapDisplayName,
+    canOpen: () => !ed()?.busy && !ed()?.saving && !edit.painting && !edit.marquee && !link.drag,
+    render: () => requestRender(RENDER_LAYERS.BASE),
+    returnFocus: () => $("btnPRReview").focus(),
+    activate: () => {
+      previous = {key:state.activeKey,tier:currentTierId(),viewport:{...mapView},mode:currentMode(),follow:state.follow,
+        calibration:calibSnapshot(),calibrationHistory:structuredClone(calibHistory)};
+      setMode("browse");setSidePanel(false);closeFloorRegionDialog();
+      state.prReviewActive = true;state.positionView.requestId++;
+      state.follow = false;$("chkFollow").checked = false;
+      clearActiveTier();lockControls(true);
+    },
+    select: async (file, bounds, isCurrent = () => true) => {
+      if (!isCurrent() || file.map_category === "independent") return false;
+      if (!syncMapSelectors(file.map, file.zoom)) return false;
+      await openSelectedMap();
+      if (!isCurrent()) return false;
+      await loadMappingForCurrent();
+      if (!isCurrent() || !calib.mapping) return false;
+      await setActiveTier(file.tier);
+      if (!isCurrent()) return false;
+      const inverse = calib.mapping.inverse_matrix;
+      const pixels = [[bounds.x0,bounds.z0],[bounds.x0,bounds.z1],[bounds.x1,bounds.z0],[bounds.x1,bounds.z1]]
+        .map(([x,z]) => [inverse[0][0]*x+inverse[0][1]*z+inverse[0][2],inverse[1][0]*x+inverse[1][1]*z+inverse[1][2]]);
+      const xs=pixels.map(p=>p[0]),ys=pixels.map(p=>p[1]);
+      const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+      const insets=prReview.viewportInsets;
+      const panelWidth=insets.left;
+      const width=Math.max(100,canvasWrap.clientWidth-panelWidth-20),height=Math.max(100,canvasWrap.clientHeight-insets.bottom);
+      mapView.scale=Math.min(8,Math.max(0.01,Math.min(width*0.8/Math.max(1,x1-x0),height*0.8/Math.max(1,y1-y0))));
+      mapView.panX=panelWidth+width/2-(x0+x1)/2*mapView.scale;
+      mapView.panY=height/2-(y0+y1)/2*mapView.scale;mapView.focus=null;
+      applyView(true);$("modeTag").textContent="PR 审阅";
+      return true;
+    },
+    close: async () => {
+      state.prReviewActive=false;lockControls(false);
+      if (previous?.key) {
+        const [map,zoom]=previous.key.split("@");
+        syncMapSelectors(map,zoom);await openSelectedMap();await loadMappingForCurrent();
+        await setActiveTier(previous.tier);
+        Object.assign(calib,previous.calibration,{key:previous.key});
+        Object.assign(calibHistory,previous.calibrationHistory);renderCalibList();
+        Object.assign(mapView,previous.viewport);applyView(true);setMode(previous.mode);
+        state.follow=previous.follow;$("chkFollow").checked=state.follow;
+      }
+      previous=null;setStatus("已关闭 PR 审阅，返回原编辑视图", "ready");
+    },
+  });
+  $("btnPRReview").onclick=()=>prReview.open();
+  canvasWrap.addEventListener("pointermove", event => {
+    if(!prReview.active || !calib.mapping)return;
+    const pixel=canvasPixelOfClient(event.clientX,event.clientY);
+    if(!pixel)return;
+    const matrix=calib.mapping.matrix;
+    prReview.hover(matrix[0][0]*pixel[0]+matrix[0][1]*pixel[1]+matrix[0][2],matrix[1][0]*pixel[0]+matrix[1][1]*pixel[1]+matrix[1][2]);
+  });
+});
 window.__NAV_GRID_EDITOR__ = {
+  get prReview() { return prReview; },
   get document() { return ed(); },
   get editor() { return edit; },
   get linkEditor() { return link; },
@@ -5580,14 +5675,36 @@ window.addEventListener("beforeunload", event => {
 });
 window.addEventListener("load", () => {
   const tools = document.createElement("div"); tools.className = "quick-tools";
-  tools.innerHTML = '<button id="quickFit">适应窗口</button><button id="quickBack">上一分层</button><input id="tierSearch" aria-label="搜索分层" placeholder="搜索分层"><input id="jumpX" type="number" aria-label="定位 X" placeholder="X"><input id="jumpZ" type="number" aria-label="定位 Z" placeholder="Z"><button id="jumpGo">定位</button><button id="quickHelp">快捷键</button>';
+  tools.setAttribute("aria-label","地图导航");
+  tools.innerHTML = `<button id="quickFit" title="缩放并居中显示当前地图">适应窗口</button><button id="quickBack" title="返回上一次查看的分层">上一分层</button>
+    <input id="tierSearch" aria-label="搜索分层" placeholder="搜索分层">
+    <details class="quick-location"><summary>坐标定位</summary><div class="quick-location-fields"><label>X<input id="jumpX" type="number" step="any" aria-label="定位 X" placeholder="世界 X"></label><label>Z<input id="jumpZ" type="number" step="any" aria-label="定位 Z" placeholder="世界 Z"></label><button id="jumpGo">定位</button></div></details>
+    <button id="quickHelp" title="查看快捷键与操作说明">快捷键 <kbd>?</kbd></button>`;
   canvasWrap.appendChild(tools);
   for(const type of ["pointerdown","pointermove","pointerup","dblclick","wheel"]) tools.addEventListener(type,event=>event.stopPropagation());
   $("quickFit").onclick = fitView;
   $("quickBack").onclick = () => { if (state.previousTier !== undefined) void setActiveTier(state.previousTier); };
   $("tierSearch").oninput = event => { for (const option of $("selTier").options) option.hidden = !!option.value && !option.textContent.includes(event.target.value.trim()); };
-  $("jumpGo").onclick = () => { if (!$("jumpX").value || !$("jumpZ").value) return; const x=Number($("jumpX").value),z=Number($("jumpZ").value); if(Number.isFinite(x)&&Number.isFinite(z)) focusWorldBounds({x0:x-10,x1:x+10,z0:z-10,z1:z+10},0.5,0.5); };
-  $("quickHelp").onclick = () => setStatus("1/2/3 切画笔或填选区 · 按住数字+滚轮调宽 · Shift+左键框选 · 右键平移 · Ctrl+S 保存当前模式 · Ctrl+Z/Y 撤销重做 · Esc 关闭窗口", "ready");
+  $("jumpGo").onclick = () => { if (!$("jumpX").value || !$("jumpZ").value) return; const x=Number($("jumpX").value),z=Number($("jumpZ").value); if(Number.isFinite(x)&&Number.isFinite(z)) {focusWorldBounds({x0:x-10,x1:x+10,z0:z-10,z1:z+10},0.5,0.5);tools.querySelector("details").open=false;} };
+  document.addEventListener("pointerdown",event=>{if(!tools.contains(event.target))tools.querySelector("details").open=false;});
+  for(const id of ["jumpX","jumpZ"])$(id).onkeydown=event=>{if(event.key==="Enter")$("jumpGo").click();};
+  const help=document.createElement("dialog");help.id="shortcutDialog";help.setAttribute("aria-labelledby","shortcutTitle");
+  help.innerHTML=`<div class="shortcut-heading"><div><span class="panel-note">地图工作台</span><h2 id="shortcutTitle">操作与快捷键</h2></div><button type="button" aria-label="关闭操作说明">×</button></div>
+    <dl><dt>右键拖动 / 滚轮</dt><dd>平移地图 / 缩放</dd><dt>1 / 2 / 3</dt><dd>可走 / 阻挡 / 未知；有选区时直接填充</dd><dt>按住数字 + 滚轮</dt><dd>调整画笔宽度</dd><dt>Shift + 左键拖动</dt><dd>框选网格</dd><dt>Ctrl + S</dt><dd>保存当前网格、标定或连接</dd><dt>Ctrl + Z / Y</dt><dd>撤销 / 重做</dd><dt>Esc</dt><dd>关闭窗口或取消选择</dd></dl><p class="panel-note">PR 审阅内支持 J / K 切区、1 / 2 / 3 切对比视图、F 定位、H 收起面板。</p>`;
+  document.body.append(help);help.querySelector("button").onclick=()=>help.close();
+  help.onclick=event=>{if(event.target===help){const r=help.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)help.close();}};
+  $("quickHelp").onclick = () => help.showModal();
+  $("btnLayerCollapse").onclick=()=>{
+    const collapsed=!$("layerPanelContent").hidden;$("layerPanelContent").hidden=collapsed;
+    $("btnLayerCollapse").setAttribute("aria-expanded",String(!collapsed));
+    $("btnLayerCollapse").setAttribute("aria-label",collapsed?"展开图层控制":"收起图层控制");
+    $("btnLayerCollapse").title=collapsed?"展开图层控制":"收起图层控制";
+    $("btnLayerCollapse").textContent=collapsed?"+":"−";
+  };
+  for(const button of document.querySelectorAll(".rail-mode")) {
+    const label=document.createElement("span");label.className="rail-caption";label.setAttribute("aria-hidden","true");
+    label.textContent=button.id==="btnPerspective"?"3D":button.getAttribute("aria-label");button.append(label);
+  }
 });
 
 let draftTimer;
@@ -5657,11 +5774,15 @@ window.addEventListener("load",()=>{
       view.documents ||=new Map();view.documents.set(tier,view.edit);adoptViewEdit(view);invalidateGridLayer();requestRender();
       setStatus("已恢复本地草稿，请检查后保存","warning");
     }catch(error){setStatus("恢复失败："+error.message,"warning");}
-  };document.querySelector(".quick-tools").append(restore);
-  for(const width of [1,3,5,10,25,50]) {
+  };$("btnEditLoad").parentElement.append(restore);
+  const presets=document.createElement("span");presets.className="brush-presets";presets.setAttribute("role","group");presets.setAttribute("aria-label","常用画笔宽度");
+  $("editBrush").parentElement.after(presets);
+  for(const width of [1,3,5,10]) {
     const button=document.createElement("button");button.textContent=String(width);button.title="画笔宽度 "+width;
-    button.onclick=()=>setBrushSize(width);$("editBrush").parentElement.append(button);
+    button.dataset.brushSize=String(width);button.setAttribute("aria-label","画笔宽度 "+width);
+    button.onclick=()=>setBrushSize(width);presets.append(button);
   }
+  setBrushSize(edit.brushSize);setBrush(edit.brush);
   const card=document.createElement("div");card.id="linkEndpointCards";$("linkList").before(card);
   for(const [side,label] of [["source","起点"],["target","终点"]]) {
     const button=document.createElement("button");button.textContent="定位"+label;button.onclick=async()=>{

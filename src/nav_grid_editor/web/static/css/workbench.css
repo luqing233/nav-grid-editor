@@ -1,0 +1,114 @@
+/* Layout and ergonomics only. Colors remain in map_composer.css. */
+:root {
+  --rail-w: calc(64px * var(--ui-scale));
+  --panel-w: min(calc(344px * var(--ui-scale)), calc(100vw - var(--rail-w)));
+}
+kbd { padding: 1px 4px; border: 1px solid currentColor; border-radius: 4px; font: 10px var(--mono); opacity: .65; white-space: nowrap; }
+button kbd { margin-left: 5px; }
+summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+#topbar { gap: 12px; }
+.app-brand { padding-right: 8px; }
+.tb-global { gap: 6px; }
+body.pr-review-active #btnCapturePanel { display: none; }
+.telemetry-item { display: none; }
+body.side-open .viewport-hud { left: calc(var(--rail-w) + var(--panel-w) + 16px); }
+
+.quick-tools, body.side-open .quick-tools {
+  top: 60px; padding: 6px; flex-wrap: wrap; gap: 5px;
+  max-width: calc(100% - var(--rail-w) - 190px);
+}
+body.side-open .quick-tools { max-width: calc(100% - var(--rail-w) - var(--panel-w) - 190px); }
+.quick-tools button { font-size: 12px; min-height: 32px; }
+.quick-tools #tierSearch { width: 112px; height: 32px; font-size: 12px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); }
+.quick-location { position: relative; }
+.quick-location summary { list-style: none; border: 1px solid var(--border-strong); background: var(--surface-raised); border-radius: 7px; padding: 6px 9px; cursor: pointer; white-space: nowrap; }
+.quick-location summary::-webkit-details-marker { display: none; }
+.quick-location[open] summary { border-color: var(--accent); }
+.quick-location-fields {
+  position: absolute; top: calc(100% + 12px); right: 0; z-index: 25;
+  display: flex; align-items: end; gap: 7px; width: 284px; padding: 12px;
+  border: 1px solid var(--border-strong); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow);
+}
+.quick-location-fields label { min-width: 0; font-size: 11px; }
+.quick-tools .quick-location-fields input { display: block; width: 88px; margin-top: 5px; min-height: 32px; }
+
+#sidePanel { width: var(--panel-w); grid-template-rows: auto auto minmax(0,1fr); }
+body.side-open #sideBackdrop { display: none; }
+#sideHeader { padding-top: 16px; min-height: 66px; }
+.side-telemetry { display: none; }
+.side-kicker { font-size: 10px; letter-spacing: .05em; }
+#sideContent { padding: 14px; font-size: 13px; }
+#side h3 { font-size: 14px; min-height: 30px; padding: 0; }
+#side h3::before, #sideModeCode { display: none; }
+#side h3 small { display: none; }
+.side-sec > h3, .side-log > h3 { margin: 16px 0 9px; }
+.side-sec > h3:first-child { margin-top: 0; }
+.field-grid input { width: 100%; min-width: 0; }
+.button-row { gap: 7px; flex-wrap: wrap; }
+#sideRail { width: var(--rail-w); grid-template-rows: 48px minmax(0,1fr) auto; padding-inline: 5px; }
+#sideRail .rail-mode { width: calc(52px * var(--ui-scale)); height: calc(56px * var(--ui-scale)); min-height: calc(56px * var(--ui-scale)); flex-direction: column; gap: 4px; }
+.rail-caption { display: block; font-size: calc(10px * var(--ui-scale)); line-height: 1; }
+#sideRail .rail-mode svg { width: calc(20px * var(--ui-scale)); height: calc(20px * var(--ui-scale)); }
+.rail-tools { gap: 4px; }
+
+.canvas-toolbar, body.side-open .canvas-toolbar {
+  left: calc((100% + var(--rail-w)) / 2); right: auto;
+  max-width: calc(100% - var(--rail-w) - 32px); width: max-content;
+  overflow: visible; transform: translateX(-50%);
+}
+body.side-open .canvas-toolbar { left: calc((100% + var(--rail-w) + var(--panel-w)) / 2); max-width: calc(100% - var(--rail-w) - var(--panel-w) - 32px); }
+.canvas-toolbar .tb-act { flex: 1 1 auto; flex-wrap: wrap; justify-content: center; gap: 8px; min-width: 0; max-width: 100%; }
+.canvas-toolbar .tb-act[data-mode=edit] { display: flex; flex-direction: column; align-items: stretch; gap: 0; }
+.edit-paint-tools, .edit-selection-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.edit-selection-tools { border-top: 1px solid var(--border); margin-top: 8px; padding-top: 8px; }
+.edit-selection-hint { color: var(--text-muted); font-size: 10px; text-align: center; margin-top: 7px; }
+.brush-presets { display: flex; gap: 2px; padding: 3px; border-radius: 7px; }
+.canvas-toolbar .brush-presets button { padding: 0 5px; min-width: 27px; min-height: 28px; }
+.brush-presets button[aria-pressed=true] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.layer-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#btnLayerCollapse { width: 25px; height: 25px; min-height: 25px; padding: 0; font-size: 17px; }
+#layerPanelContent { display: grid; gap: 9px; padding-top: 7px; }
+
+.capture-tools .tb-fetch { display: flex; flex-wrap: wrap; margin: 0 0 12px; padding: 0; border: 0; gap: 8px; }
+.capture-tools #fetchState { display: inline; font-size: 12px; }
+.capture-tools .tb-fetch .toggle, .capture-tools .tb-fetch .button-quiet { display: inline-flex; }
+.capture-action-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.capture-maintenance { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 10px; font-size: 12px; }
+.capture-maintenance summary { cursor: pointer; }
+.capture-maintenance button { margin-top: 10px; }
+.button-danger { color: var(--danger); }
+
+#shortcutDialog { color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 12px; box-shadow: var(--shadow); width: min(520px, calc(100vw - 32px)); padding: 22px; max-height: calc(100vh - 48px); overflow: auto; }
+#shortcutDialog::backdrop { background: rgba(0,0,0,.65); }
+.shortcut-heading { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+.shortcut-heading h2 { font-size: 20px; margin: 4px 0 18px; }
+.shortcut-heading button { min-width: 32px; font-size: 19px; }
+#shortcutDialog dl { display: grid; grid-template-columns: 155px 1fr; gap: 14px 16px; font-size: 13px; }
+#shortcutDialog dt { font-family: var(--mono); }
+#shortcutDialog dd { margin: 0; }
+
+@media (max-width: 1200px) {
+  .app-brand { display: flex; padding-right: 0; }
+  .brand-copy { display: none; }
+  .compact-field > span { display: none; }
+  #topbar { gap: 8px; }
+}
+@media (max-width: 1000px) {
+  .tb-global #btnDatasetPanel { display: none; }
+  body.side-open .quick-tools { max-width: calc(100% - var(--rail-w) - var(--panel-w) - 24px); }
+  body.side-open .quick-tools #tierSearch { width: 100px; }
+  .canvas-toolbar { width: min(720px, calc(100% - var(--rail-w) - 24px)); max-height: 40%; overflow: auto; left: calc((100% + var(--rail-w)) / 2); max-width: none; }
+  body.side-open .canvas-toolbar { width: calc(100% - var(--rail-w) - var(--panel-w) - 24px); max-width: none; left: calc((100% + var(--rail-w) + var(--panel-w)) / 2); }
+  .edit-paint-tools { justify-content: center; }
+}
+@media (max-width: 760px) {
+  .mode-chip, .brand-copy, .app-brand { display: none; }
+  .compact-field select { width: 88px; min-width: 0; }
+  #selTier { min-width: 100px; width: 120px; }
+  #topbar .tb-global { margin-left: auto; }
+  .tb-global #btnUndo, .tb-global #btnRedo, .dirty-chip { display: none; }
+  .quick-tools { max-width: calc(100% - var(--rail-w) - 180px); }
+  body.side-open .quick-tools, body.side-open .viewport-hud { visibility: hidden; }
+  .canvas-toolbar .brush-presets { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { #sidePanel, .rail-toggle svg, .layer-toggle input::after { transition: none; } }

@@ -23,6 +23,7 @@ from ..capture_position import CAPTURE_SOURCE_NAME, CapturePositionClient
 from ..endfield_ws import EndfieldPositionClient
 from .calibration import _fit_affine_ransac, _invert_affine, _mat_vec
 from .dataset_export import DatasetExport
+from .pr_review import DataPRReview
 from .events import EventBus
 from .grid import (
     _load_grid_meta_npz, _load_grid_npz, _normalize_floor_regions,
@@ -225,6 +226,7 @@ class MapService:
                            or (Path(env_dir) if env_dir else None)
                            or default_assets_dir(self.data_root) / "nav-grid-data")
         self.dataset_export = DatasetExport(self.data_root, self.store.tiles_root, self.grid2d_dir)
+        self.pr_review = DataPRReview(self.grid2d_dir, self.data_root / "output" / "pr-review")
         self._lock = threading.Lock()
         self._fetch: FetchState | None = None
         self._fetch_thread: threading.Thread | None = None
