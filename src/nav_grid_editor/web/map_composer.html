@@ -56,6 +56,7 @@
     </div>
 
     <div class="tb-global" role="group" aria-label="全局操作">
+      <button id="btnDatasetPanel" type="button" title="导出所有已保存地图、标定与网格">导出数据包</button>
       <button id="btnUndo" class="icon-button" type="button" title="撤销（Ctrl+Z）" disabled>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 4 12l5 5M5 12h9a6 6 0 0 1 6 6"></path></svg>
       </button>
@@ -228,6 +229,14 @@
 
     <div id="sideContent">
     <section class="side-sec side-panel" data-panel="capture">
+      <div class="panel dataset-export-panel">
+        <h3>发布数据包</h3>
+        <label for="datasetTarget">目标文件夹（新目录或空目录）</label>
+        <input id="datasetTarget" type="text" autocomplete="off" aria-label="数据包导出目标文件夹">
+        <div class="panel-note">导出已保存数据。发布图片为原尺寸灰度，编辑素材保持原样。</div>
+        <button id="btnDatasetExport" type="button" class="button-primary">一键导出 nav-grid-data</button>
+        <div id="datasetExportStatus" class="panel-note" role="status" aria-live="polite">未导出</div>
+      </div>
       <h3><span>采集状态</span><small>CAPTURE STATUS</small></h3>
       <div class="panel" id="servicePanel">-</div>
       <div class="panel">

@@ -31,6 +31,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from ..services import marks as marks_mod
 from ..services.maps import MapService, default_assets_dir
@@ -212,7 +213,7 @@ async def grid2d_overlap_component_height(request: Request) -> Response:
     req, err = await _json_body(request)
     if err:
         return _bad_request(err)
-    return JSONResponse(_svc().save_overlap_component_height(
+    return JSONResponse(await run_in_threadpool(_svc().save_overlap_component_height,
         str(req.get("map", "")),
         str(req.get("zoom", "")),
         str(req.get("tier", "")),
@@ -242,7 +243,7 @@ async def grid_links_save(request: Request) -> Response:
     req, err = await _json_body(request)
     if err:
         return _bad_request(err)
-    return JSONResponse(_svc().save_grid_link(req))
+    return JSONResponse(await run_in_threadpool(_svc().save_grid_link, req))
 
 
 @app.delete("/api/grid-links/{link_id}")
@@ -378,14 +379,15 @@ def events(request: Request) -> StreamingResponse:
     )
 
 
-# ---------------- 动作类接口（同步实现，FastAPI 会丢到线程池） ----------------
+# ---------------- 动作类接口（异步读请求体，同步服务调用在线程池执行） ----------------
 
 @app.post("/api/fetch/start")
 async def fetch_start(request: Request) -> Response:
     req, err = await _json_body(request)
     if err:
         return _bad_request(err)
-    return JSONResponse(_svc().start_fetch(headless=bool(req.get("headless", False))))
+    return JSONResponse(await run_in_threadpool(
+        _svc().start_fetch, headless=bool(req.get("headless", False))))
 
 
 @app.post("/api/fetch/stop")
@@ -398,7 +400,7 @@ async def compose(request: Request) -> Response:
     req, err = await _json_body(request)
     if err:
         return _bad_request(err)
-    return JSONResponse(_svc().start_compose(
+    return JSONResponse(await run_in_threadpool(_svc().start_compose,
         str(req.get("map", "")), str(req.get("zoom", "")),
         save=bool(req.get("save", False)),
     ))
@@ -422,7 +424,8 @@ def simulate_stop() -> JSONResponse:
 
 @app.post("/api/coords")
 async def coords(request: Request) -> JSONResponse:
-    return JSONResponse(_svc().relay_coords(await request.body()))
+    return JSONResponse(await run_in_threadpool(
+        _svc().relay_coords, await request.body()))
 
 
 @app.get("/api/position/status")
@@ -451,7 +454,7 @@ async def calib_save(request: Request) -> Response:
             req["threshold"] = float(req["threshold"])
         except (TypeError, ValueError):
             req["threshold"] = 5.0
-    return JSONResponse(_svc().save_calib(
+    return JSONResponse(await run_in_threadpool(_svc().save_calib,
         str(req.get("map", "")), str(req.get("zoom", "")),
         req.get("points", []), req.get("image_size", {}),
         threshold=req.get("threshold", 5.0),
@@ -463,7 +466,7 @@ async def grid2d_save(request: Request) -> Response:
     req, err = await _json_body(request)
     if err:
         return _bad_request(err)
-    return JSONResponse(_svc().save_grid2d(
+    return JSONResponse(await run_in_threadpool(_svc().save_grid2d,
         str(req.get("map", "")), str(req.get("zoom", "")),
         req.get("data", {}),
         tier=str(req.get("tier", "")),
@@ -475,7 +478,24 @@ async def grid2d_floor_regions_save(request: Request) -> Response:
     req, err = await _json_body(request)
     if err:
         return _bad_request(err)
-    return JSONResponse(_svc().save_grid_floor_regions(
+    return JSONResponse(await run_in_threadpool(_svc().save_grid_floor_regions,
         str(req.get("map", "")), str(req.get("zoom", "")),
         str(req.get("tier", "")), req.get("floor_regions", []),
     ))
+
+
+@app.get("/api/dataset/export/status")
+def dataset_export_status() -> JSONResponse:
+    return JSONResponse(_svc().dataset_export.status())
+
+
+@app.post("/api/dataset/export")
+async def dataset_export_start(request: Request) -> Response:
+    req, err = await _json_body(request)
+    if err:
+        return _bad_request(err)
+    target = req.get("target", "")
+    if not isinstance(target, str):
+        return _bad_request("目标目录必须是字符串")
+    result = await run_in_threadpool(_svc().dataset_export.start, target)
+    return JSONResponse(result, status_code=202 if result["ok"] else 400)

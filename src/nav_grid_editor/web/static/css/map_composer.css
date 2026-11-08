@@ -5639,3 +5639,6 @@ body.side-collapsed #sidePanel {
 .link-y-sep {
   color: var(--text-muted);
 }
+
+.dataset-export-panel input { width: 100%; box-sizing: border-box; margin: 6px 0; }
+#datasetExportStatus { white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -1,5 +1,7 @@
 "use strict";
 
+import { initDatasetExport } from "./dataset-export.js";
+
 import { CELL_BLOCKED, CELL_FREE, CELL_UNKNOWN, GridDocument } from "./grid/grid-document.js";
 import { GridRasterCache } from "./grid/grid-raster-cache.js";
 import { MAIN_TIER_ID, sameTier, toApiTier, toDiskTier } from "./grid/tier-id.js";
@@ -2622,6 +2624,7 @@ function updateEditStats() {
 }
 
 function setGridDirty(value) {
+  if (ed()) ed().unsaved = value;
   edit.dirty = value;
   const chip = $("dirtyState");
   chip.dataset.dirty = String(value);
@@ -2675,6 +2678,7 @@ function queuePaintFrame() {
 function adoptViewEdit(v) {
   edit.v = v;
   const document = v.edit;
+  setGridDirty(!!document.unsaved);
   $("editOriginX").value = document.origin[0];
   $("editOriginZ").value = document.origin[1];
   $("editCellSize").value = document.cellSize;
@@ -2686,18 +2690,31 @@ function adoptViewEdit(v) {
 // 载入该视图的 2D 网格（force=重新读文件）
 async function loadGrid2D(force) {
   const wantKey = state.activeKey;
-  const [map, zoom] = (state.activeKey || "").split("@");
+  const wantTier = currentTierId();
+  const [map, zoom] = (wantKey || "").split("@");
   if (!map || !zoom) return;
-  const v = state.views.get(state.activeKey) || getView(map, zoom);
+  const v = state.views.get(wantKey) || getView(map, zoom);
+  const requestId = v.gridLoadRequestId = (v.gridLoadRequestId || 0) + 1;
   if (!v.edit) {
-    v.edit = new GridDocument({ sourceTier: currentTierId() });
+    v.edit = new GridDocument({ sourceTier: wantTier });
   }
-  if (v.edit.loaded && !force) { adoptViewEdit(v); return; }
+  if (v.edit.loaded && !force && sameTier(v.edit.sourceTier, wantTier)) {
+    adoptViewEdit(v);
+    return;
+  }
   const previousDocument = v.edit;
+  if (previousDocument.saving && sameTier(previousDocument.sourceTier, wantTier)) return;
+  const revision = previousDocument.revision;
+  const metadata = JSON.stringify(previousDocument.metadataSnapshot());
+  const isCurrent = () => state.activeKey === wantKey &&
+    sameTier(currentTierId(), wantTier) && v.gridLoadRequestId === requestId &&
+    v.edit === previousDocument && previousDocument.revision === revision &&
+    JSON.stringify(previousDocument.metadataSnapshot()) === metadata;
   try {
     const { document, response: res } = await loadGridDocument(
-      map, zoom, currentTierId(),
+      map, zoom, wantTier,
     );
+    if (!isCurrent()) return;
     if (document) {
       gridRasterCache.clear(previousDocument);
       v.edit = document;
@@ -2714,9 +2731,10 @@ async function loadGrid2D(force) {
       if (state.activeKey === wantKey) {
         $("editStatus").innerHTML = '<span style="color:#ff9977">网格读取失败: ' + res.error + '</span>';
       }
+      return;
     } else {
       gridRasterCache.clear(previousDocument);
-      v.edit = new GridDocument({ sourceTier: currentTierId() });
+      v.edit = new GridDocument({ sourceTier: wantTier });
       if (state.activeKey === wantKey) {
         $("editStatus").innerHTML = "无已存网格（origin=[0,0], cell_size=1；保存时按已涂格子的范围定 origin）";
       }
@@ -2727,9 +2745,10 @@ async function loadGrid2D(force) {
     v.pickRef = null;
     v.pickRefPending = null;
   } catch (e) {
-    if (state.activeKey === wantKey) {
+    if (isCurrent()) {
       $("editStatus").textContent = "网格加载失败: " + e.message;
     }
+    return;
   }
   v.edit.clearHistory();
   if (state.activeKey === wantKey) {
@@ -3254,47 +3273,69 @@ function confirmUnmarkedYellowComponents(components) {
 }
 
 async function saveGrid2D() {
-  const [map, zoom] = (state.activeKey || "").split("@");
+  const key = state.activeKey;
+  const tier = currentTierId();
+  const [map, zoom] = (key || "").split("@");
   const e = ed();
   if (!map || !zoom || !e) { addLog("没有可保存的网格数据", "t-err"); return; }
-  await loadFloorRegionMap(true);
-  await loadFloorOverlaps(true);
-  const unmarked = unmarkedYellowComponents();
-  if (unmarked.length) {
-    const proceed = await confirmUnmarkedYellowComponents(unmarked);
-    if (!proceed) {
-      setStatus("仍有 " + unmarked.length + " 个黄色连通区未标注高度", "warning");
-      return;
-    }
-  }
+  // 同一文档串行保存，避免两个响应以不同的坐标基准回写内存。
+  if (e.saving) return;
+  e.saving = true;
+  const isCurrent = () => state.activeKey === key && sameTier(currentTierId(), tier) && ed() === e;
   try {
-    const res = await saveGridDocument(map, zoom, currentTierId(), e);
-    if (!res.ok) { addLog("保存网格失败: " + res.error, "t-err"); return; }
-    // 服务端按"原范围 ∪ 已涂格子"定最终范围，可能平移了下标基准；
-    // 把内存模型同步过去，连续保存才不会漂移、也不会把范围缩回去
-    const dx = res.shift ? res.shift[0] : 0, dz = res.shift ? res.shift[1] : 0;
-    if (dx || dz) {
-      e.rebase(dx, dz);
-      e.selRect = null;
-      gridRasterCache.clear(e);
-      invalidateGridLayer();
+    await loadFloorRegionMap(true);
+    if (!isCurrent()) return;
+    await loadFloorOverlaps(true);
+    if (!isCurrent()) return;
+    const unmarked = unmarkedYellowComponents();
+    if (unmarked.length) {
+      const proceed = await confirmUnmarkedYellowComponents(unmarked);
+      if (!isCurrent()) return;
+      if (!proceed) {
+        setStatus("仍有 " + unmarked.length + " 个黄色连通区未标注高度", "warning");
+        return;
+      }
     }
-    if (res.origin) e.origin = [res.origin[0], res.origin[2]];
-    if (res.shape) e.shape = [res.shape[0], res.shape[1]];
-    e.clearHistory();
-    setGridDirty(false);
+    const revision = e.revision;
+    const metadata = JSON.stringify(e.metadataSnapshot());
+    const res = await saveGridDocument(map, zoom, tier, e);
+    if (!res.ok) { addLog("保存网格失败: " + res.error, "t-err"); return; }
+    const changed = e.revision !== revision ||
+      JSON.stringify(e.metadataSnapshot()) !== metadata || !!e.history.active;
+    // 有新编辑时保留原坐标基准和历史；下次保存再同步服务端的范围。
+    // 否则 rebase 后撤销历史和正在绘制的笔画仍会引用旧格子下标。
+    if (!changed) {
+      const dx = res.shift ? res.shift[0] : 0, dz = res.shift ? res.shift[1] : 0;
+      if (dx || dz) {
+        e.rebase(dx, dz);
+        e.selRect = null;
+        gridRasterCache.clear(e);
+        if (isCurrent()) invalidateGridLayer();
+      }
+      if (res.origin) e.origin = [res.origin[0], res.origin[2]];
+      if (res.shape) e.shape = [res.shape[0], res.shape[1]];
+      e.clearHistory();
+    }
+    e.unsaved = changed;
+    addLog("网格已保存: " + res.path + (changed ? "（仍有新修改未保存）" : ""), "t-ok");
+    if (!isCurrent()) return;
+    setGridDirty(changed);
     const cw = connectivityWarning(e);
     $("editStatus").innerHTML = "已保存: <b>" + res.path + "</b>" +
       (res.shape ? "（" + res.shape[0] + "×" + res.shape[1] + " 格）" : "") +
       (res.overwrote ? "（覆盖原文件）" : "（新建）") +
+      (changed ? "；仍有新修改未保存" : "") +
       (cw ? '<br><span style="color:#ffcc55">⚠ ' + cw + '</span>' : "");
-    addLog("网格已保存: " + res.path, "t-ok");
     if (cw) addLog("连通性提醒: " + cw, "t-warn");
     updateEditStats();
     updateSelBar();
     requestRender(RENDER_LAYERS.GRID | RENDER_LAYERS.SELECTION);
     void loadNavReadiness();
-  } catch (e) { addLog("保存失败: " + e.message, "t-err"); }
+  } catch (err) {
+    addLog("保存失败: " + err.message, "t-err");
+  } finally {
+    e.saving = false;
+  }
 }
 
 // ---------------- 路径标记（游戏坐标串 → 地图折线） ----------------
@@ -5454,6 +5495,10 @@ window.__NAV_GRID_EDITOR__ = {
 };
 
 window.addEventListener("load", () => {
+  initDatasetExport({
+    hasUnsaved: () => edit.dirty || [...state.views.values()].some(view => view.edit && view.edit.unsaved),
+    onOpen: () => { setSideTab("capture", { syncMode: false }); setSidePanel(true); },
+  });
   refreshUiMetrics();
   setSidePanel(false);   // 画布优先：检查器默认收起，模式轨始终保留
   syncModeChrome();      // 初始状态：浏览模式，只显示它的动作组与侧栏面板

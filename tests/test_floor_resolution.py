@@ -346,5 +346,76 @@ class FloorResolutionTest(unittest.TestCase):
             temp.cleanup()
 
 
+    def test_overlap_height_and_metadata_use_requested_zoom(self):
+        temp, _root, svc = self._service()
+        try:
+            tier = "scene_map02_lv005_layer_tips_7"
+            for zoom, offset in (("4", 0), ("5", 100)):
+                for target in ("", tier):
+                    result = svc.save_grid2d("map02", zoom, {
+                        "origin": [offset, 0, offset], "shape": [2, 2],
+                        "cell_size": 1, "cells": [[0, 0]], "blocked": [],
+                        "floor_regions": [{
+                            "x0": offset, "x1": offset + 1,
+                            "z0": offset, "z1": offset + 1,
+                            "y_min": offset, "y_max": offset + 10,
+                        }],
+                    }, tier=target)
+                    self.assertTrue(result["ok"], result)
+            before_five = {
+                target: svc.grid2d_path("map02", "5", target).read_bytes()
+                for target in ("", tier)
+            }
+            # 查询两档必须获得各自的坐标，而非碰巧选到同一个文件。
+            for zoom, offset in (("4", 0), ("5", 100)):
+                for target in ("__main__", tier):
+                    overlap = svc._compute_grid_overlaps("map02", zoom, target, "")
+                    self.assertTrue(overlap["ok"], overlap)
+                    component = overlap["components"][0]
+                    self.assertEqual(component["_rects_by_tier"][target],
+                                     [[offset, offset + 1, offset, offset + 1]])
+                floor_map = svc.get_grid_floor_map("map02", zoom, "")
+                for layer in floor_map["layers"]:
+                    if layer["tier_id"] in ("__main__", tier):
+                        self.assertEqual(layer["floor_regions"][0]["x0"], offset)
+            overlap = svc.get_grid_overlaps("map02", "4", "__main__", "")
+            result = svc.save_overlap_component_height(
+                "map02", "4", "__main__", "", overlap["components"][0]["id"],
+                [{"tier_id": target, "y_min": 20, "y_max": 30}
+                 for target in ("__main__", tier)],
+            )
+            self.assertTrue(result["ok"], result)
+            for target in ("", tier):
+                regions = svc.get_grid2d("map02", "4", target)["data"]["floor_regions"]
+                self.assertEqual(regions[-1]["cells"], [[0, 1, 0, 1]])
+                self.assertEqual(regions[-1]["y_min"], 20)
+                self.assertEqual(svc.grid2d_path("map02", "5", target).read_bytes(),
+                                 before_five[target])
+        finally:
+            temp.cleanup()
+
+    def test_missing_zoom_does_not_borrow_other_zooms_grid(self):
+        temp, _root, svc = self._service()
+        try:
+            tier = "scene_map02_lv005_layer_tips_7"
+            self._save_grid(svc, "", [])
+            self._save_grid(svc, tier, [])
+            overlap = svc.get_grid_overlaps("map02", "3", "__main__", "")
+            self.assertTrue(overlap["ok"])
+            self.assertEqual(overlap["components"], [])
+            floor_map = svc.get_grid_floor_map("map02", "3", "")
+            self.assertFalse(any(layer["has_grid"] for layer in floor_map["layers"]))
+            self.assertIsNone(svc._tier_grid_file("map02", tier, "3"))
+            self.assertTrue(svc.save_grid2d("map02", "3", {
+                "origin": [0, 0, 0], "shape": [2, 2],
+                "cell_size": 1, "cells": [[0, 0]],
+            })["ok"])
+            # 当前层有 zoom 3，另一层只有 zoom 4，仍不能凭空制造重合。
+            self.assertEqual(svc.get_grid_overlaps(
+                "map02", "3", "__main__", "")["components"], [])
+        finally:
+            temp.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()

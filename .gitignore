@@ -42,3 +42,6 @@ assets/tiles/*
 # 缩略图是可重建缓存，即使位于 maps/ 下也不发布。
 assets/tiles/maps/**/*.overview.png
 assets/tiles/maps/**/*.overview.webp
+
+# 一键导出的独立发布快照
+/exports/

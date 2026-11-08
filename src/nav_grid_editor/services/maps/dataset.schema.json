@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "nav-grid-data dataset v1 proposal",
+  "description": "完整发布快照索引提案。结构通过不代表资源存在、定位准确或路线可达。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "dataset_id",
+    "release_id",
+    "coordinate_spaces",
+    "registrations",
+    "parent_release_id",
+    "declarations",
+    "navigation_files",
+    "localization_manifest"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "kind": {
+      "const": "okef-nav-dataset"
+    },
+    "dataset_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "coordinate_spaces": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "map_name",
+          "unit"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "world",
+              "independent"
+            ]
+          },
+          "map_name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "level_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "unit": {
+            "const": "game_world_unit"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "independent"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "level_id"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "registrations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "coordinate_space_id",
+          "map_name",
+          "tier",
+          "zoom",
+          "visual",
+          "grid"
+        ],
+        "properties": {
+          "coordinate_space_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "map_name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "tier": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]*$",
+            "not": {
+              "const": "__main__"
+            }
+          },
+          "zoom": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          },
+          "visual": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "image",
+                  "mapping"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "base"
+                  },
+                  "image": {
+                    "$ref": "#/$defs/path"
+                  },
+                  "mapping": {
+                    "$ref": "#/$defs/path"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "image",
+                  "catalog_entry"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "layer"
+                  },
+                  "image": {
+                    "$ref": "#/$defs/path"
+                  },
+                  "catalog_entry": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]+$"
+                  }
+                }
+              }
+            ]
+          },
+          "grid": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/path"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "anyOf": [
+          {
+            "properties": {
+              "visual": {
+                "type": "object"
+              }
+            }
+          },
+          {
+            "properties": {
+              "grid": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "release_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parent_release_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "declarations": {
+      "$ref": "#/$defs/path"
+    },
+    "navigation_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "size",
+          "sha256",
+          "role"
+        ],
+        "properties": {
+          "path": {
+            "$ref": "#/$defs/path"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "role": {
+            "enum": [
+              "grid",
+              "levels",
+              "links"
+            ]
+          }
+        }
+      }
+    },
+    "localization_manifest": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/file"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\:\\u0000-\\u001f])(?!.*//).*(?<!/)$",
+      "description": "仓库根相对POSIX路径；禁止绝对路径、盘符、反斜杠、空路径段和点目录。还须校验实际解析路径不越出快照。"
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "size",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

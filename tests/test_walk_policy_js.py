@@ -120,7 +120,7 @@ walkableComponents(d, B(2, 2), WALK_POLICIES.allowUnknown);
         self.assertIn("少报", result.stderr)
 
     def test_real_map02_fragmentation_matches_the_strict_predicate(self):
-        """真实数据上钉住那次分叉的具体数字：主图 12 块、最大 31918。
+        """真实数据基线（nav-grid-data 1a23931）：主图 14 块、最大 32119。
 
         npz 由 Python 这边解好写成 JSON（别在 node 里嵌 python 字符串，
         引号和换行会把它弄坏），node 只负责跑被测模块。
@@ -151,7 +151,7 @@ const bounds = {{ x0: 0, x1: data.shape[1] - 1, z0: 0, z1: data.shape[0] - 1 }};
 const comps = walkableComponents(d, bounds, strict);
 console.log(JSON.stringify([comps.length, comps[0]]));
 """)
-        self.assertEqual(json.loads(out), [12, 31918])
+        self.assertEqual(json.loads(out), [14, 32119])
 
     def test_anomaly_buckets_are_mutually_exclusive(self):
         """八邻全阻挡的格子必然也没有可走邻居：不能被两条提示各报一次。"""

@@ -22,6 +22,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "cryptography>=42",
+    "opencv-python-headless>=5.0.0.93",
 ]
 
 [project.scripts]
@@ -38,6 +39,7 @@ where = ["src"]
 # StaticFiles 照样能取到、装成 wheel 之后才 404（three/ 与 vendor/ 就踩过）。
 [tool.setuptools.package-data]
 "nav_grid_editor" = [
+    "services/maps/*.json",
     "web/*.html",
     "web/static/css/*.css",
     "web/static/js/*.js",

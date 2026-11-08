@@ -68,7 +68,7 @@ from .api.app import HOST
 from .services import maps as map_service
 from .services.maps import MapService
 
-DEFAULT_PORT = 8765
+DEFAULT_PORT = 8764
 
 
 # ---------------- 入口 ----------------

@@ -11,6 +11,7 @@
 304 不带正文）本身就是被测对象。
 """
 
+import asyncio
 import json
 import tempfile
 import threading
@@ -118,6 +119,23 @@ class PostBoundaryTest(_ServerMixin, unittest.TestCase):
         self.assertEqual(status, 500)
         self.assertFalse(res["ok"])
         self.assertIn("模拟服务层异常", res["error"])
+
+    def test_dataset_export_routes_validate_target_and_return_job_status(self):
+        with mock.patch.object(self.svc.dataset_export, "start", return_value={"ok": True, "output": "E:/new"}) as start:
+            status, data = self._post_json("/api/dataset/export", {"target": "E:/new"})
+            self.assertEqual(status, 202)
+            self.assertTrue(data["ok"])
+            start.assert_called_once_with("E:/new")
+        status, data = self._post_json("/api/dataset/export", {"target": []})
+        self.assertEqual(status, 400)
+        self.assertFalse(data["ok"])
+        with mock.patch.object(self.svc.dataset_export, "start", return_value={"ok": False, "error": "目标非空"}):
+            status, data = self._post_json("/api/dataset/export", {"target": "E:/old"})
+            self.assertEqual(status, 400)
+            self.assertEqual(data["error"], "目标非空")
+        status, raw_body, _ = self._request("/api/dataset/export/status")
+        self.assertEqual(status, 200)
+        self.assertIn("running", json.loads(raw_body))
 
     def test_normal_request_still_works(self):
         """边界不能把正常请求也变成错误。"""
@@ -345,6 +363,54 @@ class StaticAssetsTest(_ServerMixin, unittest.TestCase):
         status, body, _ = self._request("/api/nav-graph?map=map02&zoom=3")
         self.assertEqual(status, 200)
         self.assertFalse(json.loads(body.decode("utf-8"))["ok"])
+
+
+
+class ServiceThreadPoolTest(unittest.IsolatedAsyncioTestCase):
+    async def test_sync_actions_leave_event_loop_available(self):
+        """保存被文件 IO 卡住时，事件循环仍能运行并处理其它连接。"""
+        routes = (
+            (server.grid2d_save, "save_grid2d"),
+            (server.grid2d_floor_regions_save, "save_grid_floor_regions"),
+            (server.grid2d_overlap_component_height, "save_overlap_component_height"),
+            (server.grid_links_save, "save_grid_link"),
+            (server.calib_save, "save_calib"),
+            (server.compose, "start_compose"),
+            (server.fetch_start, "start_fetch"),
+            (server.coords, "relay_coords"),
+        )
+        for route, method in routes:
+            with self.subTest(route=route.__name__):
+                entered = threading.Event()
+                release = threading.Event()
+                worker_threads = []
+                def blocking_action(*args, **kwargs):
+                    worker_threads.append(threading.get_ident())
+                    entered.set()
+                    if not release.wait(3):
+                        raise RuntimeError("事件循环未能释放保存任务")
+                    return {"ok": True, "method": method}
+
+                async def receive():
+                    return {"type": "http.request", "body": b"{}", "more_body": False}
+
+                request = server.Request({"type": "http", "method": "POST",
+                                          "path": "/", "headers": []}, receive)
+                svc = mock.Mock()
+                getattr(svc, method).side_effect = blocking_action
+                with mock.patch.object(server, "service", svc):
+                    task = asyncio.create_task(route(request))
+                    try:
+                        self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                        # 能执行到这里就说明主循环可调度；保存必须仍在等待释放。
+                        self.assertFalse(task.done(), "同步服务调用阻塞了事件循环")
+                        self.assertNotEqual(worker_threads[0], threading.get_ident())
+                    finally:
+                        release.set()
+                        response = await task
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(json.loads(response.body), {"ok": True, "method": method})
+                    getattr(svc, method).assert_called_once()
 
 
 if __name__ == "__main__":

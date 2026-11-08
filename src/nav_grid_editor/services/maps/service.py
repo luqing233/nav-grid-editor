@@ -21,8 +21,12 @@ from .. import marks as marks_mod
 from ..capture_position import CAPTURE_SOURCE_NAME, CapturePositionClient
 from ..endfield_ws import EndfieldPositionClient
 from .calibration import _fit_affine_ransac, _invert_affine, _mat_vec
+from .dataset_export import DatasetExport
 from .events import EventBus
-from .grid import _load_grid_meta_npz, _load_grid_npz
+from .grid import (
+    _load_grid_meta_npz, _load_grid_npz, _normalize_floor_regions,
+    _MAX_FLOOR_REGIONS, _MAX_FLOOR_REGION_CELLS,
+)
 from .io import (
     OVERVIEW_SUFFIX,
     _as_int,
@@ -90,8 +94,6 @@ from .settings import (
 from .tiles import TileStore, merge_tiles
 
 
-_MAX_FLOOR_REGIONS = 256
-_MAX_FLOOR_REGION_CELLS = 50_000
 _GRID_ARRAY_CACHE_MAX = 4
 #: 主图的 tier 在 API 口径下是 __main__、落盘口径下是空串。两者只经
 #: settings.disk_tier / api_tier 转换，别再内联判断。
@@ -100,70 +102,6 @@ _LAYER_HEADERS = {
     "Referer": MAP_URL,
     "User-Agent": "Mozilla/5.0 nav-grid-editor",
 }
-
-
-def _normalize_floor_regions(raw) -> list[dict]:
-    """Validate optional world-space 3D regions stored in a grid's metadata."""
-    if raw is None:
-        return []
-    if not isinstance(raw, list):
-        raise ValueError("floor_regions 必须是数组")
-    if len(raw) > _MAX_FLOOR_REGIONS:
-        raise ValueError(f"floor_regions 不能超过 {_MAX_FLOOR_REGIONS} 个")
-    out = []
-    for index, item in enumerate(raw):
-        if not isinstance(item, dict):
-            raise ValueError(f"floor_regions[{index}] 必须是对象")
-        try:
-            x0 = float(item["x0"])
-            x1 = float(item["x1"])
-            z0 = float(item["z0"])
-            z1 = float(item["z1"])
-            y_min = float(item["y_min"])
-            y_max = float(item["y_max"])
-        except (KeyError, TypeError, ValueError, OverflowError):
-            raise ValueError(
-                f"floor_regions[{index}] 需要 x0/x1/z0/z1/y_min/y_max") from None
-        values = (x0, x1, z0, z1, y_min, y_max)
-        if not all(math.isfinite(value) for value in values):
-            raise ValueError(f"floor_regions[{index}] 含有非有限数")
-        if x0 > x1 or z0 > z1 or y_min > y_max:
-            raise ValueError(f"floor_regions[{index}] 的最小值不能大于最大值")
-        region = {
-            "x0": x0, "x1": x1, "z0": z0, "z1": z1,
-            "y_min": y_min, "y_max": y_max,
-        }
-        component_id = str(item.get("component_id") or "").strip()
-        if component_id:
-            region["component_id"] = component_id
-        raw_cells = item.get("cells")
-        if raw_cells is not None:
-            if not isinstance(raw_cells, list):
-                raise ValueError(f"floor_regions[{index}].cells 必须是数组")
-            cells = []
-            for cell in raw_cells:
-                if not isinstance(cell, (list, tuple)) or len(cell) != 4:
-                    raise ValueError(
-                        f"floor_regions[{index}].cells 每项应为 [x0,x1,z0,z1]")
-                try:
-                    cell_values = [float(value) for value in cell]
-                except (TypeError, ValueError, OverflowError):
-                    raise ValueError(
-                        f"floor_regions[{index}].cells 含有非法数字") from None
-                if not all(math.isfinite(value) for value in cell_values):
-                    raise ValueError(
-                        f"floor_regions[{index}].cells 含有非有限数")
-                if cell_values[0] > cell_values[1] or cell_values[2] > cell_values[3]:
-                    raise ValueError(
-                        f"floor_regions[{index}].cells 的最小值不能大于最大值")
-                cells.append(cell_values)
-            if len(cells) > _MAX_FLOOR_REGION_CELLS:
-                raise ValueError(
-                    f"floor_regions[{index}].cells 不能超过 {_MAX_FLOOR_REGION_CELLS}")
-            if cells:
-                region["cells"] = cells
-        out.append(region)
-    return out
 
 
 def _region_overlap_ratio(region: dict, new_rects: list[list[float]]) -> float:
@@ -285,6 +223,7 @@ class MapService:
         self.grid2d_dir = (grid2d_dir
                            or (Path(env_dir) if env_dir else None)
                            or default_assets_dir(self.data_root) / "nav-grid-data")
+        self.dataset_export = DatasetExport(self.data_root, self.store.tiles_root, self.grid2d_dir)
         self._lock = threading.Lock()
         self._fetch: FetchState | None = None
         self._fetch_thread: threading.Thread | None = None
@@ -961,43 +900,29 @@ class MapService:
     def _position_source_label(self) -> str:
         return "官方地图 WebSocket 客户端" if self.position_source == "ws" else "抓包后端位置源"
 
-    def _tier_grid_meta(self, map_name: str, tier: str) -> dict | None:
-        if not valid_map_zoom(map_name, "4") or (
+    def _tier_grid_meta(self, map_name: str, tier: str,
+                        zoom: str) -> dict | None:
+        if not valid_map_zoom(map_name, zoom) or (
                 tier != MAIN_GRID_KEY and not valid_grid_tier(tier)):
             return None
-        if tier == MAIN_GRID_KEY:
-            paths = sorted(
-                (path for path in self.grid2d_dir.glob(f"{map_name}_*.grid.npz")
-                 if "__" not in path.name),
-                key=lambda path: path.name,
-                reverse=True,
-            )
-        else:
-            paths = sorted(
-                self.grid2d_dir.glob(f"{map_name}__{tier}_*.grid.npz"),
-                key=lambda path: path.name,
-                reverse=True,
-            )
-        for path in paths:
-            try:
-                mtime = path.stat().st_mtime_ns
-                cached = self._floor_grid_cache.get(path)
-                if cached and cached[0] == mtime:
-                    return cached[1]
-                meta = _load_grid_meta_npz(path)
-                if str(meta.get("map_name") or "") != map_name:
-                    continue
-                meta_tier = str(meta.get("tier") or "")
-                if tier == MAIN_GRID_KEY:
-                    if meta_tier:
-                        continue
-                elif meta_tier != tier:
-                    continue
-                self._floor_grid_cache[path] = (mtime, meta)
-                return meta
-            except Exception as e:
-                _log(f"读取楼层网格元数据失败 {path}: {e}")
-        return None
+        path = self._tier_grid_file(map_name, tier, zoom)
+        if path is None:
+            return None
+        try:
+            mtime = path.stat().st_mtime_ns
+            cached = self._floor_grid_cache.get(path)
+            if cached and cached[0] == mtime:
+                return cached[1]
+            meta = _load_grid_meta_npz(path)
+            if str(meta.get("map_name") or "") != map_name:
+                return None
+            if disk_tier(meta.get("tier")) != disk_tier(tier):
+                return None
+            self._floor_grid_cache[path] = (mtime, meta)
+            return meta
+        except Exception as e:
+            _log(f"读取楼层网格元数据失败 {path}: {e}")
+            return None
 
     @staticmethod
     def _region_contains(region: dict, x: float, y: float, z: float) -> bool:
@@ -1094,7 +1019,7 @@ class MapService:
             or str(layer.get("level_id") or "") == wanted_level
         ]
         out = []
-        main_meta = self._tier_grid_meta(map_name, MAIN_GRID_KEY)
+        main_meta = self._tier_grid_meta(map_name, MAIN_GRID_KEY, zoom)
         if main_meta:
             regions = []
             try:
@@ -1112,7 +1037,7 @@ class MapService:
             })
         for layer in layers:
             tier = str(layer.get("id") or "")
-            meta = self._tier_grid_meta(map_name, tier)
+            meta = self._tier_grid_meta(map_name, tier, zoom)
             regions = []
             if meta:
                 try:
@@ -1171,8 +1096,8 @@ class MapService:
     def _tier_grid_candidates(self, map_name: str, tier: str) -> list[Path]:
         """某层现有的全部网格文件，按文件名倒序（最新在前）。
 
-        按 zoom 分档，所以「这一层」可能有多个文件；`_tier_grid_file` 取最新那个，
-        而连接端点校验在没写 zoom 时必须能看出「不止一个档次」而拒绝猜。
+        按 zoom 分档，所以「这一层」可能有多个文件；连接端点校验在没写
+        zoom 时必须能看出「不止一个档次」而拒绝猜。
         """
         if not valid_map_zoom(map_name, "4") or (
                 tier != MAIN_GRID_KEY and not valid_grid_tier(tier)):
@@ -1191,9 +1116,10 @@ class MapService:
             reverse=True,
         )
 
-    def _tier_grid_file(self, map_name: str, tier: str) -> Path | None:
-        paths = self._tier_grid_candidates(map_name, tier)
-        return paths[0] if paths else None
+    def _tier_grid_file(self, map_name: str, tier: str, zoom: str) -> Path | None:
+        """只读请求的 zoom；缺文件时不借用其它 zoom 的坐标或高度。"""
+        path = self.grid2d_path(map_name, zoom, disk_tier(tier))
+        return path if path.is_file() else None
 
     def _cached_grid(self, path: Path) -> tuple | None:
         """按 mtime 缓存解开的 (数组, meta)；读失败返回 None。"""
@@ -1321,7 +1247,7 @@ class MapService:
                                tier_id: str, level_id: str) -> dict:
         if not valid_map_zoom(map_name, zoom) or not valid_grid_tier(tier_id):
             return {"ok": False, "error": "非法地图名/zoom/tier"}
-        current_path = self._tier_grid_file(map_name, tier_id)
+        current_path = self._tier_grid_file(map_name, tier_id, zoom)
         if not current_path:
             return {"ok": True, "components": [], "tier_id": tier_id}
         try:
@@ -1339,7 +1265,7 @@ class MapService:
             or str(layer.get("level_id") or "") == wanted_level
         ]
         if not is_main_current and self._tier_grid_file(
-                map_name, MAIN_GRID_KEY):
+                map_name, MAIN_GRID_KEY, zoom):
             layers.append({
                 "id": MAIN_GRID_KEY,
                 "map_name": map_name,
@@ -1360,7 +1286,7 @@ class MapService:
             other_tier = str(layer.get("id") or "")
             if not other_tier or other_tier == tier_id:
                 continue
-            other_path = self._tier_grid_file(map_name, other_tier)
+            other_path = self._tier_grid_file(map_name, other_tier, zoom)
             if not other_path:
                 continue
             try:
@@ -1591,7 +1517,7 @@ class MapService:
                     str(value) for value in values if str(value or "")
                 }
         for target_tier, y_min, y_max in normalized:
-            path = self._tier_grid_file(map_name, target_tier)
+            path = self._tier_grid_file(map_name, target_tier, zoom)
             if not path:
                 return {"ok": False, "error": f"层级网格不存在: {target_tier}"}
             rects = component["_rects_by_tier"].get(target_tier) or []

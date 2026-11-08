@@ -26,7 +26,7 @@ uv run nav-grid-editor
 
 启动后访问：
 
-<http://127.0.0.1:8765>
+<http://127.0.0.1:8764>
 
 根路径会自动跳转到 `/map`。
 
@@ -34,7 +34,7 @@ uv run nav-grid-editor
 
 | 参数 | 说明 |
 | --- | --- |
-| `--port` | HTTP 服务端口，默认 `8765` |
+| `--port` | HTTP 服务端口，默认 `8764` |
 | `--data-root` | 数据根目录，默认当前工作目录 |
 | `--tiles-root` | 瓦片目录，默认 `<data-root>/assets/tiles` |
 | `--profile-dir` | Playwright 登录态目录，默认 `<data-root>/browser_profile` |
@@ -45,16 +45,16 @@ uv run nav-grid-editor
 示例：
 
 ```powershell
-uv run nav-grid-editor --port 8765 --data-root D:/nav-data
+uv run nav-grid-editor --port 8764 --data-root D:/nav-data
 uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 ```
 
 对应环境变量包括 `NAV_DATA_ROOT`、`NAV_TILES_ROOT`、`NAV_PROFILE_DIR`、
 `NAV_GRID2D_DIR`、`NAV_POSITION_SOURCE` 和 `NAV_CAPTURE_URL`。
 
-> 本服务默认也监听 `8765`，而抓包后端的默认端口同样是 `8765`——两个都要跑时，
-> 用 `--port`（本服务）或后端 `serve --port`（后端）把其中一个错开。后端换了端口
-> 也不用改这里的配置：位置源会从 `8765` 起自动探测（见下文「玩家位置源」）。
+> 本服务默认监听 `8764`，抓包后端默认监听 `8765`，可同时启动。
+> 如需调整本服务端口，使用 `--port`。后端换了端口也不用改这里的配置：
+> 位置源会从 `8765` 起自动探测（见下文「玩家位置源」）。
 
 > 数据根目录默认取当前工作目录。建议始终在项目根目录启动，或显式传入
 > `--data-root`。
@@ -258,8 +258,8 @@ uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 `allowUnknown` = `True`。告警文案带上用的是哪一档，因为「分成几块」本身取决于
 要不要冒穿过未知格的险，不是客观事实。
 
-`tests/test_walk_policy_js.py` 用真实数据钉住这几个数字（主图 12 块 / 最大块
-31918），并有一条反例：斜角相接、正交格是未知时，旧判据会把两块并成一块。
+`tests/test_walk_policy_js.py` 用真实数据钉住当前基线（nav-grid-data `1a23931`：主图
+14 块 / 最大块 32119 格），并有一条反例：斜角相接、正交格是未知时，旧判据会把两块并成一块。
 
 还要注意**块数会高估孤立**，而且偏差量是精确可算的：
 
@@ -331,6 +331,25 @@ level_id 的层混成一批候选，对跟随器就是静默错层。
 由编辑器在**保存网格时**从分层目录自动刷新（内容没变就不写，免得在版本库里一直
 脏）；分层目录不存在时**拒绝写** —— 那时只能退回内置的兜底目录，拿 7 条去覆盖完整
 索引就是数据丢失。
+
+## 一键导出发布数据包
+
+页面顶部点击“导出数据包”，填写**新目录或空目录**，再点“一键导出 nav-grid-data”。
+留空时在 `<data-root>/exports/` 下生成独立目录。先保存网格编辑；导出仅包含已保存的磁盘数据。
+状态区显示进度、错误原因和最终目录，刷新页面后仍可查看服务端任务。
+
+导出包包含全部已标定 zoom 4 基础图、实际 catalog 引用的分层图、现有全部 NPZ、完整层声明、
+连接、定位 manifest 和统一 `dataset.json`。所有 PNG 按定位端 OpenCV 语义转换为原尺寸 8 位灰度，
+不重采样、不修改编辑用彩色素材；二维网格原字节保留，未知格和缺失高度不补值。
+新增 `opencv-python-headless` 依赖后请运行 `uv sync --locked`。
+
+导出先在独立暂存目录完成冻结、灰度转换和校验，交付前复核源文件内容；源数据有变化会失败，
+请保存完成后重试。已有非空目录不会被覆盖，也不会自动执行 Git 提交或推送。
+缺少实际 `assets/tiles/layers/catalog.json` 或其中引用的图片时，会要求先补齐，不使用内置兜底目录。
+
+HTTP 接口：`POST /api/dataset/export`，请求 `{"target":"D:/nav-grid-upload"}`；
+`GET /api/dataset/export/status` 查询任务。发布目录只能是新目录或空目录，不能在素材、网格或凭证源目录中。
+具体清单字段、扩图换算与最小上传集合见 [数据包与上传约定](docs/dataset-export.md)。
 
 ## 数据目录
 
