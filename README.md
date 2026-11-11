@@ -12,15 +12,16 @@
 
 - Python 3.12 或更高版本
 - [uv](https://docs.astral.sh/uv/)
-- Windows 桌面环境，用于 Playwright 持久化浏览器
-- 首次抓取前安装 Playwright Chromium
+- Git 和 Git LFS（用于下载预设图片及网格实体）
+- 浏览、缩放与编辑预设地图无需地图账号或 Playwright Chromium；只有新增抓取需要浏览器环境
 
 ```powershell
-git clone https://github.com/luqing233/nav-grid-editor.git
+git lfs install
+git clone --recurse-submodules https://github.com/luqing233/nav-grid-editor.git
 cd nav-grid-editor
-
-uv sync
-uv run playwright install chromium
+git lfs pull
+git -C assets/nav-grid-data lfs pull
+uv sync --locked
 uv run nav-grid-editor
 ```
 
@@ -29,6 +30,23 @@ uv run nav-grid-editor
 <http://127.0.0.1:8764>
 
 根路径会自动跳转到 `/map`。
+
+仓库提供帝江号、四号谷地、武陵三张主图的完整 zoom 4 Q90 瓦片，以及 69 张彩色分层图。
+克隆并下载 LFS 实体后即可打开地图、放大、切层和编辑网格，无需再抓取瓦片。
+预设来自已保存总图，保持原尺寸和瓦片坐标边界；`assets/tiles/presets/manifest.json`
+记录覆盖范围、编码参数及每张瓦片的 SHA-256。已有本地抓取缓存优先于预设。
+个人标记、账号凭证和浏览器登录态不随预设分发；缺失层声明仍保留，不宣称覆盖尚未采集的区域。
+
+已有普通克隆可运行 `git submodule update --init --recursive`，再执行上面的两条 `git lfs pull`。
+只有需要抓取新区域时，才运行 `uv run playwright install chromium` 并登录官方地图。
+
+维护者可从本地已保存的 zoom 4 总图生成完整预设（缺块从总图补齐，边界不一致会拒绝）：
+
+```powershell
+uv run python -m nav_grid_editor.commands.build_presets --output output/new-tile-presets
+```
+
+输出必须是新目录，验证完成后再替换发布的预设；生成过程不访问网络或修改原始抓取缓存。
 
 ### 常用参数
 
@@ -69,8 +87,8 @@ uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
   已有 PNG 缓存继续读取，不会自动重新下载。总图合成为原尺寸无损 WebP，保存到
   `assets/tiles/maps/<地图>/<zoom>/<地图>_<zoom>.webp`，同名文件覆盖；同名旧 PNG 仍兼容读取，WebP 优先。
   WebP 单边上限为 16383 像素，超限会明确报错，不缩小地图或覆盖原图。
-- **官方分层地图**：在已标定的地图上选择官方 `tier` 图层。分层图片首次访问
-  自动下载到 `assets/tiles/layers/`，随后按官方世界 bounds 和当前标定矩阵
+- **官方分层地图**：在已标定的地图上选择官方 `tier` 图层。预设分层图片直接从
+  `assets/tiles/layers/` 读取；未缓存的新图首次访问时下载，随后按官方世界 bounds 和当前标定矩阵
   叠到大地图坐标中。点击地图上的“分层入口”标记会直接展开对应的楼层列表。
   没有分层入口标记的区域归入“独立地图”，例如“首墩内部”和“遂明”。
   低缩放时只解码预览图，放大后才切换全分辨率，并只保留当前地图的解码缓存。

@@ -1,0 +1,3163 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-09T11:19:25+00:00",
+  "source": {
+    "page_url": "https://game.skland.com/map/endfield",
+    "main_js": "https://bbs.hycdn.cn/skland-fe-static/skland-game-map/main.4b54c7e2.js",
+    "mapping_chunk": "610.df209d82.js"
+  },
+  "region_versions": {
+    "map02_lv003": "1_2_1",
+    "map02_lv005": "1_2_1",
+    "map02_lv007": "1_4",
+    "map02_lv008": "1_4",
+    "map02_lv009": "1_5_1",
+    "map02": "1_2",
+    "indie_dg007": "1_2",
+    "indie_dg005": "1_2",
+    "indie_dg016": "1_5_2"
+  },
+  "missing_logic_ids": [
+    "scene_map01_lv007_layer_tips_6"
+  ],
+  "entrance_audit": {
+    "matched": 97,
+    "unmatched": []
+  },
+  "layers": [
+    {
+      "id": "scene_map01_lv001_layer_tips_1",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv001",
+      "level_name": "枢纽区",
+      "region_set_id": "1",
+      "region_id": 173,
+      "group": "裂地者营哨",
+      "group_key": "map01_lv001:1",
+      "name": "裂地者营哨",
+      "tier_index": -1,
+      "logic_id": "scene_map01_lv001_layer_tips_1",
+      "icon": "Map01Lv001/map01_lv001_region_0003_1",
+      "filename": "scene_map01_lv001_layer_tips_1.webp",
+      "path": "map01/map01_lv001/scene_map01_lv001_layer_tips_1.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv001/map01_lv001_region_0003_1.png",
+      "region_version": "",
+      "bounds": {
+        "west": -896.0,
+        "east": 384.0,
+        "south": -768.0,
+        "north": 256.0
+      },
+      "entrance": {
+        "x": -631.0,
+        "z": -468.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -631.0,
+          "z": -468.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 0,
+      "width": 6000,
+      "height": 4800
+    },
+    {
+      "id": "scene_map01_lv001_layer_tips_5",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv001",
+      "level_name": "枢纽区",
+      "region_set_id": "2",
+      "region_id": 174,
+      "group": "底部联通区",
+      "group_key": "map01_lv001:2",
+      "name": "底部联通区",
+      "tier_index": -1,
+      "logic_id": "scene_map01_lv001_layer_tips_5",
+      "icon": "Map01Lv001/map01_lv001_region_0002_1",
+      "filename": "scene_map01_lv001_layer_tips_5.webp",
+      "path": "map01/map01_lv001/scene_map01_lv001_layer_tips_5.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv001/map01_lv001_region_0002_1.png",
+      "region_version": "",
+      "bounds": {
+        "west": -896.0,
+        "east": 384.0,
+        "south": -768.0,
+        "north": 256.0
+      },
+      "entrance": {
+        "x": -571.0,
+        "z": -282.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -571.0,
+          "z": -282.0,
+          "radius": 28.0
+        },
+        {
+          "x": -494.0,
+          "z": -338.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 100,
+      "width": 6000,
+      "height": 4800
+    },
+    {
+      "id": "scene_map01_lv001_layer_tips_8",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv001",
+      "level_name": "枢纽区",
+      "region_set_id": "3",
+      "region_id": 189,
+      "group": "基地区",
+      "group_key": "map01_lv001:3",
+      "name": "基地区二层",
+      "tier_index": 1,
+      "logic_id": "scene_map01_lv001_layer_tips_8",
+      "icon": "Map01Lv001/map01_lv001_region_0001",
+      "filename": "scene_map01_lv001_layer_tips_8.webp",
+      "path": "map01/map01_lv001/scene_map01_lv001_layer_tips_8.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv001/map01_lv001_region_0001.png",
+      "region_version": "",
+      "bounds": {
+        "west": -896.0,
+        "east": 384.0,
+        "south": -768.0,
+        "north": 256.0
+      },
+      "entrance": {
+        "x": -15.0,
+        "z": -360.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -15.0,
+          "z": -360.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 200,
+      "width": 6000,
+      "height": 4800
+    },
+    {
+      "id": "scene_map01_lv001_layer_tips_6",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv001",
+      "level_name": "枢纽区",
+      "region_set_id": "4",
+      "region_id": 172,
+      "group": "枢纽区 · 4",
+      "group_key": "map01_lv001:4",
+      "name": "实验室通道",
+      "tier_index": -1,
+      "logic_id": "scene_map01_lv001_layer_tips_6",
+      "icon": "Map01Lv001/map01_lv001_region_0004_2",
+      "filename": "scene_map01_lv001_layer_tips_6.webp",
+      "path": "map01/map01_lv001/scene_map01_lv001_layer_tips_6.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv001/map01_lv001_region_0004_2.png",
+      "region_version": "",
+      "bounds": {
+        "west": -896.0,
+        "east": 384.0,
+        "south": -768.0,
+        "north": 256.0
+      },
+      "entrance": {
+        "x": -102.0,
+        "z": -252.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -102.0,
+          "z": -252.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 300,
+      "width": 6000,
+      "height": 4800
+    },
+    {
+      "id": "scene_map01_lv001_layer_tips_7",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv001",
+      "level_name": "枢纽区",
+      "region_set_id": "4",
+      "region_id": 171,
+      "group": "枢纽区 · 4",
+      "group_key": "map01_lv001:4",
+      "name": "地下实验室",
+      "tier_index": -2,
+      "logic_id": "scene_map01_lv001_layer_tips_7",
+      "icon": "Map01Lv001/map01_lv001_region_0004_1",
+      "filename": "scene_map01_lv001_layer_tips_7.webp",
+      "path": "map01/map01_lv001/scene_map01_lv001_layer_tips_7.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv001/map01_lv001_region_0004_1.png",
+      "region_version": "",
+      "bounds": {
+        "west": -896.0,
+        "east": 384.0,
+        "south": -768.0,
+        "north": 256.0
+      },
+      "entrance": {
+        "x": -102.0,
+        "z": -252.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -102.0,
+          "z": -252.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 301,
+      "width": 6000,
+      "height": 4800
+    },
+    {
+      "id": "scene_map01_lv001_layer_tips_4",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv001",
+      "level_name": "枢纽区",
+      "region_set_id": "5",
+      "region_id": 114,
+      "group": "集成工业研究所",
+      "group_key": "map01_lv001:5",
+      "name": "集成工业研究所顶楼",
+      "tier_index": 2,
+      "logic_id": "scene_map01_lv001_layer_tips_4",
+      "icon": "Map01Lv001/map01_lv001_region_0001_3",
+      "filename": "scene_map01_lv001_layer_tips_4.webp",
+      "path": "map01/map01_lv001/scene_map01_lv001_layer_tips_4.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv001/map01_lv001_region_0001_3.png",
+      "region_version": "",
+      "bounds": {
+        "west": -896.0,
+        "east": 384.0,
+        "south": -768.0,
+        "north": 256.0
+      },
+      "entrance": {
+        "x": 73.0,
+        "z": -381.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 73.0,
+          "z": -381.0,
+          "radius": 28.0
+        },
+        {
+          "x": 110.0,
+          "z": -342.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 400,
+      "width": 6000,
+      "height": 4800
+    },
+    {
+      "id": "scene_map01_lv001_layer_tips_2",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv001",
+      "level_name": "枢纽区",
+      "region_set_id": "5",
+      "region_id": 115,
+      "group": "集成工业研究所",
+      "group_key": "map01_lv001:5",
+      "name": "集成工业研究所二楼",
+      "tier_index": 1,
+      "logic_id": "scene_map01_lv001_layer_tips_2",
+      "icon": "Map01Lv001/map01_lv001_region_0001_2",
+      "filename": "scene_map01_lv001_layer_tips_2.webp",
+      "path": "map01/map01_lv001/scene_map01_lv001_layer_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv001/map01_lv001_region_0001_2.png",
+      "region_version": "",
+      "bounds": {
+        "west": -896.0,
+        "east": 384.0,
+        "south": -768.0,
+        "north": 256.0
+      },
+      "entrance": {
+        "x": 73.0,
+        "z": -381.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 73.0,
+          "z": -381.0,
+          "radius": 28.0
+        },
+        {
+          "x": 110.0,
+          "z": -342.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 401,
+      "width": 6000,
+      "height": 4800
+    },
+    {
+      "id": "scene_map01_lv002_sub01_location_tips_2",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv002",
+      "level_name": "谷地通道",
+      "region_set_id": "6",
+      "region_id": 120,
+      "group": "临时避难所",
+      "group_key": "map01_lv002:6",
+      "name": "临时避难所",
+      "tier_index": -1,
+      "logic_id": "scene_map01_lv002_sub01_location_tips_2",
+      "icon": "Map01Lv002/tier_region_001_-1",
+      "filename": "scene_map01_lv002_sub01_location_tips_2.webp",
+      "path": "map01/map01_lv002/scene_map01_lv002_sub01_location_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv002/tier_region_001_-1.png",
+      "region_version": "",
+      "bounds": {
+        "west": -1024.0,
+        "east": -384.0,
+        "south": -256.0,
+        "north": 384.0
+      },
+      "entrance": {
+        "x": -774.0,
+        "z": 105.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -774.0,
+          "z": 105.0,
+          "radius": 28.0
+        },
+        {
+          "x": -699.0,
+          "z": 171.0,
+          "radius": 28.0
+        },
+        {
+          "x": -645.0,
+          "z": 154.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 0,
+      "width": 3000,
+      "height": 3000
+    },
+    {
+      "id": "scene_map01_lv003_layer_tips_1",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv003",
+      "level_name": "阿伯莉采石场",
+      "region_set_id": "7",
+      "region_id": 17,
+      "group": "深层管理区",
+      "group_key": "map01_lv003:7",
+      "name": "深层管理区地下一层",
+      "tier_index": -1,
+      "logic_id": "scene_map01_lv003_layer_tips_1",
+      "icon": "Map01Lv003/tier_entryDispatchRoom_-2_New",
+      "filename": "scene_map01_lv003_layer_tips_1.webp",
+      "path": "map01/map01_lv003/scene_map01_lv003_layer_tips_1.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv003/tier_entryDispatchRoom_-2_New.png",
+      "region_version": "",
+      "bounds": {
+        "west": 0.0,
+        "east": 640.0,
+        "south": -1024.0,
+        "north": -384.0
+      },
+      "entrance": {
+        "x": 358.0,
+        "z": -620.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 358.0,
+          "z": -620.0,
+          "radius": 28.0
+        },
+        {
+          "x": 451.0,
+          "z": -606.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 0,
+      "width": 3000,
+      "height": 3000
+    },
+    {
+      "id": "scene_map01_lv003_layer_tips_2",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv003",
+      "level_name": "阿伯莉采石场",
+      "region_set_id": "7",
+      "region_id": 31,
+      "group": "深层管理区",
+      "group_key": "map01_lv003:7",
+      "name": "深层管理区地下二层",
+      "tier_index": -2,
+      "logic_id": "scene_map01_lv003_layer_tips_2",
+      "icon": "Map01Lv003/tier_entryDispatchRoom_-3_New",
+      "filename": "scene_map01_lv003_layer_tips_2.webp",
+      "path": "map01/map01_lv003/scene_map01_lv003_layer_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv003/tier_entryDispatchRoom_-3_New.png",
+      "region_version": "",
+      "bounds": {
+        "west": 0.0,
+        "east": 640.0,
+        "south": -1024.0,
+        "north": -384.0
+      },
+      "entrance": {
+        "x": 358.0,
+        "z": -620.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 358.0,
+          "z": -620.0,
+          "radius": 28.0
+        },
+        {
+          "x": 451.0,
+          "z": -606.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 1,
+      "width": 3000,
+      "height": 3000
+    },
+    {
+      "id": "scene_map01_lv003_layer_tips_3",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv003",
+      "level_name": "阿伯莉采石场",
+      "region_set_id": "8",
+      "region_id": 18,
+      "group": "阿伯莉采石场 · 8",
+      "group_key": "map01_lv003:8",
+      "name": "档案库",
+      "tier_index": -1,
+      "logic_id": "scene_map01_lv003_layer_tips_3",
+      "icon": "Map01Lv003/tier_region_contactArea_-1_New",
+      "filename": "scene_map01_lv003_layer_tips_3.webp",
+      "path": "map01/map01_lv003/scene_map01_lv003_layer_tips_3.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv003/tier_region_contactArea_-1_New.png",
+      "region_version": "",
+      "bounds": {
+        "west": 0.0,
+        "east": 640.0,
+        "south": -1024.0,
+        "north": -384.0
+      },
+      "entrance": {
+        "x": 180.0,
+        "z": -768.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 180.0,
+          "z": -768.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 100,
+      "width": 3000,
+      "height": 3000
+    },
+    {
+      "id": "scene_map01_lv003_layer_tips_4",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv003",
+      "level_name": "阿伯莉采石场",
+      "region_set_id": "8",
+      "region_id": 19,
+      "group": "阿伯莉采石场 · 8",
+      "group_key": "map01_lv003:8",
+      "name": "装卸区下方",
+      "tier_index": -2,
+      "logic_id": "scene_map01_lv003_layer_tips_4",
+      "icon": "Map01Lv003/tier_region_contactArea_-2_New",
+      "filename": "scene_map01_lv003_layer_tips_4.webp",
+      "path": "map01/map01_lv003/scene_map01_lv003_layer_tips_4.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv003/tier_region_contactArea_-2_New.png",
+      "region_version": "",
+      "bounds": {
+        "west": 0.0,
+        "east": 640.0,
+        "south": -1024.0,
+        "north": -384.0
+      },
+      "entrance": {
+        "x": 180.0,
+        "z": -768.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 180.0,
+          "z": -768.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 101,
+      "width": 3000,
+      "height": 3000
+    },
+    {
+      "id": "scene_map01_lv005_layer_tips_2",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv005",
+      "level_name": "源石研究园",
+      "region_set_id": "9",
+      "region_id": 177,
+      "group": "地下区域",
+      "group_key": "map01_lv005:9",
+      "name": "地下区域",
+      "tier_index": -1,
+      "logic_id": "scene_map01_lv005_layer_tips_2",
+      "icon": "Map01Lv005/tier_region_001_-1",
+      "filename": "scene_map01_lv005_layer_tips_2.webp",
+      "path": "map01/map01_lv005/scene_map01_lv005_layer_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv005/tier_region_001_-1.png",
+      "region_version": "",
+      "bounds": {
+        "west": 128.0,
+        "east": 1024.0,
+        "south": -640.0,
+        "north": 128.0
+      },
+      "entrance": {
+        "x": 517.0,
+        "z": -133.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 517.0,
+          "z": -133.0,
+          "radius": 28.0
+        },
+        {
+          "x": 582.0,
+          "z": -136.0,
+          "radius": 28.0
+        },
+        {
+          "x": 609.0,
+          "z": -276.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 0,
+      "width": 4200,
+      "height": 3600
+    },
+    {
+      "id": "scene_map01_lv005_layer_tips_1",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv005",
+      "level_name": "源石研究园",
+      "region_set_id": "10",
+      "region_id": 175,
+      "group": "研究所二楼",
+      "group_key": "map01_lv005:10",
+      "name": "研究所二楼",
+      "tier_index": 1,
+      "logic_id": "scene_map01_lv005_layer_tips_1",
+      "icon": "Map01Lv005/tier_region_002_0",
+      "filename": "scene_map01_lv005_layer_tips_1.webp",
+      "path": "map01/map01_lv005/scene_map01_lv005_layer_tips_1.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv005/tier_region_002_0.png",
+      "region_version": "",
+      "bounds": {
+        "west": 128.0,
+        "east": 1024.0,
+        "south": -640.0,
+        "north": 128.0
+      },
+      "entrance": {
+        "x": 660.0,
+        "z": -223.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 660.0,
+          "z": -223.0,
+          "radius": 28.0
+        },
+        {
+          "x": 695.0,
+          "z": -207.0,
+          "radius": 28.0
+        },
+        {
+          "x": 693.0,
+          "z": -171.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 100,
+      "width": 4200,
+      "height": 3600
+    },
+    {
+      "id": "scene_map01_lv006_layer_tips_3",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv006",
+      "level_name": "矿脉源区",
+      "region_set_id": "15",
+      "region_id": 86,
+      "group": "矿区营地",
+      "group_key": "map01_lv006:15",
+      "name": "矿区营地三层瞭望台",
+      "tier_index": 2,
+      "logic_id": "scene_map01_lv006_layer_tips_3",
+      "icon": "Map01Lv006/tier_region_village_3",
+      "filename": "scene_map01_lv006_layer_tips_3.webp",
+      "path": "map01/map01_lv006/scene_map01_lv006_layer_tips_3.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv006/tier_region_village_3.png",
+      "region_version": "",
+      "bounds": {
+        "west": 0.0,
+        "east": 896.0,
+        "south": -128.0,
+        "north": 896.0
+      },
+      "entrance": {
+        "x": 594.0,
+        "z": 289.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 594.0,
+          "z": 289.0,
+          "radius": 28.0
+        },
+        {
+          "x": 597.0,
+          "z": 223.0,
+          "radius": 28.0
+        },
+        {
+          "x": 602.0,
+          "z": 304.0,
+          "radius": 28.0
+        },
+        {
+          "x": 613.0,
+          "z": 327.0,
+          "radius": 28.0
+        },
+        {
+          "x": 661.0,
+          "z": 258.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 0,
+      "width": 4200,
+      "height": 4800
+    },
+    {
+      "id": "scene_map01_lv006_layer_tips_2",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv006",
+      "level_name": "矿脉源区",
+      "region_set_id": "15",
+      "region_id": 87,
+      "group": "矿区营地",
+      "group_key": "map01_lv006:15",
+      "name": "矿区营地二层",
+      "tier_index": 1,
+      "logic_id": "scene_map01_lv006_layer_tips_2",
+      "icon": "Map01Lv006/tier_region_village_2",
+      "filename": "scene_map01_lv006_layer_tips_2.webp",
+      "path": "map01/map01_lv006/scene_map01_lv006_layer_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv006/tier_region_village_2.png",
+      "region_version": "",
+      "bounds": {
+        "west": 0.0,
+        "east": 896.0,
+        "south": -128.0,
+        "north": 896.0
+      },
+      "entrance": {
+        "x": 594.0,
+        "z": 289.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 594.0,
+          "z": 289.0,
+          "radius": 28.0
+        },
+        {
+          "x": 597.0,
+          "z": 223.0,
+          "radius": 28.0
+        },
+        {
+          "x": 602.0,
+          "z": 304.0,
+          "radius": 28.0
+        },
+        {
+          "x": 613.0,
+          "z": 327.0,
+          "radius": 28.0
+        },
+        {
+          "x": 661.0,
+          "z": 258.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 1,
+      "width": 4200,
+      "height": 4800
+    },
+    {
+      "id": "scene_map01_lv006_layer_tips_4",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv006",
+      "level_name": "矿脉源区",
+      "region_set_id": "16",
+      "region_id": 109,
+      "group": "矿脉通道",
+      "group_key": "map01_lv006:16",
+      "name": "矿脉通道",
+      "tier_index": -1,
+      "logic_id": "scene_map01_lv006_layer_tips_4",
+      "icon": "Map01Lv006/ier_region_sourthwild_-1",
+      "filename": "scene_map01_lv006_layer_tips_4.webp",
+      "path": "map01/map01_lv006/scene_map01_lv006_layer_tips_4.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv006/ier_region_sourthwild_-1.png",
+      "region_version": "",
+      "bounds": {
+        "west": 0.0,
+        "east": 896.0,
+        "south": -128.0,
+        "north": 896.0
+      },
+      "entrance": {
+        "x": 387.0,
+        "z": 130.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 387.0,
+          "z": 130.0,
+          "radius": 28.0
+        },
+        {
+          "x": 483.0,
+          "z": 142.0,
+          "radius": 28.0
+        },
+        {
+          "x": 486.0,
+          "z": 167.0,
+          "radius": 28.0
+        },
+        {
+          "x": 499.0,
+          "z": 199.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 100,
+      "width": 4200,
+      "height": 4800
+    },
+    {
+      "id": "scene_map01_lv006_layer_tips_7",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv006",
+      "level_name": "矿脉源区",
+      "region_set_id": "17",
+      "region_id": 107,
+      "group": "气候监测站二楼",
+      "group_key": "map01_lv006:17",
+      "name": "气候监测站二楼",
+      "tier_index": 1,
+      "logic_id": "scene_map01_lv006_layer_tips_7",
+      "icon": "Map01Lv006/tier_region_weatherstation_2",
+      "filename": "scene_map01_lv006_layer_tips_7.webp",
+      "path": "map01/map01_lv006/scene_map01_lv006_layer_tips_7.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv006/tier_region_weatherstation_2.png",
+      "region_version": "",
+      "bounds": {
+        "west": 0.0,
+        "east": 896.0,
+        "south": -128.0,
+        "north": 896.0
+      },
+      "entrance": {
+        "x": 322.0,
+        "z": 277.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 322.0,
+          "z": 277.0,
+          "radius": 28.0
+        },
+        {
+          "x": 323.0,
+          "z": 316.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 200,
+      "width": 4200,
+      "height": 4800
+    },
+    {
+      "id": "scene_map01_lv007_layer_tips_3",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv007",
+      "level_name": "供能高地",
+      "region_set_id": "11",
+      "region_id": 130,
+      "group": "桥头区营地高台",
+      "group_key": "map01_lv007:11",
+      "name": "桥头区营地高台",
+      "tier_index": 1,
+      "logic_id": "scene_map01_lv007_layer_tips_3",
+      "icon": "Map01Lv007/tier_region_79_1",
+      "filename": "scene_map01_lv007_layer_tips_3.webp",
+      "path": "map01/map01_lv007/scene_map01_lv007_layer_tips_3.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv007/tier_region_79_1.png",
+      "region_version": "",
+      "bounds": {
+        "west": -640.0,
+        "east": 384.0,
+        "south": -128.0,
+        "north": 896.0
+      },
+      "entrance": {
+        "x": -397.0,
+        "z": 613.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -397.0,
+          "z": 613.0,
+          "radius": 28.0
+        },
+        {
+          "x": -380.0,
+          "z": 604.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 0,
+      "width": 4800,
+      "height": 4800
+    },
+    {
+      "id": "scene_map01_lv007_layer_tips_2",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv007",
+      "level_name": "供能高地",
+      "region_set_id": "12",
+      "region_id": 81,
+      "group": "源石发电站",
+      "group_key": "map01_lv007:12",
+      "name": "源石发电站上层",
+      "tier_index": 1,
+      "logic_id": "scene_map01_lv007_layer_tips_2",
+      "icon": "Map01Lv007/tier_region_77_1",
+      "filename": "scene_map01_lv007_layer_tips_2.webp",
+      "path": "map01/map01_lv007/scene_map01_lv007_layer_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv007/tier_region_77_1.png",
+      "region_version": "",
+      "bounds": {
+        "west": -640.0,
+        "east": 384.0,
+        "south": -128.0,
+        "north": 896.0
+      },
+      "entrance": {
+        "x": -90.0,
+        "z": 632.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -90.0,
+          "z": 632.0,
+          "radius": 28.0
+        },
+        {
+          "x": -88.0,
+          "z": 671.0,
+          "radius": 28.0
+        },
+        {
+          "x": -61.0,
+          "z": 667.0,
+          "radius": 28.0
+        },
+        {
+          "x": -57.0,
+          "z": 710.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 100,
+      "width": 4800,
+      "height": 4800
+    },
+    {
+      "id": "scene_map01_lv007_layer_tips_4",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv007",
+      "level_name": "供能高地",
+      "region_set_id": "13",
+      "region_id": 133,
+      "group": "破碎边界-坍缩山道",
+      "group_key": "map01_lv007:13",
+      "name": "破碎边界-坍缩山道",
+      "tier_index": -1,
+      "logic_id": "scene_map01_lv007_layer_tips_4",
+      "icon": "Map01Lv007/tier_region_78_b1",
+      "filename": "scene_map01_lv007_layer_tips_4.webp",
+      "path": "map01/map01_lv007/scene_map01_lv007_layer_tips_4.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv007/tier_region_78_b1.png",
+      "region_version": "",
+      "bounds": {
+        "west": -640.0,
+        "east": 384.0,
+        "south": -128.0,
+        "north": 896.0
+      },
+      "entrance": {
+        "x": -7.0,
+        "z": 490.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -7.0,
+          "z": 490.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 200,
+      "width": 4800,
+      "height": 4800
+    },
+    {
+      "id": "scene_map01_lv007_layer_tips_5",
+      "map_name": "map01",
+      "map_display_name": "四号谷地",
+      "map_category": "layered",
+      "level_id": "map01_lv007",
+      "level_name": "供能高地",
+      "region_set_id": "14",
+      "region_id": 135,
+      "group": "第三废弃岩洞",
+      "group_key": "map01_lv007:14",
+      "name": "第三废弃岩洞",
+      "tier_index": 1,
+      "logic_id": "scene_map01_lv007_layer_tips_5",
+      "icon": "Map01Lv007/tier_region_80_1",
+      "filename": "scene_map01_lv007_layer_tips_5.webp",
+      "path": "map01/map01_lv007/scene_map01_lv007_layer_tips_5.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region/Map01Lv007/tier_region_80_1.png",
+      "region_version": "",
+      "bounds": {
+        "west": -640.0,
+        "east": 384.0,
+        "south": -128.0,
+        "north": 896.0
+      },
+      "entrance": {
+        "x": -269.0,
+        "z": 634.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -269.0,
+          "z": 634.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 300,
+      "width": 4800,
+      "height": 4800
+    },
+    {
+      "id": "scene_indie_dg007_layer_tips_4",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "independent",
+      "level_id": "indie_dg007",
+      "level_name": "首墩内部",
+      "region_set_id": "28",
+      "region_id": 335,
+      "group": "首墩内部",
+      "group_key": "indie_dg007:28",
+      "name": "首墩顶层",
+      "tier_index": 4,
+      "logic_id": "scene_indie_dg007_layer_tips_4",
+      "icon": "IndieDg007/ier_region_indie007_top_level",
+      "filename": "scene_indie_dg007_layer_tips_4.webp",
+      "path": "map02/indie_dg007/scene_indie_dg007_layer_tips_4.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2/IndieDg007/ier_region_indie007_top_level.png",
+      "region_version": "1_2",
+      "bounds": {
+        "west": -512.0,
+        "east": 512.0,
+        "south": -512.0,
+        "north": 512.0
+      },
+      "entrance": {},
+      "entrances": [],
+      "sort_order": 0,
+      "width": 4800,
+      "height": 4800
+    },
+    {
+      "id": "scene_indie_dg007_layer_tips_5",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "independent",
+      "level_id": "indie_dg007",
+      "level_name": "首墩内部",
+      "region_set_id": "28",
+      "region_id": 336,
+      "group": "首墩内部",
+      "group_key": "indie_dg007:28",
+      "name": "首墩中层副区",
+      "tier_index": 3,
+      "logic_id": "scene_indie_dg007_layer_tips_5",
+      "icon": "IndieDg007/ier_region_indie007_middle_level_3",
+      "filename": "scene_indie_dg007_layer_tips_5.webp",
+      "path": "map02/indie_dg007/scene_indie_dg007_layer_tips_5.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2/IndieDg007/ier_region_indie007_middle_level_3.png",
+      "region_version": "1_2",
+      "bounds": {
+        "west": -512.0,
+        "east": 512.0,
+        "south": -512.0,
+        "north": 512.0
+      },
+      "entrance": {},
+      "entrances": [],
+      "sort_order": 1,
+      "width": 4800,
+      "height": 4800
+    },
+    {
+      "id": "scene_indie_dg007_layer_tips_2",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "independent",
+      "level_id": "indie_dg007",
+      "level_name": "首墩内部",
+      "region_set_id": "28",
+      "region_id": 337,
+      "group": "首墩内部",
+      "group_key": "indie_dg007:28",
+      "name": "首墩中层主区",
+      "tier_index": 2,
+      "logic_id": "scene_indie_dg007_layer_tips_2",
+      "icon": "IndieDg007/ier_region_indie007_middle_level_2",
+      "filename": "scene_indie_dg007_layer_tips_2.webp",
+      "path": "map02/indie_dg007/scene_indie_dg007_layer_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2/IndieDg007/ier_region_indie007_middle_level_2.png",
+      "region_version": "1_2",
+      "bounds": {
+        "west": -512.0,
+        "east": 512.0,
+        "south": -512.0,
+        "north": 512.0
+      },
+      "entrance": {},
+      "entrances": [],
+      "sort_order": 2,
+      "width": 4800,
+      "height": 4800
+    },
+    {
+      "id": "scene_indie_dg007_layer_tips_1",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "independent",
+      "level_id": "indie_dg007",
+      "level_name": "首墩内部",
+      "region_set_id": "28",
+      "region_id": 338,
+      "group": "首墩内部",
+      "group_key": "indie_dg007:28",
+      "name": "首墩下层",
+      "tier_index": 1,
+      "logic_id": "scene_indie_dg007_layer_tips_1",
+      "icon": "IndieDg007/ier_region_indie007_middle_level_1",
+      "filename": "scene_indie_dg007_layer_tips_1.webp",
+      "path": "map02/indie_dg007/scene_indie_dg007_layer_tips_1.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2/IndieDg007/ier_region_indie007_middle_level_1.png",
+      "region_version": "1_2",
+      "bounds": {
+        "west": -512.0,
+        "east": 512.0,
+        "south": -512.0,
+        "north": 512.0
+      },
+      "entrance": {},
+      "entrances": [],
+      "sort_order": 3,
+      "width": 4800,
+      "height": 4800
+    },
+    {
+      "id": "scene_indie_dg016_layer_tips_1",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "independent",
+      "level_id": "indie_dg016",
+      "level_name": "遂明",
+      "region_set_id": "49",
+      "region_id": 425,
+      "group": "遂明",
+      "group_key": "indie_dg016:49",
+      "name": "天师桩研究所下层",
+      "tier_index": -1,
+      "logic_id": "scene_indie_dg016_layer_tips_1",
+      "icon": "IndieDg016/indie_dg016_region_003_tier_-1",
+      "filename": "scene_indie_dg016_layer_tips_1.webp",
+      "path": "map02/indie_dg016/scene_indie_dg016_layer_tips_1.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_5_2/IndieDg016/indie_dg016_region_003_tier_-1.png",
+      "region_version": "1_5_2",
+      "bounds": {
+        "west": -384.0,
+        "east": 384.0,
+        "south": -384.0,
+        "north": 384.0
+      },
+      "entrance": {},
+      "entrances": [],
+      "sort_order": 0,
+      "width": 3600,
+      "height": 3600
+    },
+    {
+      "id": "scene_indie_dg016_layer_tips_2",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "independent",
+      "level_id": "indie_dg016",
+      "level_name": "遂明",
+      "region_set_id": "49",
+      "region_id": 423,
+      "group": "遂明",
+      "group_key": "indie_dg016:49",
+      "name": "天师桩档案馆下层",
+      "tier_index": -1,
+      "logic_id": "scene_indie_dg016_layer_tips_2",
+      "icon": "IndieDg016/indie_dg016_region_003_tier_-1_stage0",
+      "filename": "scene_indie_dg016_layer_tips_2.webp",
+      "path": "map02/indie_dg016/scene_indie_dg016_layer_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_5_2/IndieDg016/indie_dg016_region_003_tier_-1_stage0.png",
+      "region_version": "1_5_2",
+      "bounds": {
+        "west": -384.0,
+        "east": 384.0,
+        "south": -384.0,
+        "north": 384.0
+      },
+      "entrance": {},
+      "entrances": [],
+      "sort_order": 1,
+      "width": 3600,
+      "height": 3600
+    },
+    {
+      "id": "scene_indie_dg016_layer_tips_3",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "independent",
+      "level_id": "indie_dg016",
+      "level_name": "遂明",
+      "region_set_id": "49",
+      "region_id": 422,
+      "group": "遂明",
+      "group_key": "indie_dg016:49",
+      "name": "天师桩档案馆上层",
+      "tier_index": 1,
+      "logic_id": "scene_indie_dg016_layer_tips_3",
+      "icon": "IndieDg016/indie_dg016_region_003_tier_2",
+      "filename": "scene_indie_dg016_layer_tips_3.webp",
+      "path": "map02/indie_dg016/scene_indie_dg016_layer_tips_3.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_5_2/IndieDg016/indie_dg016_region_003_tier_2.png",
+      "region_version": "1_5_2",
+      "bounds": {
+        "west": -384.0,
+        "east": 384.0,
+        "south": -384.0,
+        "north": 384.0
+      },
+      "entrance": {},
+      "entrances": [],
+      "sort_order": 2,
+      "width": 3600,
+      "height": 3600
+    },
+    {
+      "id": "scene_indie_dg016_layer_tips_4",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "independent",
+      "level_id": "indie_dg016",
+      "level_name": "遂明",
+      "region_set_id": "49",
+      "region_id": 420,
+      "group": "遂明",
+      "group_key": "indie_dg016:49",
+      "name": "侵蚀监控区深处",
+      "tier_index": -1,
+      "logic_id": "scene_indie_dg016_layer_tips_4",
+      "icon": "IndieDg016/indie_dg016_region_001_tier_-1",
+      "filename": "scene_indie_dg016_layer_tips_4.webp",
+      "path": "map02/indie_dg016/scene_indie_dg016_layer_tips_4.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_5_2/IndieDg016/indie_dg016_region_001_tier_-1.png",
+      "region_version": "1_5_2",
+      "bounds": {
+        "west": -384.0,
+        "east": 384.0,
+        "south": -384.0,
+        "north": 384.0
+      },
+      "entrance": {},
+      "entrances": [],
+      "sort_order": 3,
+      "width": 3600,
+      "height": 3600
+    },
+    {
+      "id": "scene_map02_lv002_layer_tips_3",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv002",
+      "level_name": "武陵城",
+      "region_set_id": "18",
+      "region_id": 254,
+      "group": "储备站",
+      "group_key": "map02_lv002:18",
+      "name": "储备站二层",
+      "tier_index": 1,
+      "logic_id": "scene_map02_lv002_layer_tips_3",
+      "icon": "Map02Lv002/tier_02_002_2",
+      "filename": "scene_map02_lv002_layer_tips_3.webp",
+      "path": "map02/map02_lv002/scene_map02_lv002_layer_tips_3.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2/Map02Lv002/tier_02_002_2.png",
+      "region_version": "1_2",
+      "bounds": {
+        "west": -1664.0,
+        "east": -512.0,
+        "south": -1024.0,
+        "north": 384.0
+      },
+      "entrance": {
+        "x": -837.0,
+        "z": -844.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -837.0,
+          "z": -844.0,
+          "radius": 28.0
+        },
+        {
+          "x": -830.0,
+          "z": -796.0,
+          "radius": 28.0
+        },
+        {
+          "x": -756.0,
+          "z": -794.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 0,
+      "width": 5400,
+      "height": 6600
+    },
+    {
+      "id": "scene_map02_lv002_layer_tips_2",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv002",
+      "level_name": "武陵城",
+      "region_set_id": "18",
+      "region_id": 255,
+      "group": "储备站",
+      "group_key": "map02_lv002:18",
+      "name": "储备站一层",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv002_layer_tips_2",
+      "icon": "Map02Lv002/tier_02_002_3",
+      "filename": "scene_map02_lv002_layer_tips_2.webp",
+      "path": "map02/map02_lv002/scene_map02_lv002_layer_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2/Map02Lv002/tier_02_002_3.png",
+      "region_version": "1_2",
+      "bounds": {
+        "west": -1664.0,
+        "east": -512.0,
+        "south": -1024.0,
+        "north": 384.0
+      },
+      "entrance": {
+        "x": -837.0,
+        "z": -844.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -837.0,
+          "z": -844.0,
+          "radius": 28.0
+        },
+        {
+          "x": -830.0,
+          "z": -796.0,
+          "radius": 28.0
+        },
+        {
+          "x": -756.0,
+          "z": -794.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 1,
+      "width": 5400,
+      "height": 6600
+    },
+    {
+      "id": "scene_map02_lv002_layer_tips_1",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv002",
+      "level_name": "武陵城",
+      "region_set_id": "18",
+      "region_id": 275,
+      "group": "储备站",
+      "group_key": "map02_lv002:18",
+      "name": "储备站地下室",
+      "tier_index": -2,
+      "logic_id": "scene_map02_lv002_layer_tips_1",
+      "icon": "Map02Lv002/tier_02_002_1",
+      "filename": "scene_map02_lv002_layer_tips_1.webp",
+      "path": "map02/map02_lv002/scene_map02_lv002_layer_tips_1.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2/Map02Lv002/tier_02_002_1.png",
+      "region_version": "1_2",
+      "bounds": {
+        "west": -1664.0,
+        "east": -512.0,
+        "south": -1024.0,
+        "north": 384.0
+      },
+      "entrance": {
+        "x": -837.0,
+        "z": -844.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -837.0,
+          "z": -844.0,
+          "radius": 28.0
+        },
+        {
+          "x": -830.0,
+          "z": -796.0,
+          "radius": 28.0
+        },
+        {
+          "x": -756.0,
+          "z": -794.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 2,
+      "width": 5400,
+      "height": 6600
+    },
+    {
+      "id": "scene_map02_lv002_layer_tips_4",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv002",
+      "level_name": "武陵城",
+      "region_set_id": "19",
+      "region_id": 259,
+      "group": "天井院",
+      "group_key": "map02_lv002:19",
+      "name": "天井院地下一层",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv002_layer_tips_4",
+      "icon": "Map02Lv002/tier_02_002_4",
+      "filename": "scene_map02_lv002_layer_tips_4.webp",
+      "path": "map02/map02_lv002/scene_map02_lv002_layer_tips_4.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2/Map02Lv002/tier_02_002_4.png",
+      "region_version": "1_2",
+      "bounds": {
+        "west": -1664.0,
+        "east": -512.0,
+        "south": -1024.0,
+        "north": 384.0
+      },
+      "entrance": {
+        "x": -800.0,
+        "z": -536.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -800.0,
+          "z": -536.0,
+          "radius": 28.0
+        },
+        {
+          "x": -752.0,
+          "z": -534.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 100,
+      "width": 5400,
+      "height": 6600
+    },
+    {
+      "id": "scene_map02_lv002_layer_tips_5",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv002",
+      "level_name": "武陵城",
+      "region_set_id": "19",
+      "region_id": 258,
+      "group": "天井院",
+      "group_key": "map02_lv002:19",
+      "name": "天井院地下二层",
+      "tier_index": -2,
+      "logic_id": "scene_map02_lv002_layer_tips_5",
+      "icon": "Map02Lv002/tier_02_002_5",
+      "filename": "scene_map02_lv002_layer_tips_5.webp",
+      "path": "map02/map02_lv002/scene_map02_lv002_layer_tips_5.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2/Map02Lv002/tier_02_002_5.png",
+      "region_version": "1_2",
+      "bounds": {
+        "west": -1664.0,
+        "east": -512.0,
+        "south": -1024.0,
+        "north": 384.0
+      },
+      "entrance": {
+        "x": -800.0,
+        "z": -536.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -800.0,
+          "z": -536.0,
+          "radius": 28.0
+        },
+        {
+          "x": -752.0,
+          "z": -534.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 101,
+      "width": 5400,
+      "height": 6600
+    },
+    {
+      "id": "scene_map02_lv002_layer_tips_6",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv002",
+      "level_name": "武陵城",
+      "region_set_id": "19",
+      "region_id": 257,
+      "group": "天井院",
+      "group_key": "map02_lv002:19",
+      "name": "天井院地下三层",
+      "tier_index": -3,
+      "logic_id": "scene_map02_lv002_layer_tips_6",
+      "icon": "Map02Lv002/tier_02_002_6",
+      "filename": "scene_map02_lv002_layer_tips_6.webp",
+      "path": "map02/map02_lv002/scene_map02_lv002_layer_tips_6.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2/Map02Lv002/tier_02_002_6.png",
+      "region_version": "1_2",
+      "bounds": {
+        "west": -1664.0,
+        "east": -512.0,
+        "south": -1024.0,
+        "north": 384.0
+      },
+      "entrance": {
+        "x": -800.0,
+        "z": -536.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -800.0,
+          "z": -536.0,
+          "radius": 28.0
+        },
+        {
+          "x": -752.0,
+          "z": -534.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 102,
+      "width": 5400,
+      "height": 6600
+    },
+    {
+      "id": "scene_map02_lv002_layer_tips_7",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv002",
+      "level_name": "武陵城",
+      "region_set_id": "19",
+      "region_id": 276,
+      "group": "天井院",
+      "group_key": "map02_lv002:19",
+      "name": "天井院底部",
+      "tier_index": -4,
+      "logic_id": "scene_map02_lv002_layer_tips_7",
+      "icon": "Map02Lv002/tier_02_002_7",
+      "filename": "scene_map02_lv002_layer_tips_7.webp",
+      "path": "map02/map02_lv002/scene_map02_lv002_layer_tips_7.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2/Map02Lv002/tier_02_002_7.png",
+      "region_version": "1_2",
+      "bounds": {
+        "west": -1664.0,
+        "east": -512.0,
+        "south": -1024.0,
+        "north": 384.0
+      },
+      "entrance": {
+        "x": -800.0,
+        "z": -536.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -800.0,
+          "z": -536.0,
+          "radius": 28.0
+        },
+        {
+          "x": -752.0,
+          "z": -534.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 103,
+      "width": 5400,
+      "height": 6600
+    },
+    {
+      "id": "scene_map02_lv003_layer_tips_3",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv003",
+      "level_name": "清波寨",
+      "region_set_id": "21",
+      "region_id": 299,
+      "group": "石头窝",
+      "group_key": "map02_lv003:21",
+      "name": "石头窝",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv003_layer_tips_3",
+      "icon": "Map02Lv003/map02_lv003_region_0001",
+      "filename": "scene_map02_lv003_layer_tips_3.webp",
+      "path": "map02/map02_lv003/scene_map02_lv003_layer_tips_3.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2_1/Map02Lv003/map02_lv003_region_0001.png",
+      "region_version": "1_2_1",
+      "bounds": {
+        "west": -896.0,
+        "east": 128.0,
+        "south": -1792.0,
+        "north": -640.0
+      },
+      "entrance": {
+        "x": -515.0,
+        "z": -1241.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -515.0,
+          "z": -1241.0,
+          "radius": 28.0
+        },
+        {
+          "x": -513.0,
+          "z": -1263.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 0,
+      "width": 4800,
+      "height": 5400
+    },
+    {
+      "id": "scene_map02_lv003_layer_tips_2",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv003",
+      "level_name": "清波寨",
+      "region_set_id": "22",
+      "region_id": 298,
+      "group": "回水洞",
+      "group_key": "map02_lv003:22",
+      "name": "回水洞",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv003_layer_tips_2",
+      "icon": "Map02Lv003/map02_lv003_region_0002",
+      "filename": "scene_map02_lv003_layer_tips_2.webp",
+      "path": "map02/map02_lv003/scene_map02_lv003_layer_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2_1/Map02Lv003/map02_lv003_region_0002.png",
+      "region_version": "1_2_1",
+      "bounds": {
+        "west": -896.0,
+        "east": 128.0,
+        "south": -1792.0,
+        "north": -640.0
+      },
+      "entrance": {
+        "x": -331.0,
+        "z": -1339.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -331.0,
+          "z": -1339.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 100,
+      "width": 4800,
+      "height": 5400
+    },
+    {
+      "id": "scene_map02_lv003_layer_tips_4",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv003",
+      "level_name": "清波寨",
+      "region_set_id": "23",
+      "region_id": 297,
+      "group": "崖下洞",
+      "group_key": "map02_lv003:23",
+      "name": "崖下洞",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv003_layer_tips_4",
+      "icon": "Map02Lv003/map02_lv003_region_0003",
+      "filename": "scene_map02_lv003_layer_tips_4.webp",
+      "path": "map02/map02_lv003/scene_map02_lv003_layer_tips_4.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2_1/Map02Lv003/map02_lv003_region_0003.png",
+      "region_version": "1_2_1",
+      "bounds": {
+        "west": -896.0,
+        "east": 128.0,
+        "south": -1792.0,
+        "north": -640.0
+      },
+      "entrance": {
+        "x": -267.0,
+        "z": -1183.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -267.0,
+          "z": -1183.0,
+          "radius": 28.0
+        },
+        {
+          "x": -145.0,
+          "z": -1124.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 200,
+      "width": 4800,
+      "height": 5400
+    },
+    {
+      "id": "scene_map02_lv003_layer_tips_1",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv003",
+      "level_name": "清波寨",
+      "region_set_id": "24",
+      "region_id": 296,
+      "group": "祖泉泉源",
+      "group_key": "map02_lv003:24",
+      "name": "祖泉泉源",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv003_layer_tips_1",
+      "icon": "Map02Lv003/map02_lv003_region_0004",
+      "filename": "scene_map02_lv003_layer_tips_1.webp",
+      "path": "map02/map02_lv003/scene_map02_lv003_layer_tips_1.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2_1/Map02Lv003/map02_lv003_region_0004.png",
+      "region_version": "1_2_1",
+      "bounds": {
+        "west": -896.0,
+        "east": 128.0,
+        "south": -1792.0,
+        "north": -640.0
+      },
+      "entrance": {
+        "x": -380.0,
+        "z": -1015.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -380.0,
+          "z": -1015.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 300,
+      "width": 4800,
+      "height": 5400
+    },
+    {
+      "id": "scene_map02_lv003_layer_tips_6",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv003",
+      "level_name": "清波寨",
+      "region_set_id": "25",
+      "region_id": 294,
+      "group": "主寨水车",
+      "group_key": "map02_lv003:25",
+      "name": "主寨水车上层",
+      "tier_index": 2,
+      "logic_id": "scene_map02_lv003_layer_tips_6",
+      "icon": "Map02Lv003/map02_lv003_region_0006",
+      "filename": "scene_map02_lv003_layer_tips_6.webp",
+      "path": "map02/map02_lv003/scene_map02_lv003_layer_tips_6.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2_1/Map02Lv003/map02_lv003_region_0006.png",
+      "region_version": "1_2_1",
+      "bounds": {
+        "west": -896.0,
+        "east": 128.0,
+        "south": -1792.0,
+        "north": -640.0
+      },
+      "entrance": {
+        "x": -243.0,
+        "z": -1362.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -243.0,
+          "z": -1362.0,
+          "radius": 28.0
+        },
+        {
+          "x": -234.0,
+          "z": -1392.0,
+          "radius": 28.0
+        },
+        {
+          "x": -262.0,
+          "z": -1427.0,
+          "radius": 28.0
+        },
+        {
+          "x": -270.0,
+          "z": -1374.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 400,
+      "width": 4800,
+      "height": 5400
+    },
+    {
+      "id": "scene_map02_lv003_layer_tips_5",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv003",
+      "level_name": "清波寨",
+      "region_set_id": "25",
+      "region_id": 295,
+      "group": "主寨水车",
+      "group_key": "map02_lv003:25",
+      "name": "主寨水车下层",
+      "tier_index": 1,
+      "logic_id": "scene_map02_lv003_layer_tips_5",
+      "icon": "Map02Lv003/map02_lv003_region_0005",
+      "filename": "scene_map02_lv003_layer_tips_5.webp",
+      "path": "map02/map02_lv003/scene_map02_lv003_layer_tips_5.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2_1/Map02Lv003/map02_lv003_region_0005.png",
+      "region_version": "1_2_1",
+      "bounds": {
+        "west": -896.0,
+        "east": 128.0,
+        "south": -1792.0,
+        "north": -640.0
+      },
+      "entrance": {
+        "x": -243.0,
+        "z": -1362.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -243.0,
+          "z": -1362.0,
+          "radius": 28.0
+        },
+        {
+          "x": -234.0,
+          "z": -1392.0,
+          "radius": 28.0
+        },
+        {
+          "x": -262.0,
+          "z": -1427.0,
+          "radius": 28.0
+        },
+        {
+          "x": -270.0,
+          "z": -1374.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 401,
+      "width": 4800,
+      "height": 5400
+    },
+    {
+      "id": "scene_map02_lv004_layer_tips_2",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv004",
+      "level_name": "首墩",
+      "region_set_id": "26",
+      "region_id": 330,
+      "group": "望楼蓄水站",
+      "group_key": "map02_lv004:26",
+      "name": "望楼蓄水站",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv004_layer_tips_2",
+      "icon": "Map02Lv004/tier_02_004_1",
+      "filename": "scene_map02_lv004_layer_tips_2.webp",
+      "path": "map02/map02_lv004/scene_map02_lv004_layer_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2/Map02Lv004/tier_02_004_1.png",
+      "region_version": "1_2",
+      "bounds": {
+        "west": -2048.0,
+        "east": -1024.0,
+        "south": -1920.0,
+        "north": -768.0
+      },
+      "entrance": {
+        "x": -1359.0,
+        "z": -1127.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -1359.0,
+          "z": -1127.0,
+          "radius": 28.0
+        },
+        {
+          "x": -1396.0,
+          "z": -1053.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 0,
+      "width": 4800,
+      "height": 5400
+    },
+    {
+      "id": "scene_map02_lv004_layer_tips_1",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv004",
+      "level_name": "首墩",
+      "region_set_id": "27",
+      "region_id": 328,
+      "group": "栖云窟",
+      "group_key": "map02_lv004:27",
+      "name": "栖云窟",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv004_layer_tips_1",
+      "icon": "Map02Lv004/tier_02_004_2",
+      "filename": "scene_map02_lv004_layer_tips_1.webp",
+      "path": "map02/map02_lv004/scene_map02_lv004_layer_tips_1.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2/Map02Lv004/tier_02_004_2.png",
+      "region_version": "1_2",
+      "bounds": {
+        "west": -2048.0,
+        "east": -1024.0,
+        "south": -1920.0,
+        "north": -768.0
+      },
+      "entrance": {
+        "x": -1473.0,
+        "z": -1461.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -1473.0,
+          "z": -1461.0,
+          "radius": 28.0
+        },
+        {
+          "x": -1447.0,
+          "z": -1459.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 100,
+      "width": 4800,
+      "height": 5400
+    },
+    {
+      "id": "scene_map02_lv005_layer_tips_1",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv005",
+      "level_name": "试验园区",
+      "region_set_id": "29",
+      "region_id": 316,
+      "group": "数据监测室",
+      "group_key": "map02_lv005:29",
+      "name": "数据监测室",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv005_layer_tips_1",
+      "icon": "Map02Lv005/scene_map02_lv005_layer_1",
+      "filename": "scene_map02_lv005_layer_tips_1.webp",
+      "path": "map02/map02_lv005/scene_map02_lv005_layer_tips_1.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2_1/Map02Lv005/scene_map02_lv005_layer_1.png",
+      "region_version": "1_2_1",
+      "bounds": {
+        "west": -768.0,
+        "east": 128.0,
+        "south": -768.0,
+        "north": 0.0
+      },
+      "entrance": {
+        "x": -560.0,
+        "z": -143.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -560.0,
+          "z": -143.0,
+          "radius": 28.0
+        },
+        {
+          "x": -528.0,
+          "z": -163.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 0,
+      "width": 4200,
+      "height": 3600
+    },
+    {
+      "id": "scene_map02_lv005_layer_tips_7",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv005",
+      "level_name": "试验园区",
+      "region_set_id": "30",
+      "region_id": 322,
+      "group": "测试区",
+      "group_key": "map02_lv005:30",
+      "name": "测试区",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv005_layer_tips_7",
+      "icon": "Map02Lv005/scene_map02_lv005_layer_7",
+      "filename": "scene_map02_lv005_layer_tips_7.webp",
+      "path": "map02/map02_lv005/scene_map02_lv005_layer_tips_7.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2_1/Map02Lv005/scene_map02_lv005_layer_7.png",
+      "region_version": "1_2_1",
+      "bounds": {
+        "west": -768.0,
+        "east": 128.0,
+        "south": -768.0,
+        "north": 0.0
+      },
+      "entrance": {
+        "x": -357.0,
+        "z": -480.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -357.0,
+          "z": -480.0,
+          "radius": 28.0
+        },
+        {
+          "x": -310.0,
+          "z": -404.0,
+          "radius": 28.0
+        },
+        {
+          "x": -259.0,
+          "z": -479.0,
+          "radius": 28.0
+        },
+        {
+          "x": -323.0,
+          "z": -502.0,
+          "radius": 28.0
+        },
+        {
+          "x": -249.0,
+          "z": -447.0,
+          "radius": 28.0
+        },
+        {
+          "x": -236.0,
+          "z": -457.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 100,
+      "width": 4200,
+      "height": 3600
+    },
+    {
+      "id": "scene_map02_lv005_layer_tips_6",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv005",
+      "level_name": "试验园区",
+      "region_set_id": "30",
+      "region_id": 321,
+      "group": "测试区",
+      "group_key": "map02_lv005:30",
+      "name": "测试区深处",
+      "tier_index": -2,
+      "logic_id": "scene_map02_lv005_layer_tips_6",
+      "icon": "Map02Lv005/scene_map02_lv005_layer_6",
+      "filename": "scene_map02_lv005_layer_tips_6.webp",
+      "path": "map02/map02_lv005/scene_map02_lv005_layer_tips_6.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2_1/Map02Lv005/scene_map02_lv005_layer_6.png",
+      "region_version": "1_2_1",
+      "bounds": {
+        "west": -768.0,
+        "east": 128.0,
+        "south": -768.0,
+        "north": 0.0
+      },
+      "entrance": {
+        "x": -357.0,
+        "z": -480.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -357.0,
+          "z": -480.0,
+          "radius": 28.0
+        },
+        {
+          "x": -310.0,
+          "z": -404.0,
+          "radius": 28.0
+        },
+        {
+          "x": -259.0,
+          "z": -479.0,
+          "radius": 28.0
+        },
+        {
+          "x": -323.0,
+          "z": -502.0,
+          "radius": 28.0
+        },
+        {
+          "x": -249.0,
+          "z": -447.0,
+          "radius": 28.0
+        },
+        {
+          "x": -236.0,
+          "z": -457.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 101,
+      "width": 4200,
+      "height": 3600
+    },
+    {
+      "id": "scene_map02_lv005_layer_tips_2",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv005",
+      "level_name": "试验园区",
+      "region_set_id": "31",
+      "region_id": 314,
+      "group": "生态标本室",
+      "group_key": "map02_lv005:31",
+      "name": "生态标本室",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv005_layer_tips_2",
+      "icon": "Map02Lv005/scene_map02_lv005_layer_2",
+      "filename": "scene_map02_lv005_layer_tips_2.webp",
+      "path": "map02/map02_lv005/scene_map02_lv005_layer_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2_1/Map02Lv005/scene_map02_lv005_layer_2.png",
+      "region_version": "1_2_1",
+      "bounds": {
+        "west": -768.0,
+        "east": 128.0,
+        "south": -768.0,
+        "north": 0.0
+      },
+      "entrance": {
+        "x": -417.0,
+        "z": -195.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -417.0,
+          "z": -195.0,
+          "radius": 28.0
+        },
+        {
+          "x": -375.0,
+          "z": -204.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 200,
+      "width": 4200,
+      "height": 3600
+    },
+    {
+      "id": "scene_map02_lv005_layer_tips_11",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv005",
+      "level_name": "试验园区",
+      "region_set_id": "32",
+      "region_id": 324,
+      "group": "二号水池检修区",
+      "group_key": "map02_lv005:32",
+      "name": "二号水池检修区",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv005_layer_tips_11",
+      "icon": "Map02Lv005/scene_map02_lv005_layer_11",
+      "filename": "scene_map02_lv005_layer_tips_11.webp",
+      "path": "map02/map02_lv005/scene_map02_lv005_layer_tips_11.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2_1/Map02Lv005/scene_map02_lv005_layer_11.png",
+      "region_version": "1_2_1",
+      "bounds": {
+        "west": -768.0,
+        "east": 128.0,
+        "south": -768.0,
+        "north": 0.0
+      },
+      "entrance": {
+        "x": -435.0,
+        "z": -488.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -435.0,
+          "z": -488.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 300,
+      "width": 4200,
+      "height": 3600
+    },
+    {
+      "id": "scene_map02_lv005_layer_tips_4",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv005",
+      "level_name": "试验园区",
+      "region_set_id": "33",
+      "region_id": 319,
+      "group": "试验园区 · 33",
+      "group_key": "map02_lv005:33",
+      "name": "材料储备室",
+      "tier_index": -2,
+      "logic_id": "scene_map02_lv005_layer_tips_4",
+      "icon": "Map02Lv005/scene_map02_lv005_layer_4",
+      "filename": "scene_map02_lv005_layer_tips_4.webp",
+      "path": "map02/map02_lv005/scene_map02_lv005_layer_tips_4.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2_1/Map02Lv005/scene_map02_lv005_layer_4.png",
+      "region_version": "1_2_1",
+      "bounds": {
+        "west": -768.0,
+        "east": 128.0,
+        "south": -768.0,
+        "north": 0.0
+      },
+      "entrance": {
+        "x": -296.0,
+        "z": -242.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -296.0,
+          "z": -242.0,
+          "radius": 28.0
+        },
+        {
+          "x": -288.0,
+          "z": -246.0,
+          "radius": 28.0
+        },
+        {
+          "x": -230.0,
+          "z": -203.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 400,
+      "width": 4200,
+      "height": 3600
+    },
+    {
+      "id": "scene_map02_lv005_layer_tips_5",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv005",
+      "level_name": "试验园区",
+      "region_set_id": "33",
+      "region_id": 318,
+      "group": "试验园区 · 33",
+      "group_key": "map02_lv005:33",
+      "name": "原型研发室",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv005_layer_tips_5",
+      "icon": "Map02Lv005/scene_map02_lv005_layer_5",
+      "filename": "scene_map02_lv005_layer_tips_5.webp",
+      "path": "map02/map02_lv005/scene_map02_lv005_layer_tips_5.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2_1/Map02Lv005/scene_map02_lv005_layer_5.png",
+      "region_version": "1_2_1",
+      "bounds": {
+        "west": -768.0,
+        "east": 128.0,
+        "south": -768.0,
+        "north": 0.0
+      },
+      "entrance": {
+        "x": -296.0,
+        "z": -242.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -296.0,
+          "z": -242.0,
+          "radius": 28.0
+        },
+        {
+          "x": -288.0,
+          "z": -246.0,
+          "radius": 28.0
+        },
+        {
+          "x": -230.0,
+          "z": -203.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 401,
+      "width": 4200,
+      "height": 3600
+    },
+    {
+      "id": "scene_map02_lv005_layer_tips_10",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv005",
+      "level_name": "试验园区",
+      "region_set_id": "34",
+      "region_id": 326,
+      "group": "一号水池检修区",
+      "group_key": "map02_lv005:34",
+      "name": "一号水池检修区",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv005_layer_tips_10",
+      "icon": "Map02Lv005/scene_map02_lv005_layer_10",
+      "filename": "scene_map02_lv005_layer_tips_10.webp",
+      "path": "map02/map02_lv005/scene_map02_lv005_layer_tips_10.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_2_1/Map02Lv005/scene_map02_lv005_layer_10.png",
+      "region_version": "1_2_1",
+      "bounds": {
+        "west": -768.0,
+        "east": 128.0,
+        "south": -768.0,
+        "north": 0.0
+      },
+      "entrance": {
+        "x": -447.0,
+        "z": -451.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -447.0,
+          "z": -451.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 500,
+      "width": 4200,
+      "height": 3600
+    },
+    {
+      "id": "scene_map02_lv007_layer_tips_2",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv007",
+      "level_name": "应龙关",
+      "region_set_id": "35",
+      "region_id": 392,
+      "group": "靠山窟",
+      "group_key": "map02_lv007:35",
+      "name": "靠山窟",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv007_layer_tips_2",
+      "icon": "Map02Lv007/map02_lv007_layer_tips_2",
+      "filename": "scene_map02_lv007_layer_tips_2.webp",
+      "path": "map02/map02_lv007/scene_map02_lv007_layer_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_4/Map02Lv007/map02_lv007_layer_tips_2.png",
+      "region_version": "1_4",
+      "bounds": {
+        "west": -1280.0,
+        "east": -128.0,
+        "south": 128.0,
+        "north": 1024.0
+      },
+      "entrance": {
+        "x": -400.0,
+        "z": 702.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -400.0,
+          "z": 702.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 0,
+      "width": 5400,
+      "height": 4200
+    },
+    {
+      "id": "scene_map02_lv007_layer_tips_1",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv007",
+      "level_name": "应龙关",
+      "region_set_id": "36",
+      "region_id": 393,
+      "group": "禁室监牢",
+      "group_key": "map02_lv007:36",
+      "name": "禁室监牢",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv007_layer_tips_1",
+      "icon": "Map02Lv007/map02_lv007_layer_tips_1",
+      "filename": "scene_map02_lv007_layer_tips_1.webp",
+      "path": "map02/map02_lv007/scene_map02_lv007_layer_tips_1.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_4/Map02Lv007/map02_lv007_layer_tips_1.png",
+      "region_version": "1_4",
+      "bounds": {
+        "west": -1280.0,
+        "east": -128.0,
+        "south": 128.0,
+        "north": 1024.0
+      },
+      "entrance": {
+        "x": -480.0,
+        "z": 734.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -480.0,
+          "z": 734.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 100,
+      "width": 5400,
+      "height": 4200
+    },
+    {
+      "id": "scene_map02_lv008_layer_tips_1",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv008",
+      "level_name": "北部禁区",
+      "region_set_id": "37",
+      "region_id": 382,
+      "group": "研发中心",
+      "group_key": "map02_lv008:37",
+      "name": "研发中心顶层",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv008_layer_tips_1",
+      "icon": "Map02Lv008/map02_lv008_layer_tips_1",
+      "filename": "scene_map02_lv008_layer_tips_1.webp",
+      "path": "map02/map02_lv008/scene_map02_lv008_layer_tips_1.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_4/Map02Lv008/map02_lv008_layer_tips_1.png",
+      "region_version": "1_4",
+      "bounds": {
+        "west": -896.0,
+        "east": 512.0,
+        "south": 768.0,
+        "north": 1792.0
+      },
+      "entrance": {
+        "x": 69.0,
+        "z": 1001.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 69.0,
+          "z": 1001.0,
+          "radius": 28.0
+        },
+        {
+          "x": 34.0,
+          "z": 1316.0,
+          "radius": 28.0
+        },
+        {
+          "x": 43.0,
+          "z": 1025.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 0,
+      "width": 6600,
+      "height": 4800
+    },
+    {
+      "id": "scene_map02_lv008_layer_tips_2",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv008",
+      "level_name": "北部禁区",
+      "region_set_id": "37",
+      "region_id": 381,
+      "group": "研发中心",
+      "group_key": "map02_lv008:37",
+      "name": "研发中心地下走道",
+      "tier_index": -2,
+      "logic_id": "scene_map02_lv008_layer_tips_2",
+      "icon": "Map02Lv008/map02_lv008_layer_tips_2",
+      "filename": "scene_map02_lv008_layer_tips_2.webp",
+      "path": "map02/map02_lv008/scene_map02_lv008_layer_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_4/Map02Lv008/map02_lv008_layer_tips_2.png",
+      "region_version": "1_4",
+      "bounds": {
+        "west": -896.0,
+        "east": 512.0,
+        "south": 768.0,
+        "north": 1792.0
+      },
+      "entrance": {
+        "x": 69.0,
+        "z": 1001.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 69.0,
+          "z": 1001.0,
+          "radius": 28.0
+        },
+        {
+          "x": 34.0,
+          "z": 1316.0,
+          "radius": 28.0
+        },
+        {
+          "x": 43.0,
+          "z": 1025.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 1,
+      "width": 6600,
+      "height": 4800
+    },
+    {
+      "id": "scene_map02_lv008_regiontoast_tips_6",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv008",
+      "level_name": "北部禁区",
+      "region_set_id": "38",
+      "region_id": 388,
+      "group": "平波堤",
+      "group_key": "map02_lv008:38",
+      "name": "平波堤",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv008_regiontoast_tips_6",
+      "icon": "Map02Lv008/map02_lv008_regiontoast_tips_6",
+      "filename": "scene_map02_lv008_regiontoast_tips_6.webp",
+      "path": "map02/map02_lv008/scene_map02_lv008_regiontoast_tips_6.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_4/Map02Lv008/map02_lv008_regiontoast_tips_6.png",
+      "region_version": "1_4",
+      "bounds": {
+        "west": -896.0,
+        "east": 512.0,
+        "south": 768.0,
+        "north": 1792.0
+      },
+      "entrance": {
+        "x": -283.0,
+        "z": 1316.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -283.0,
+          "z": 1316.0,
+          "radius": 28.0
+        },
+        {
+          "x": -172.0,
+          "z": 1201.0,
+          "radius": 28.0
+        },
+        {
+          "x": -192.0,
+          "z": 1058.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 100,
+      "width": 6600,
+      "height": 4800
+    },
+    {
+      "id": "scene_map02_lv008_regiontoast_tips_1",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv008",
+      "level_name": "北部禁区",
+      "region_set_id": "39",
+      "region_id": 375,
+      "group": "前哨基地",
+      "group_key": "map02_lv008:39",
+      "name": "前哨基地",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv008_regiontoast_tips_1",
+      "icon": "Map02Lv008/map02_lv008_regiontoast_tips_1",
+      "filename": "scene_map02_lv008_regiontoast_tips_1.webp",
+      "path": "map02/map02_lv008/scene_map02_lv008_regiontoast_tips_1.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_4/Map02Lv008/map02_lv008_regiontoast_tips_1.png",
+      "region_version": "1_4",
+      "bounds": {
+        "west": -896.0,
+        "east": 512.0,
+        "south": 768.0,
+        "north": 1792.0
+      },
+      "entrance": {
+        "x": -551.0,
+        "z": 1031.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -551.0,
+          "z": 1031.0,
+          "radius": 28.0
+        },
+        {
+          "x": -476.0,
+          "z": 980.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 200,
+      "width": 6600,
+      "height": 4800
+    },
+    {
+      "id": "scene_map02_lv008_regiontoast_tips_13",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv008",
+      "level_name": "北部禁区",
+      "region_set_id": "40",
+      "region_id": 384,
+      "group": "幽台试验场",
+      "group_key": "map02_lv008:40",
+      "name": "幽台试验场",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv008_regiontoast_tips_13",
+      "icon": "Map02Lv008/map02_lv008_regiontoast_tips_13",
+      "filename": "scene_map02_lv008_regiontoast_tips_13.webp",
+      "path": "map02/map02_lv008/scene_map02_lv008_regiontoast_tips_13.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_4/Map02Lv008/map02_lv008_regiontoast_tips_13.png",
+      "region_version": "1_4",
+      "bounds": {
+        "west": -896.0,
+        "east": 512.0,
+        "south": 768.0,
+        "north": 1792.0
+      },
+      "entrance": {
+        "x": 8.0,
+        "z": 1298.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 8.0,
+          "z": 1298.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 300,
+      "width": 6600,
+      "height": 4800
+    },
+    {
+      "id": "scene_map02_lv008_regiontoast_tips_12",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv008",
+      "level_name": "北部禁区",
+      "region_set_id": "41",
+      "region_id": 386,
+      "group": "水利枢纽",
+      "group_key": "map02_lv008:41",
+      "name": "水利枢纽",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv008_regiontoast_tips_12",
+      "icon": "Map02Lv008/map02_lv008_regiontoast_tips_12",
+      "filename": "scene_map02_lv008_regiontoast_tips_12.webp",
+      "path": "map02/map02_lv008/scene_map02_lv008_regiontoast_tips_12.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_4/Map02Lv008/map02_lv008_regiontoast_tips_12.png",
+      "region_version": "1_4",
+      "bounds": {
+        "west": -896.0,
+        "east": 512.0,
+        "south": 768.0,
+        "north": 1792.0
+      },
+      "entrance": {
+        "x": -405.0,
+        "z": 1381.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -405.0,
+          "z": 1381.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 400,
+      "width": 6600,
+      "height": 4800
+    },
+    {
+      "id": "scene_map02_lv008_regiontoast_tips_5",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv008",
+      "level_name": "北部禁区",
+      "region_set_id": "42",
+      "region_id": 377,
+      "group": "城建区",
+      "group_key": "map02_lv008:42",
+      "name": "城建区",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv008_regiontoast_tips_5",
+      "icon": "Map02Lv008/map02_lv008_regiontoast_tips_5",
+      "filename": "scene_map02_lv008_regiontoast_tips_5.webp",
+      "path": "map02/map02_lv008/scene_map02_lv008_regiontoast_tips_5.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_4/Map02Lv008/map02_lv008_regiontoast_tips_5.png",
+      "region_version": "1_4",
+      "bounds": {
+        "west": -896.0,
+        "east": 512.0,
+        "south": 768.0,
+        "north": 1792.0
+      },
+      "entrance": {
+        "x": -440.0,
+        "z": 1165.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -440.0,
+          "z": 1165.0,
+          "radius": 28.0
+        },
+        {
+          "x": -476.0,
+          "z": 981.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 500,
+      "width": 6600,
+      "height": 4800
+    },
+    {
+      "id": "scene_map02_lv008_regiontoast_tips_2",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv008",
+      "level_name": "北部禁区",
+      "region_set_id": "43",
+      "region_id": 379,
+      "group": "谈剑堂",
+      "group_key": "map02_lv008:43",
+      "name": "谈剑堂",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv008_regiontoast_tips_2",
+      "icon": "Map02Lv008/map02_lv008_regiontoast_tips_2",
+      "filename": "scene_map02_lv008_regiontoast_tips_2.webp",
+      "path": "map02/map02_lv008/scene_map02_lv008_regiontoast_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_4/Map02Lv008/map02_lv008_regiontoast_tips_2.png",
+      "region_version": "1_4",
+      "bounds": {
+        "west": -896.0,
+        "east": 512.0,
+        "south": 768.0,
+        "north": 1792.0
+      },
+      "entrance": {
+        "x": -379.0,
+        "z": 1381.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -379.0,
+          "z": 1381.0,
+          "radius": 28.0
+        },
+        {
+          "x": -361.0,
+          "z": 1351.0,
+          "radius": 28.0
+        },
+        {
+          "x": -334.0,
+          "z": 1329.0,
+          "radius": 28.0
+        },
+        {
+          "x": -296.0,
+          "z": 1320.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 600,
+      "width": 6600,
+      "height": 4800
+    },
+    {
+      "id": "scene_map02_lv009_layer_tips_6",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv009",
+      "level_name": "雪松林",
+      "region_set_id": "44",
+      "region_id": 405,
+      "group": "小岩穴",
+      "group_key": "map02_lv009:44",
+      "name": "小岩穴",
+      "tier_index": 1,
+      "logic_id": "scene_map02_lv009_layer_tips_6",
+      "icon": "Map02Lv009/map02_lv009_region_tier_4",
+      "filename": "scene_map02_lv009_layer_tips_6.webp",
+      "path": "map02/map02_lv009/scene_map02_lv009_layer_tips_6.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_5_1/Map02Lv009/map02_lv009_region_tier_4.png",
+      "region_version": "1_5_1",
+      "bounds": {
+        "west": -512.0,
+        "east": 512.0,
+        "south": 0.0,
+        "north": 768.0
+      },
+      "entrance": {
+        "x": 171.0,
+        "z": 428.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 171.0,
+          "z": 428.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 0,
+      "width": 4800,
+      "height": 3600
+    },
+    {
+      "id": "scene_map02_lv009_layer_tips_5",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv009",
+      "level_name": "雪松林",
+      "region_set_id": "45",
+      "region_id": 401,
+      "group": "幽暗山洞",
+      "group_key": "map02_lv009:45",
+      "name": "幽暗山洞",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv009_layer_tips_5",
+      "icon": "Map02Lv009/map02_lv009_region_tier_5",
+      "filename": "scene_map02_lv009_layer_tips_5.webp",
+      "path": "map02/map02_lv009/scene_map02_lv009_layer_tips_5.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_5_1/Map02Lv009/map02_lv009_region_tier_5.png",
+      "region_version": "1_5_1",
+      "bounds": {
+        "west": -512.0,
+        "east": 512.0,
+        "south": 0.0,
+        "north": 768.0
+      },
+      "entrance": {
+        "x": 9.0,
+        "z": 509.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 9.0,
+          "z": 509.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 100,
+      "width": 4800,
+      "height": 3600
+    },
+    {
+      "id": "scene_map02_lv009_layer_tips_8",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv009",
+      "level_name": "雪松林",
+      "region_set_id": "46",
+      "region_id": 403,
+      "group": "旧落脚点",
+      "group_key": "map02_lv009:46",
+      "name": "旧落脚点下层",
+      "tier_index": -2,
+      "logic_id": "scene_map02_lv009_layer_tips_8",
+      "icon": "Map02Lv009/map02_lv009_region_tier_6",
+      "filename": "scene_map02_lv009_layer_tips_8.webp",
+      "path": "map02/map02_lv009/scene_map02_lv009_layer_tips_8.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_5_1/Map02Lv009/map02_lv009_region_tier_6.png",
+      "region_version": "1_5_1",
+      "bounds": {
+        "west": -512.0,
+        "east": 512.0,
+        "south": 0.0,
+        "north": 768.0
+      },
+      "entrance": {
+        "x": 25.0,
+        "z": 270.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 25.0,
+          "z": 270.0,
+          "radius": 28.0
+        },
+        {
+          "x": -22.0,
+          "z": 140.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 200,
+      "width": 4800,
+      "height": 3600
+    },
+    {
+      "id": "scene_map02_lv009_layer_tips_9",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv009",
+      "level_name": "雪松林",
+      "region_set_id": "46",
+      "region_id": 402,
+      "group": "旧落脚点",
+      "group_key": "map02_lv009:46",
+      "name": "旧落脚点上层",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv009_layer_tips_9",
+      "icon": "Map02Lv009/map02_lv009_region_tier_7",
+      "filename": "scene_map02_lv009_layer_tips_9.webp",
+      "path": "map02/map02_lv009/scene_map02_lv009_layer_tips_9.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_5_1/Map02Lv009/map02_lv009_region_tier_7.png",
+      "region_version": "1_5_1",
+      "bounds": {
+        "west": -512.0,
+        "east": 512.0,
+        "south": 0.0,
+        "north": 768.0
+      },
+      "entrance": {
+        "x": 25.0,
+        "z": 270.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": 25.0,
+          "z": 270.0,
+          "radius": 28.0
+        },
+        {
+          "x": -22.0,
+          "z": 140.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 201,
+      "width": 4800,
+      "height": 3600
+    },
+    {
+      "id": "scene_map02_lv009_layer_tips_7",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv009",
+      "level_name": "雪松林",
+      "region_set_id": "47",
+      "region_id": 397,
+      "group": "木屋",
+      "group_key": "map02_lv009:47",
+      "name": "木屋内部",
+      "tier_index": 1,
+      "logic_id": "scene_map02_lv009_layer_tips_7",
+      "icon": "Map02Lv009/map02_lv009_region_tier_3",
+      "filename": "scene_map02_lv009_layer_tips_7.webp",
+      "path": "map02/map02_lv009/scene_map02_lv009_layer_tips_7.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_5_1/Map02Lv009/map02_lv009_region_tier_3.png",
+      "region_version": "1_5_1",
+      "bounds": {
+        "west": -512.0,
+        "east": 512.0,
+        "south": 0.0,
+        "north": 768.0
+      },
+      "entrance": {
+        "x": -17.0,
+        "z": 470.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -17.0,
+          "z": 470.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 300,
+      "width": 4800,
+      "height": 3600
+    },
+    {
+      "id": "scene_map02_lv009_layer_tips_2",
+      "map_name": "map02",
+      "map_display_name": "武陵",
+      "map_category": "layered",
+      "level_id": "map02_lv009",
+      "level_name": "雪松林",
+      "region_set_id": "48",
+      "region_id": 395,
+      "group": "林地",
+      "group_key": "map02_lv009:48",
+      "name": "林地",
+      "tier_index": -1,
+      "logic_id": "scene_map02_lv009_layer_tips_2",
+      "icon": "Map02Lv009/map02_lv009_region_tier_2",
+      "filename": "scene_map02_lv009_layer_tips_2.webp",
+      "path": "map02/map02_lv009/scene_map02_lv009_layer_tips_2.webp",
+      "source_url": "https://assets.skland.com/game-map/endfield/region_1_5_1/Map02Lv009/map02_lv009_region_tier_2.png",
+      "region_version": "1_5_1",
+      "bounds": {
+        "west": -512.0,
+        "east": 512.0,
+        "south": 0.0,
+        "north": 768.0
+      },
+      "entrance": {
+        "x": -150.0,
+        "z": 412.0,
+        "radius": 28.0
+      },
+      "entrances": [
+        {
+          "x": -150.0,
+          "z": 412.0,
+          "radius": 28.0
+        },
+        {
+          "x": -27.0,
+          "z": 581.0,
+          "radius": 28.0
+        }
+      ],
+      "sort_order": 400,
+      "width": 4800,
+      "height": 3600
+    }
+  ]
+}

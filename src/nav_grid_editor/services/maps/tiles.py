@@ -43,6 +43,8 @@ class TileStore:
             cands.append(s / map_name / zoom)
         # 4. 旧版扁平目录
         cands.append(self.tiles_root / map_name / zoom)
+        # 分发的预设只作兜底，本机新抓取的内容始终优先。
+        cands.append(self.tiles_root / "presets" / map_name / zoom)
         return cands
 
     def resolve_dir(self, map_name: str, zoom: str) -> Path | None:
@@ -69,7 +71,7 @@ class TileStore:
 
     # ---------- 查询 ----------
     def list_maps(self) -> dict[str, list[str]]:
-        """返回 {地图名: [zoom...]}，来源：latest + 会话 + 旧目录"""
+        """返回 {地图名: [zoom...]}，来源：本机缓存和分发预设。"""
         result: dict[str, set[str]] = {}
         if not self.tiles_root.is_dir():
             return {k: sorted(v) for k, v in result.items()}
@@ -85,12 +87,13 @@ class TileStore:
                         result.setdefault(map_dir.name, set()).add(zoom_dir.name)
 
         scan(self.tiles_root / "latest")
+        scan(self.tiles_root / "presets")
         for s in self._sessions():
             scan(s)
         # 旧版扁平目录（跳过 latest/maps/marks/icons/run_*）
         for d in sorted(self.tiles_root.iterdir()):
             if not d.is_dir() or d.name in (
-                "latest", "maps", "marks", "icons", "layers"
+                "latest", "maps", "marks", "icons", "layers", "presets"
             ):
                 continue
             if d.name.startswith(f"{RUN_PREFIX}_"):
@@ -150,7 +153,7 @@ def merge_tiles(tiles_root: Path, run_prefix: str = RUN_PREFIX) -> dict:
     # 旧版扁平目录
     for d in sorted(Path(tiles_root).iterdir()):
         if not d.is_dir() or d.name in (
-            "latest", "maps", "marks", "icons", "layers"
+            "latest", "maps", "marks", "icons", "layers", "presets"
         ):
             continue
         if d.name.startswith(f"{run_prefix}_"):

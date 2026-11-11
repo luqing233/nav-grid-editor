@@ -1,0 +1,2 @@
+assets/tiles/presets/**/*.webp filter=lfs diff=lfs merge=lfs -text
+assets/tiles/layers/**/*.webp filter=lfs diff=lfs merge=lfs -text
