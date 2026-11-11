@@ -1,490 +1,1015 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#111411">
-<title>终末地地图采集 / 标定 / 网格编辑</title>
-<link rel="stylesheet" href="/static/css/map_composer.css">
-<link rel="stylesheet" href="/static/css/workbench.css">
-<script type="importmap">
-{
-  "imports": {
-    "three": "/static/js/vendor/three/three.module.js"
-  }
-}
-</script>
-<script type="module" src="/static/js/map_composer.js"></script>
-</head>
-<body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#111411" />
+    <title>终末地地图采集 / 标定 / 网格编辑</title>
+    <link rel="stylesheet" href="/static/css/map_composer.css" />
+    <link rel="stylesheet" href="/static/css/workbench.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/static/js/vendor/three/three.module.js"
+        }
+      }
+    </script>
+    <script type="module" src="/static/js/map_composer.js"></script>
+  </head>
+  <body class="side-open" data-mode="browse">
+    <header id="toolbar">
+      <div class="workspace-brand">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="4" y="4" width="16" height="16" rx="3" />
+          <path d="M4 10h16M10 4v16" /></svg
+        ><strong>导航工作台</strong><span>终末地</span>
+      </div>
+      <div id="topbar">
+        <div class="document-breadcrumb">
+          <div class="map-selectors tb-context" aria-label="当前地图">
+            <label class="map-select-field"
+              ><span>主图</span
+              ><select id="selMap" aria-label="选择地图"></select></label
+            ><label class="map-select-field"
+              ><span>分层</span
+              ><select id="selTier" aria-label="选择分层地图">
+                <option value="">主图（无分层）</option>
+              </select></label
+            ><label class="map-select-field"
+              ><span>级别</span
+              ><select id="selZoom" aria-label="选择地图层级"></select
+            ></label>
+          </div>
+          <span id="dirtyState" class="dirty-chip" data-dirty="false"
+            >已保存</span
+          >
+        </div>
+        <div class="header-actions">
+          <button id="btnCapturePanel" title="采集、标记、日志与数据管理">
+            工作空间
+          </button>
+          <button
+            id="btnCommand"
+            class="command-trigger"
+            aria-label="搜索命令（Ctrl+K）"
+            title="搜索命令（Ctrl+K）"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="10" cy="10" r="6" />
+              <path d="m15 15 5 5" /></svg
+            ><span>搜索命令</span><kbd>Ctrl K</kbd></button
+          ><button id="btnLocalPR" type="button">新建 PR</button
+          ><button id="btnPRReview" type="button">审阅 data PR</button
+          ><button
+            id="btnDatasetPanel"
+            type="button"
+            title="导出所有已保存地图、标定与网格"
+          >
+            导出数据包
+          </button>
+          <div class="save-actions">
+            <div class="tb-act" data-mode="browse pick">
+              <button disabled>已保存</button>
+            </div>
+            <div class="tb-act" data-mode="edit">
+              <button
+                id="btnEditSave"
+                aria-label="保存网格"
+                title="保存网格（Ctrl+S）"
+              >
+                保存网格 <kbd>Ctrl S</kbd>
+              </button>
+            </div>
+            <div class="tb-act" data-mode="calib">
+              <button
+                id="btnCalibSave"
+                disabled
+                title="计算并保存标定（Ctrl+S）"
+              >
+                保存标定
+              </button>
+            </div>
+            <div class="tb-act" data-mode="link">
+              <button id="btnLinkSave" disabled>保存连接</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+    <main id="main">
+      <section id="workspace">
+        <nav id="workspaceNav" aria-label="编辑模式">
+          <div id="sideRail" class="mode-tabs">
+            <button
+              id="btnBrowse"
+              class="rail-mode is-active"
+              type="button"
+              data-rail-mode="browse"
+              aria-label="浏览"
+              aria-pressed="true"
+              title="浏览"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 5.5 9 3l6 2.5L20 3v15.5L15 21l-6-2.5L4 21Z"></path>
+                <path d="M9 3v15.5M15 5.5V21"></path>
+              </svg>
+              <span>浏览</span></button
+            ><button
+              id="btnEdit"
+              class="rail-mode"
+              type="button"
+              data-rail-mode="edit"
+              aria-label="网格"
+              aria-pressed="false"
+              title="网格"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="4" y="4" width="16" height="16" rx="2"></rect>
+                <path d="M4 10h16M10 4v16M16 4v16"></path>
+              </svg>
+              <span>网格</span></button
+            ><button
+              id="btnLink"
+              class="rail-mode"
+              type="button"
+              data-rail-mode="link"
+              aria-label="连接"
+              aria-pressed="false"
+              title="连接"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M8 8h8v8H8z"></path>
+                <path d="M4 12h4M16 12h4M12 4v4M12 16v4"></path>
+              </svg>
+              <span>连接</span></button
+            ><button
+              id="btnCalib"
+              class="rail-mode"
+              type="button"
+              data-rail-mode="calib"
+              aria-label="标定"
+              aria-pressed="false"
+              title="标定"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="6"></circle>
+                <path d="M12 2v4M12 18v4M2 12h4M18 12h4"></path>
+              </svg>
+              <span>标定</span></button
+            ><button
+              id="btnPick"
+              class="rail-mode"
+              type="button"
+              data-rail-mode="pick"
+              aria-label="取坐标"
+              aria-pressed="false"
+              title="取坐标"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M12 2v5M12 17v5M2 12h5M17 12h5"></path>
+              </svg>
+              <span>坐标</span>
+            </button>
+          </div>
+          <div class="view-actions">
+            <button
+              id="btnPerspective"
+              class="rail-mode"
+              type="button"
+              aria-label="透视视图"
+              aria-pressed="false"
+              title="透视视图（3D）"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3 21 8v8l-9 5-9-5V8Z"></path>
+                <path d="M3 8l9 5 9-5M12 13v8"></path>
+              </svg>
+              <span>3D</span></button
+            ><button
+              id="btnSideToggle"
+              class="icon-button"
+              aria-label="收起属性面板"
+              title="显示或隐藏属性面板"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <path d="M9 4v16" />
+              </svg>
+            </button>
+          </div>
+          <div class="view-actions history-actions">
+            <button
+              id="btnUndo"
+              class="icon-button"
+              type="button"
+              title="撤销（Ctrl+Z）"
+              disabled
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M9 7 4 12l5 5M5 12h9a6 6 0 0 1 6 6"></path>
+              </svg></button
+            ><button
+              id="btnRedo"
+              class="icon-button"
+              type="button"
+              title="重做（Ctrl+Y / Ctrl+Shift+Z）"
+              disabled
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m15 7 5 5-5 5m4-5h-9a6 6 0 0 0-6 6"></path>
+              </svg>
+            </button>
+          </div>
+        </nav>
+        <div id="canvasToolbar" aria-label="当前工具">
+          <div class="tb-act" data-mode="browse">
+            <span class="context-description">浏览地图</span
+            ><span class="muted">拖动平移，滚轮缩放</span
+            ><button id="btnDownload" title="下载当前地图总图（WebP / 旧版 PNG）">
+              下载总图
+            </button>
+          </div>
+          <div class="tb-act" data-mode="edit">
+            <div class="edit-paint-tools">
+              <span class="context-description">画笔</span>
+              <div class="segmented brush-group">
+                <button class="brushBtn on" data-brush="free" title="可走 · 1">
+                  可走</button
+                ><button class="brushBtn" data-brush="blocked" title="阻挡 · 2">
+                  阻挡</button
+                ><button class="brushBtn" data-brush="erase" title="未知 · 3">
+                  擦除
+                </button>
+              </div>
+              <label class="field-inline"
+                >宽度
+                <input
+                  id="editBrush"
+                  type="number"
+                  min="1"
+                  max="50"
+                  value="1"
+                  title="画笔宽度（格子数）"
+                /><span>格</span></label
+              ><button
+                id="captureFreeIndicator"
+                type="button"
+                hidden
+                title="停止抓包位置自动标记"
+              >
+                自动标记中 · 停止</button
+              ><button id="btnGridSettings" class="quiet">属性</button>
+            </div>
+            <div class="edit-selection-tools" hidden>
+              <span>已选 <b id="selCount">0</b> 格</span
+              ><button id="btnSelFree" title="把选中的格子填成 Free">
+                填充 Free
+              </button>
+              <button id="btnSelBlocked" title="把选中的格子填成 Blocked">
+                填充 Blocked
+              </button>
+              <button id="btnSelErase" title="把选中的格子擦成未知">
+                填充未知
+              </button>
+              <button id="btnSelClear" title="取消框选（快捷键 Esc）">
+                取消选择
+              </button>
+            </div>
+            <span class="edit-selection-hint" hidden></span>
+          </div>
+          <div class="tb-act" data-mode="link">
+            <span class="context-description">创建连接</span>
+            <div class="segmented">
+              <button id="btnLinkSource" class="on">选起点</button>
+              <button id="btnLinkTarget">选终点</button>
+            </div>
+            <span id="linkEditStatus">先框选起点</span
+            ><button id="btnLinkSettings" class="quiet">连接属性</button
+            ><button id="btnLinkClear">清空当前连接</button>
+          </div>
+          <div class="tb-act" data-mode="calib">
+            <span class="context-description">添加控制点</span
+            ><span class="muted">地图选点 → 输入世界坐标 → 保存标定</span
+            ><button id="btnCalibClear">清空控制点</button>
+          </div>
+          <div class="tb-act" data-mode="pick">
+            <span class="context-description">拾取坐标</span
+            ><span class="muted">点击地图读取世界坐标与格子位置</span>
+          </div>
+        </div>
+        <section id="canvasWrap" aria-label="地图画布">
+          <div id="canvasHolder">
+            <canvas id="composeCanvas"></canvas>
+            <canvas id="editCanvas"></canvas>
+            <canvas id="selCanvas"></canvas>
+            <canvas id="linkCanvas"></canvas>
+            <canvas id="pathCanvas"></canvas>
+            <div id="gridBounds" aria-hidden="true"></div>
+            <div id="pickMarker"></div>
+          </div>
+          <div id="calibOverlay" aria-hidden="true"></div>
+          <div id="playerMarker"><span id="playerMarkerLabel"></span></div>
+          <div id="brushCursor" class="brush-cursor" aria-hidden="true">
+            <span id="brushCursorLabel">1</span>
+          </div>
+          <div id="markTip"></div>
+          <div id="brushHud"></div>
+        </section>
+        <aside id="side" aria-label="属性面板">
+          <div id="sidePanel">
+            <header id="sideHeader">
+              <div>
+                <span class="eyebrow">当前工具</span>
+                <h2 id="sideModeLabel">视图属性</h2>
+              </div>
+              <button
+                id="btnInspectorClose"
+                class="icon-button"
+                aria-label="关闭属性面板"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m6 6 12 12M18 6 6 18" />
+                </svg>
+              </button>
+            </header>
+            <div id="sideContent">
+              <section class="side-panel" data-panel="browse">
+                <section class="property-section">
+                  <h3>显示图层</h3>
+                  <div id="layerPanel" class="layer-panel">
+                    <div class="layer-panel-heading" hidden>
+                      <button id="btnLayerCollapse">图层</button>
+                    </div>
+                    <div id="layerPanelContent">
+                      <label class="switch-row"
+                        ><span>底图</span
+                        ><input type="checkbox" id="layerBase" checked /></label
+                      ><label class="switch-row"
+                        ><span>分层图片</span
+                        ><input type="checkbox" id="layerTier" checked /></label
+                      ><label class="switch-row"
+                        ><span>地图标记</span
+                        ><input
+                          type="checkbox"
+                          id="layerMarkers"
+                          checked /></label
+                      ><label class="switch-row"
+                        ><span>导航网格</span
+                        ><input type="checkbox" id="layerGrid" checked /></label
+                      ><label class="switch-row"
+                        ><span>选区与高度</span
+                        ><input
+                          type="checkbox"
+                          id="layerSelection"
+                          checked /></label
+                      ><label class="switch-row"
+                        ><span>分层连接</span
+                        ><input
+                          type="checkbox"
+                          id="layerLinks"
+                          checked /></label
+                      ><label class="switch-row"
+                        ><span>路径</span
+                        ><input type="checkbox" id="layerPath" checked /></label
+                      ><label class="opacity-control"
+                        >网格透明度
+                        <input
+                          id="gridOpacity"
+                          type="range"
+                          min="0.15"
+                          max="1"
+                          step="0.05"
+                          value="0.82"
+                      /></label>
+                    </div>
+                  </div>
+                </section>
+                <section class="property-section">
+                  <h3>玩家位置</h3>
+                  <label class="switch-row"
+                    ><span>跟随玩家</span
+                    ><input type="checkbox" id="chkFollow" checked /></label
+                  ><label class="switch-row"
+                    ><span><i id="wsDot" class="status-dot"></i> 位置流</span
+                    ><input type="checkbox" id="chkWs"
+                  /></label>
+                  <p class="panel-note">
+                    开启跟随后，玩家移动时视图自动回到当前位置。
+                  </p>
+                </section>
+              </section>
+              <section class="side-panel" data-panel="grid">
+                <section class="property-section">
+                  <h3>网格概览</h3>
+                  <div id="editStats">Free: 0 / Blocked: 0</div>
+                  <p class="panel-note">可走、阻挡与未知格分别保存。</p>
+                </section>
+                <section class="property-section">
+                  <h3>自动标记</h3>
+                  <label class="switch-row"
+                    ><span>抓包位置标为可走</span
+                    ><input id="captureFreeEnabled" type="checkbox" /></label
+                  ><label class="form-field"
+                    ><span>标记半径 · 格</span
+                    ><input
+                      id="captureFreeRadius"
+                      type="number"
+                      min="0"
+                      max="50"
+                      value="2"
+                      title="以玩家所在格为中心，向外扩展的格数"
+                  /></label>
+                  <p class="panel-note">
+                    仅处理有效低速位置，并补齐同层相邻轨迹。
+                  </p>
+                </section>
+                <details class="property-details">
+                  <summary>网格参数与草稿</summary>
+                  <div id="editStatus">需先标定该地图才能编辑</div>
+                  <div class="field-grid">
+                    <label class="form-field"
+                      ><span>格子尺寸</span
+                      ><input
+                        id="editCellSize"
+                        type="number"
+                        step="any"
+                        title="cell_size" /></label
+                    ><label class="form-field"
+                      ><span>原点 X</span
+                      ><input
+                        id="editOriginX"
+                        type="number"
+                        step="any" /></label
+                    ><label class="form-field"
+                      ><span>原点 Z</span
+                      ><input id="editOriginZ" type="number" step="any"
+                    /></label>
+                  </div>
+                  <div class="button-row">
+                    <button id="btnEditLoad">载入</button>
+                  </div>
+                </details>
+              </section>
+              <section class="side-panel" data-panel="link">
+                <section class="property-section">
+                  <h3>连接属性</h3>
+                  <div id="linkSettings" class="panel settings-card">
+                    <label class="field-inline"
+                      >类型
+                      <select id="linkKind">
+                        <option value="stairs">楼梯</option>
+                        <option value="elevator">电梯</option>
+                        <option value="portal">传送</option>
+                        <option value="door">门</option>
+                        <option value="rope">绳索</option>
+                        <option value="other">其他</option>
+                      </select>
+                    </label>
+                    <label class="toggle"
+                      ><input
+                        type="checkbox"
+                        id="linkBidirectional"
+                        checked
+                      /><span>双向</span></label
+                    >
+                    <label class="field-inline"
+                      >代价
+                      <input
+                        id="linkCost"
+                        type="number"
+                        min="0.01"
+                        step="0.1"
+                        value="1"
+                      />
+                    </label>
+                    <fieldset class="endpoint-height">
+                      <legend>起点高度（可选）</legend>
+                      <label
+                        >Y 下界<input
+                          id="linkFromYMin"
+                          class="link-y-input"
+                          type="number"
+                          step="any"
+                          aria-label="起点 Y 下界"
+                      /></label>
+                      <label
+                        >Y 上界<input
+                          id="linkFromYMax"
+                          class="link-y-input"
+                          type="number"
+                          step="any"
+                          aria-label="起点 Y 上界"
+                      /></label>
+                    </fieldset>
+                    <fieldset class="endpoint-height">
+                      <legend>终点高度（可选）</legend>
+                      <label
+                        >Y 下界<input
+                          id="linkToYMin"
+                          class="link-y-input"
+                          type="number"
+                          step="any"
+                          aria-label="终点 Y 下界"
+                      /></label>
+                      <label
+                        >Y 上界<input
+                          id="linkToYMax"
+                          class="link-y-input"
+                          type="number"
+                          step="any"
+                          aria-label="终点 Y 上界"
+                      /></label>
+                    </fieldset>
+                    <p class="panel-note">
+                      高度留空表示未标注；两端都有高度才能计算落差。
+                    </p>
+                    <button
+                      id="btnLinkFillY"
+                      type="button"
+                      title="把两端所在层的已标高度区间填进上面的 Y（没有区间就填不了）"
+                    >
+                      用层区间填入
+                    </button>
+                  </div>
+                </section>
+                <section class="property-section">
+                  <h3>已有连接</h3>
+                  <div id="linkListStatus" class="panel-note">
+                    先进入“连接”模式
+                  </div>
+                  <div id="linkList"></div>
+                </section>
+                <details class="property-details">
+                  <summary>导航检查</summary>
+                  <div id="navReadyStatus" class="panel-note">分层导航：-</div>
+                  <div id="navReadyList"></div>
+                </details>
+              </section>
+              <section class="side-panel" data-panel="calib">
+                <section class="property-section">
+                  <h3>控制点</h3>
+                  <div id="calibStatus">
+                    未标定（开标定模式后点击地图添加控制点）
+                  </div>
+                  <div id="calibList"></div>
+                </section>
+                <details class="property-details">
+                  <summary>路径预览</summary>
+                  <textarea
+                    id="pathInput"
+                    class="path-input"
+                    rows="4"
+                    placeholder="粘贴路径坐标，例如：&#10;(-97.2,6.0) -> (-91.2,6.0) -> ...&#10;括号坐标或 x,z 对均可"
+                  ></textarea>
+                  <div class="button-row">
+                    <button id="btnPathMark">标记路径</button>
+                    <button id="btnPathClear">清除路径</button>
+                  </div>
+                  <div id="pathStatus" class="panel-note">需先标定该地图</div>
+                </details>
+              </section>
+              <section class="side-panel" data-panel="coords">
+                <section class="property-section">
+                  <h3>坐标读数</h3>
+                  <dl class="readout-list">
+                    <dt>玩家位置</dt>
+                    <dd id="coordsReadout">等待位置数据</dd>
+                    <dt>地图点选</dt>
+                    <dd id="pickReadout">点击地图读取坐标</dd>
+                  </dl>
+                </section>
+                <section class="property-section">
+                  <h3>位置连接</h3>
+                  <div id="posStreamState">位置流: -</div>
+                  <button id="btnPosToggle" type="button">开启位置流</button>
+                </section>
+              </section>
+            </div>
+            <div class="inspector-footer">
+              <button
+                id="btnFloorRegion"
+                title="为当前分层网格标记 X/Z 重合区域和高度区间"
+              >
+                标记楼层高度区间
+              </button>
+            </div>
+          </div>
+        </aside>
+        <div id="viewportFooter">
+          <span id="interactionHint">拖动平移 · 滚轮缩放</span>
+          <div class="viewport-controls">
+            <button
+              id="quickHelp"
+              class="icon-button"
+              aria-label="操作与快捷键"
+              title="操作与快捷键"
+            >
+              ?
+            </button>
+            <button id="quickBack" title="返回上一分层">上一分层</button
+            ><button id="quickLocation">坐标定位</button
+            ><button id="btnZoomOut" class="icon-button" aria-label="缩小地图">
+              −</button
+            ><output id="viewScale">100%</output
+            ><button id="btnZoomIn" class="icon-button" aria-label="放大地图">
+              +</button
+            ><button id="quickFit">适应窗口</button>
+          </div>
+        </div>
+      </section>
+    </main>
+    <footer id="status" role="status" data-state="connecting">
+      <span id="statusIndicator" aria-hidden="true"></span
+      ><span id="statusText">正在连接服务器…</span
+      ><span class="status-service"><span id="sideLinkState">LOCAL</span></span>
+    </footer>
 
-<header id="toolbar">
-  <div id="topbar">
-    <div class="app-brand" aria-label="终末地导航网格编辑器">
-      <span class="brand-mark" aria-hidden="true"></span>
-      <span class="brand-copy">
-        <strong>终末地地图编辑器</strong>
-        <small>NAV GRID</small>
-      </span>
+    <dialog
+      id="resourceDialog"
+      class="resource-dialog"
+      aria-labelledby="resourceTitle"
+    >
+      <header class="dialog-heading">
+        <div>
+          <span class="eyebrow">工作空间</span>
+          <h2 id="resourceTitle">资源与数据</h2>
+        </div>
+        <button
+          class="icon-button"
+          data-close-dialog
+          aria-label="关闭工作空间工具"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m6 6 12 12M18 6 6 18" />
+          </svg>
+        </button>
+      </header>
+      <div class="resource-layout">
+        <nav class="resource-nav" aria-label="工作空间工具">
+          <button data-resource-tab="capture" type="button">地图采集</button
+          ><button
+            id="btnMarkersPanel"
+            data-resource-tab="markers"
+            type="button"
+          >
+            地图标记</button
+          ><button data-resource-tab="export" type="button">发布数据</button
+          ><button id="btnLogPanel" data-resource-tab="log" type="button">
+            运行日志</button
+          ><button
+            id="btnMaintenancePanel"
+            data-resource-tab="maintenance"
+            type="button"
+          >
+            数据管理
+          </button>
+        </nav>
+        <div class="resource-content">
+          <section class="resource-panel" data-resource-panel="capture" hidden>
+            <h2>地图采集</h2>
+            <p class="section-intro">抓取地图瓦片，生成底图与标记资源。</p>
+            <div class="capture-layout">
+              <section class="resource-card">
+                <h3>瓦片采集</h3>
+                <div class="tb-fetch">
+                  <span id="fetchDot" class="status-dot"></span
+                  ><span id="fetchState">空闲</span
+                  ><button
+                    id="btnFetch"
+                    class="button-primary"
+                    title="用 Playwright 打开游戏地图页面并抓取瓦片"
+                  >
+                    开始抓取
+                  </button>
+                  <button id="btnFetchStop" class="button-quiet" disabled>
+                    停止</button
+                  ><label class="switch-row"
+                    ><span>后台运行</span
+                    ><input type="checkbox" id="chkHeadless"
+                  /></label>
+                </div>
+                <div class="button-row">
+                  <button
+                    id="btnCompose"
+                    title="把当前地图/zoom 的已有瓦片逐张贴上总图"
+                  >
+                    合成总图
+                  </button>
+                  <button
+                    id="btnSim"
+                    title="不落盘的模拟抓取，用来演示实时贴图"
+                  >
+                    模拟抓取
+                  </button>
+                  <button id="btnFit" title="缩放并居中显示整张总图">
+                    适应窗口
+                  </button>
+                  <button
+                    id="btnMarksAuth"
+                    title="抓取官方地图标记；认证口径包含玩家自建结构"
+                  >
+                    抓取标记
+                  </button>
+                </div>
+              </section>
+              <section class="resource-card">
+                <h3>本次进度</h3>
+                <div class="counts">
+                  <span>新增<b id="cNew">0</b></span
+                  ><span>更新<b id="cUpdated">0</b></span
+                  ><span>未变化<b id="cUnchanged">0</b></span
+                  ><span>跳过<b id="cSkipped">0</b></span
+                  ><span>错误<b id="cError">0</b></span
+                  ><span>已拼接<b id="cPasted">0</b></span>
+                </div>
+                <div id="progressLine"></div>
+              </section>
+            </div>
+            <details class="property-details">
+              <summary>本地服务信息</summary>
+              <div class="panel" id="servicePanel">-</div>
+            </details>
+          </section>
+          <section class="resource-panel" data-resource-panel="markers" hidden>
+            <h2>地图标记</h2>
+            <p class="section-intro">选择要显示的点位类型，画布将同步更新。</p>
+            <div class="marks-summary">
+              <div id="marksCred"></div>
+              <div id="marksStatus">未抓取</div>
+            </div>
+            <div id="markPicker">
+              <div class="mp-head">
+                <span class="mp-sub" id="mpSub">-</span>
+              </div>
+              <div id="mpCats"></div>
+              <div id="mpItems">
+                <div class="mp-empty">先在上面选一张地图</div>
+              </div>
+              <div class="mp-foot">
+                <button id="mpAll">全选</button>
+                <button id="mpNone">取消全选</button>
+                <button
+                  id="mpReset"
+                  title="恢复默认：base01 显示全部，其它地图仅显示地图探索里的三类点位"
+                >
+                  重置
+                </button>
+              </div>
+              <div class="mp-sub" id="mpTip">
+                点图标可筛选地图上显示哪些设备
+              </div>
+            </div>
+            <div id="marksHint" class="t-time"></div>
+          </section>
+          <section class="resource-panel" data-resource-panel="export" hidden>
+            <h2>发布数据包</h2>
+            <p class="section-intro">
+              把已保存的地图、标定和导航网格导出为可交付数据包。
+            </p>
+            <section class="resource-card">
+              <h3>输出位置</h3>
+              <label class="form-field"
+                ><span>目标文件夹 · 新目录或空目录</span
+                ><input
+                  id="datasetTarget"
+                  type="text"
+                  autocomplete="off"
+                  aria-label="数据包导出目标文件夹"
+              /></label>
+              <p class="panel-note">
+                发布图片使用原尺寸彩色 WebP Q90，保留透明通道；网格保留已保存数据。
+              </p>
+              <div class="button-row">
+                <button
+                  id="btnDatasetExport"
+                  type="button"
+                  class="button-primary"
+                >
+                  一键导出 nav-grid-data
+                </button>
+              </div>
+              <div
+                id="datasetExportStatus"
+                class="panel-note"
+                role="status"
+                aria-live="polite"
+              >
+                未导出
+              </div>
+            </section>
+          </section>
+          <section class="resource-panel" data-resource-panel="log" hidden>
+            <h2>运行日志</h2>
+            <p class="section-intro">本次会话的采集、编辑与连接事件。</p>
+            <div id="logBox" aria-live="polite"></div>
+          </section>
+          <section
+            class="resource-panel"
+            data-resource-panel="maintenance"
+            hidden
+          >
+            <h2>数据管理</h2>
+            <p class="section-intro">管理本地视图和数据仓库。</p>
+            <section class="resource-card">
+              <h3>同步远端数据仓库</h3>
+              <p class="panel-note">
+                用远端版本覆盖本地网格、连接、层声明及草稿。本地提交与未提交修改都会被替换。
+              </p>
+              <button
+                id="btnRepoSync"
+                type="button"
+                title="用远端数据仓库强制覆盖本地地图网格、连接、层声明和草稿"
+              >
+                同步仓库
+              </button>
+            </section>
+            <section class="resource-card">
+              <h3>重置画布</h3>
+              <p class="panel-note">清理当前内存视图，保留已保存文件。</p>
+              <button
+                id="btnReset"
+                class="button-danger"
+                title="清除当前地图的内存视图"
+              >
+                清空画布
+              </button>
+            </section>
+          </section>
+        </div>
+      </div>
+    </dialog>
+    <dialog
+      id="calibDlg"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="calibTitle"
+    >
+      <strong id="calibTitle">添加标定控制点</strong>
+      <div>像素: <b id="calibPx" class="mono">-</b></div>
+      <div class="calib-fields">
+        <label>X <input id="calibX" type="number" step="any" /></label>
+        <label>Z <input id="calibZ" type="number" step="any" /></label>
+      </div>
+      <div class="dialog-actions">
+        <button id="calibOk">确定</button>
+        <button id="calibCancel">取消</button>
+      </div>
+    </dialog>
+    <dialog
+      id="floorRegionDlg"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="floorRegionTitle"
+    >
+      <strong id="floorRegionTitle">标记重合区高度区间</strong>
+      <label class="floor-component"
+        >重合连通区
+        <select id="floorComponent"></select>
+      </label>
+      <label class="floor-component"
+        >重合地图网格
+        <select id="floorLayer"></select>
+      </label>
+      <div class="calib-fields">
+        <label>Y MIN <input id="floorYMin" type="number" step="any" /></label>
+        <label>Y MAX <input id="floorYMax" type="number" step="any" /></label>
+      </div>
+      <div class="floor-marked">
+        <div class="floor-marked-head">
+          已标记区间
+          <span id="floorMarkedCount"></span>
+        </div>
+        <div id="floorMarkedList" class="floor-marked-list"></div>
+      </div>
+      <div id="floorRegionStatus" class="panel-note"></div>
+      <div class="dialog-actions">
+        <button id="floorSave">标记所选网格</button>
+        <button id="floorClear">清除所选网格区间</button>
+        <button id="floorCancel">取消</button>
+      </div>
+    </dialog>
+    <dialog
+      id="overlapWarningDlg"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="overlapWarningTitle"
+    >
+      <strong id="overlapWarningTitle">黄色重合区尚未标注高度</strong>
+      <div id="overlapWarningList" class="panel-note"></div>
+      <div class="dialog-actions">
+        <button id="overlapWarningContinue">仍然保存</button>
+        <button id="overlapWarningCancel">返回标记</button>
+      </div>
+    </dialog>
+    <dialog id="locationDialog" aria-labelledby="locationTitle">
+      <header class="dialog-heading">
+        <h2 id="locationTitle">定位世界坐标</h2>
+        <button class="icon-button" data-close-dialog aria-label="关闭坐标定位">
+          ×
+        </button>
+      </header>
+      <p class="section-intro">
+        输入游戏中的 X / Z 坐标，地图会定位到附近区域。
+      </p>
+      <div class="calib-fields">
+        <label
+          >X<input
+            id="jumpX"
+            type="number"
+            step="any"
+            aria-label="定位 X" /></label
+        ><label
+          >Z<input id="jumpZ" type="number" step="any" aria-label="定位 Z"
+        /></label>
+      </div>
+      <div class="dialog-actions">
+        <button data-close-dialog>取消</button
+        ><button id="jumpGo" class="button-primary">定位</button>
+      </div>
+    </dialog>
+    <dialog id="commandDialog" aria-label="命令搜索">
+      <label class="command-search"
+        ><input
+          id="commandSearch"
+          placeholder="搜索操作或输入命令…"
+          autocomplete="off"
+          aria-label="搜索命令"
+        /><kbd>Esc</kbd></label
+      >
+      <div id="commandResults" role="listbox" aria-label="可用命令"></div>
+      <footer class="command-footer">↑ ↓ 选择 <span>Enter 执行</span></footer>
+    </dialog>
+    <dialog id="confirmDialog" aria-labelledby="confirmTitle">
+      <h2 id="confirmTitle">同步数据仓库？</h2>
+      <p id="confirmMessage"></p>
+      <div class="dialog-actions">
+        <button id="confirmCancel">取消</button
+        ><button id="confirmContinue" class="button-danger">
+          确认覆盖并同步
+        </button>
+      </div>
+    </dialog>
+    <div id="pvView" class="pv-view" hidden>
+      <div id="pvViewport" class="pv-viewport">
+        <canvas id="pvCanvas"></canvas>
+        <div id="pvLabels" class="pv-labels" aria-hidden="true"></div>
+        <div class="pv-legend">
+          <span><i style="background: #23c8af"></i>Free</span>
+          <span><i style="background: #dc4434"></i>Blocked</span>
+          <span><i style="background: #46beff"></i>高度区间</span>
+          <span><i style="background: #f0c66c"></i>连接</span>
+        </div>
+        <div class="pv-hint">左键旋转 · 右键平移 · 滚轮缩放</div>
+        <div id="pvStatus" class="pv-status"></div>
+      </div>
+      <div class="pv-bar">
+        <span class="pv-title">透视视图</span>
+        <label class="pv-field"
+          >分层组
+          <select id="pvGroup"></select>
+        </label>
+        <label class="pv-field pv-field-range"
+          >垂直间距
+          <input
+            id="pvSpacing"
+            type="range"
+            min="0"
+            max="400"
+            step="5"
+            value="80"
+          />
+        </label>
+        <label class="pv-toggle"
+          ><input type="checkbox" id="pvBase" checked />底图</label
+        >
+        <label class="pv-toggle"
+          ><input type="checkbox" id="pvLayers" checked />分层图片</label
+        >
+        <label class="pv-toggle"
+          ><input type="checkbox" id="pvGrid" checked />网格</label
+        >
+        <label class="pv-toggle"
+          ><input type="checkbox" id="pvMarks" checked />高度区间</label
+        >
+        <label class="pv-toggle"
+          ><input type="checkbox" id="pvLinks" checked />连接</label
+        >
+        <button id="pvReset" type="button">重置视角</button>
+        <button id="pvClose" type="button">关闭</button>
+      </div>
     </div>
-
-    <div class="tb-context">
-      <label class="compact-field">
-        <span>地图</span>
-        <select id="selMap" aria-label="选择地图"></select>
-      </label>
-      <label class="compact-field">
-        <span>层级</span>
-        <select id="selZoom" aria-label="选择地图层级"></select>
-      </label>
-      <label class="compact-field">
-        <span>分层</span>
-        <select id="selTier" aria-label="选择分层地图">
-          <option value="">关闭</option>
-        </select>
-      </label>
-    </div>
-
-    <div class="tb-telemetry">
-      <span class="telemetry-item"><small>TILES</small><b id="curCount" class="mono">0</b></span>
-      <span class="telemetry-item"><small>X</small><b id="curX" class="mono">-</b></span>
-      <span class="telemetry-item"><small>Y</small><b id="curY" class="mono">-</b></span>
-      <span id="modeTag" class="mode-chip">浏览</span>
-      <span id="dirtyState" class="dirty-chip" data-dirty="false">已保存</span>
+    <div hidden aria-hidden="true">
+      <span id="canvasViewLabel"></span>
+      <b id="curCount" class="mono">0</b>
+      <b id="curX" class="mono">-</b>
+      <b id="curY" class="mono">-</b>
       <span class="sr-only" id="curMap">-</span>
       <span class="sr-only" id="curZoom">-</span>
+      <strong id="canvasModeLabel">浏览</strong>
+      <span id="sideModeCode">01</span>
+      <b id="sideViewLabel">-</b><span id="modeTag">浏览</span>
     </div>
-
-    <div class="tb-global" role="group" aria-label="全局操作">
-      <button id="btnCapturePanel" type="button" title="打开地图采集、合成与维护">采集</button>
-      <button id="btnPRReview" type="button">审阅 data PR</button>
-      <button id="btnDatasetPanel" type="button" title="导出所有已保存地图、标定与网格">导出数据包</button>
-      <button id="btnUndo" class="icon-button" type="button" title="撤销（Ctrl+Z）" disabled>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 4 12l5 5M5 12h9a6 6 0 0 1 6 6"></path></svg>
-      </button>
-      <button id="btnRedo" class="icon-button" type="button" title="重做（Ctrl+Y / Ctrl+Shift+Z）" disabled>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 7 5 5-5 5m4-5h-9a6 6 0 0 0-6 6"></path></svg>
-      </button>
-    </div>
-
-  </div>
-
-</header>
-
-<main id="main">
-  <section id="canvasWrap" aria-label="地图画布">
-    <div id="canvasHolder">
-      <canvas id="composeCanvas"></canvas>
-      <canvas id="editCanvas"></canvas>
-      <canvas id="selCanvas"></canvas>
-      <canvas id="linkCanvas"></canvas>
-      <canvas id="pathCanvas"></canvas>
-      <div id="gridBounds" aria-hidden="true"></div>
-      <div id="pickMarker"></div>
-    </div>
-    <div id="calibOverlay" aria-hidden="true"></div>
-    <div id="playerMarker"><span id="playerMarkerLabel"></span></div>
-    <div class="viewport-frame" aria-hidden="true">
-      <span class="vf-corner tl"></span>
-      <span class="vf-corner tr"></span>
-      <span class="vf-corner bl"></span>
-      <span class="vf-corner br"></span>
-      <span class="vf-axis vf-axis-x">X</span>
-      <span class="vf-axis vf-axis-y">Y</span>
-    </div>
-    <div class="viewport-hud" aria-hidden="true">
-      <div class="viewport-hud-main">
-        <span>ACTIVE LAYER</span>
-        <strong id="canvasViewLabel">NO MAP</strong>
-      </div>
-      <div class="viewport-hud-mode">
-        <strong id="canvasModeLabel">浏览</strong>
-      </div>
-    </div>
-    <div id="canvasToolbar" class="canvas-toolbar" aria-label="上下文工具栏">
-      <div class="tb-act" data-mode="browse">
-        <button id="btnDownload" title="下载当前地图总图 PNG">下载总图</button>
-        <label class="toggle"><input type="checkbox" id="chkFollow" checked><span>跟随</span></label>
-        <label class="toggle" title="玩家位置流：实时获取玩家坐标（默认读抓包后端；具体数据源由服务端决定）">
-          <span class="status-dot" id="wsDot" aria-hidden="true"></span>
-          <input type="checkbox" id="chkWs">
-          <span>位置流</span>
-        </label>
-      </div>
-      <div class="tb-act" data-mode="calib">
-        <button id="btnCalibSave" disabled title="计算并保存标定（Ctrl+S）">保存标定</button>
-        <button id="btnCalibClear">清空控制点</button>
-        <span class="tb-act-hint">至少 3 个控制点</span>
-      </div>
-      <div class="tb-act" data-mode="edit">
-        <div class="edit-paint-tools" role="group" aria-label="画笔与保存">
-        <button class="brushBtn on" data-brush="free"
-                title="涂成 Free（快捷键 1，按住滚轮调粗细）">Free</button>
-        <button class="brushBtn" data-brush="blocked"
-                title="涂成 Blocked（快捷键 2，按住滚轮调粗细）">Blocked</button>
-        <button class="brushBtn" data-brush="erase"
-                title="擦回未知（快捷键 3，按住滚轮调粗细）">未知</button>
-        <label class="field-inline">宽度
-          <input id="editBrush" type="number" min="1" max="50" value="1"
-                 title="画笔宽度（格子数）">
-        </label>
-        <button id="btnFloorRegion" title="为当前分层网格标记 X/Z 重合区域和高度区间">楼层区间</button>
-        <button id="btnEditSave" aria-label="保存网格" title="保存网格（Ctrl+S）">保存网格 <kbd>Ctrl S</kbd></button>
-        </div>
-        <div class="edit-selection-tools" role="group" aria-label="选区填充" hidden>
-        <span class="selection-count">选中 <b id="selCount" class="num">0</b></span>
-        <button id="btnSelFree" title="把选中的格子填成 Free">填充 Free</button>
-        <button id="btnSelBlocked" title="把选中的格子填成 Blocked">填充 Blocked</button>
-        <button id="btnSelErase" title="把选中的格子擦成未知">填充未知</button>
-        <button id="btnSelClear" title="取消框选（快捷键 Esc）">取消选择</button>
-        </div>
-        <span class="edit-selection-hint">Shift + 拖动框选 · 右键平移 · 滚轮缩放</span>
-      </div>
-      <div class="tb-act" data-mode="link">
-        <button id="btnLinkSource" class="on">选起点</button>
-        <button id="btnLinkTarget">选终点</button>
-        <label class="field-inline">类型
-          <select id="linkKind">
-            <option value="stairs">楼梯</option>
-            <option value="elevator">电梯</option>
-            <option value="portal">传送</option>
-            <option value="door">门</option>
-            <option value="rope">绳索</option>
-            <option value="other">其他</option>
-          </select>
-        </label>
-        <label class="toggle"><input type="checkbox" id="linkBidirectional" checked><span>双向</span></label>
-        <label class="field-inline">代价
-          <input id="linkCost" type="number" min="0.01" step="0.1" value="1">
-        </label>
-        <span class="field-inline" title="端点高度（可选）。留空表示未标注 —— 落差只能从两端算出，不标就不猜。">Y
-          <input id="linkFromYMin" class="link-y-input" type="number" step="any" aria-label="起点 Y 下界">
-          <input id="linkFromYMax" class="link-y-input" type="number" step="any" aria-label="起点 Y 上界">
-          <span class="link-y-sep">→</span>
-          <input id="linkToYMin" class="link-y-input" type="number" step="any" aria-label="终点 Y 下界">
-          <input id="linkToYMax" class="link-y-input" type="number" step="any" aria-label="终点 Y 上界">
-        </span>
-        <button id="btnLinkFillY" type="button" title="把两端所在层的已标高度区间填进上面的 Y（没有区间就填不了）">用层区间填入</button>
-        <button id="btnLinkSave" disabled>保存连接</button>
-        <button id="btnLinkClear">清空当前连接</button>
-        <span id="linkEditStatus" class="tb-act-hint">先选起点区域</span>
-      </div>
-      <div class="tb-act" data-mode="pick">
-        <span class="tb-act-hint">点击地图读取坐标</span>
-      </div>
-    </div>
-    <div id="layerPanel" class="layer-panel" aria-label="图层控制">
-      <div class="layer-panel-heading"><span class="layer-title">显示图层</span><button id="btnLayerCollapse" type="button" aria-label="收起图层控制" aria-expanded="true" title="收起图层控制">−</button></div>
-      <div id="layerPanelContent">
-      <label class="layer-toggle"><span>底图</span><input type="checkbox" id="layerBase" checked></label>
-      <label class="layer-toggle"><span>分层</span><input type="checkbox" id="layerTier" checked></label>
-      <label class="layer-toggle"><span>标记</span><input type="checkbox" id="layerMarkers" checked></label>
-      <label class="layer-toggle"><span>网格</span><input type="checkbox" id="layerGrid" checked></label>
-      <label class="layer-toggle"><span>选区</span><input type="checkbox" id="layerSelection" checked></label>
-      <label class="layer-toggle"><span>连接</span><input type="checkbox" id="layerLinks" checked></label>
-      <label class="layer-toggle"><span>路径</span><input type="checkbox" id="layerPath" checked></label>
-      <label class="opacity-control">透明度
-        <input id="gridOpacity" type="range" min="0.15" max="1" step="0.05" value="0.82">
-      </label>
-      </div>
-    </div>
-    <div id="brushCursor" class="brush-cursor" aria-hidden="true">
-      <span id="brushCursorLabel">1</span>
-    </div>
-    <div id="markTip"></div>
-    <div id="brushHud"></div>
-  </section>
-
-  <div id="sideBackdrop"></div>
-
-  <aside id="side" aria-label="检查器面板">
-    <div id="sidePanel">
-    <div id="sideHeader">
-      <div>
-        <span class="side-kicker">当前工作模式</span>
-        <strong><span id="sideModeCode">01</span><span id="sideModeLabel">浏览</span></strong>
-      </div>
-    </div>
-
-    <div class="side-telemetry">
-      <span><small>VIEW</small><b id="sideViewLabel">-</b></span>
-      <span><small>LINK</small><b id="sideLinkState">LOCAL</b></span>
-    </div>
-
-    <div id="sideTabs" role="tablist" aria-label="面板分类">
-      <button type="button" data-side-tab="capture" role="tab">采集</button>
-      <button type="button" data-side-tab="calib" role="tab">标定</button>
-      <button type="button" data-side-tab="grid" role="tab">网格</button>
-      <button type="button" data-side-tab="markers" role="tab">标记</button>
-      <button type="button" data-side-tab="coords" role="tab">坐标</button>
-      <button type="button" data-side-tab="log" role="tab">日志</button>
-    </div>
-
-    <div id="sideContent">
-    <section class="side-sec side-panel" data-panel="capture">
-      <h3><span>地图采集</span><small>CAPTURE</small></h3>
-      <div class="panel capture-tools">
-        <div class="tb-fetch">
-          <span id="fetchDot" class="status-dot" aria-hidden="true"></span><span id="fetchState">空闲</span>
-          <button id="btnFetch" class="button-primary" title="用 Playwright 打开游戏地图页面并抓取瓦片">开始抓取</button>
-          <button id="btnFetchStop" class="button-quiet" disabled>停止</button>
-          <label class="toggle"><input type="checkbox" id="chkHeadless"><span>后台运行</span></label>
-        </div>
-        <div class="capture-action-grid">
-          <button id="btnCompose" title="把当前地图/zoom 的已有瓦片逐张贴上总图">合成总图</button>
-          <button id="btnMarksAuth" title="抓取官方地图标记；认证口径包含玩家自建结构">抓取标记</button>
-          <button id="btnSim" title="不落盘的模拟抓取，用来演示实时贴图">模拟抓取</button>
-          <button id="btnFit" title="缩放并居中显示整张总图">适应窗口</button>
-        </div>
-        <details class="capture-maintenance"><summary>画布维护</summary><button id="btnReset" class="button-danger" title="清除当前地图的内存视图">清空画布</button><p class="panel-note">重置当前地图的内存视图，不删除已保存文件。</p></details>
-      </div>
-      <div class="panel dataset-export-panel">
-        <h3>发布数据包</h3>
-        <label for="datasetTarget">目标文件夹（新目录或空目录）</label>
-        <input id="datasetTarget" type="text" autocomplete="off" aria-label="数据包导出目标文件夹">
-        <div class="panel-note">导出已保存数据。发布图片为原尺寸灰度，编辑素材保持原样。</div>
-        <button id="btnDatasetExport" type="button" class="button-primary">一键导出 nav-grid-data</button>
-        <div id="datasetExportStatus" class="panel-note" role="status" aria-live="polite">未导出</div>
-      </div>
-      <h3><span>采集状态</span><small>CAPTURE STATUS</small></h3>
-      <div class="panel" id="servicePanel">-</div>
-      <div class="panel">
-        <div class="counts">
-          <span>新增: <b id="cNew" class="num">0</b></span>
-          <span>更新: <b id="cUpdated" class="num">0</b></span>
-          <span>未变化: <b id="cUnchanged" class="num">0</b></span>
-          <span>跳过: <b id="cSkipped" class="num">0</b></span>
-          <span>错误: <b id="cError" class="num">0</b></span>
-          <span>当前画布: <b id="cPasted" class="num">0</b></span>
-        </div>
-        <div id="progressLine"></div>
-      </div>
-    </section>
-
-    <!-- 标定模式隐藏标记，避免标记徽章干扰控制点选取。 -->
-    <section class="side-sec side-panel" data-panel="markers">
-      <h3><span>地图标记</span><small>MAP MARKERS</small></h3>
-      <div class="panel">
-        <div class="panel-note"
-             title="认证口径包含玩家自建的滑索、暗管、供电桩等；凭证只从本机文件读取。">
-          认证抓取，凭证只从本机读取。
-        </div>
-        <div id="marksCred"></div>
-        <div id="marksStatus">未抓取</div>
-        <div id="markPicker">
-          <div class="mp-head">
-            <span class="mp-sub" id="mpSub">-</span>
-          </div>
-          <div id="mpCats"></div>
-          <div id="mpItems"><div class="mp-empty">先在上面选一张地图</div></div>
-          <div class="mp-foot">
-            <button id="mpAll">全选</button>
-            <button id="mpNone">取消全选</button>
-            <button id="mpReset" title="恢复默认：base01 显示全部，其它地图仅显示地图探索里的三类点位">重置</button>
-          </div>
-          <div class="mp-sub" id="mpTip">点图标可筛选地图上显示哪些设备</div>
-        </div>
-        <div id="marksHint" class="t-time"></div>
-      </div>
-    </section>
-
-    <section class="side-sec side-panel" data-panel="calib">
-      <h3><span>地图标定</span><small>CALIBRATION</small></h3>
-      <div class="panel">
-        <div id="calibStatus">未标定（开标定模式后点击地图添加控制点）</div>
-        <div id="calibList"></div>
-      </div>
-      <h3><span>路径标记</span><small>PATH TRACE</small></h3>
-      <div class="panel">
-        <textarea id="pathInput" class="path-input" rows="4"
-          placeholder="粘贴路径坐标，例如：&#10;(-97.2,6.0) -> (-91.2,6.0) -> ...&#10;括号坐标或 x,z 对均可"></textarea>
-        <div class="button-row">
-          <button id="btnPathMark">标记路径</button>
-          <button id="btnPathClear">清除路径</button>
-        </div>
-        <div id="pathStatus" class="panel-note">需先标定该地图</div>
-      </div>
-    </section>
-
-    <section class="side-sec side-panel" data-panel="grid">
-      <h3><span>网格编辑（无高度 2D）</span><small>GRID EDIT</small></h3>
-      <div class="panel">
-        <div id="editStatus">需先标定该地图才能编辑</div>
-        <div id="editStats">Free: 0 / Blocked: 0</div>
-        <div class="field-grid">
-          <label>格子 <input id="editCellSize" type="number" step="any" title="cell_size"></label>
-          <label>原点 X <input id="editOriginX" type="number" step="any"></label>
-          <label>原点 Z <input id="editOriginZ" type="number" step="any"></label>
-        </div>
-        <div class="button-row">
-          <button id="btnEditLoad">载入</button>
-        </div>
-      </div>
-      <h3><span>分层连接</span><small>LAYER LINKS</small></h3>
-      <div class="panel">
-        <div id="navReadyStatus" class="panel-note">分层导航：-</div>
-        <div id="navReadyList"></div>
-        <div id="linkListStatus" class="panel-note">先进入“连接”模式</div>
-        <div id="linkList"></div>
-      </div>
-    </section>
-
-    <section class="side-sec side-panel" data-panel="coords">
-      <h3><span>取坐标</span><small>COORDINATE READ</small></h3>
-      <div class="panel">
-        <div>最近坐标: <span id="coordsReadout">-</span></div>
-        <div>点击坐标: <span id="pickReadout">-</span></div>
-      </div>
-      <div class="panel">
-        <div id="posStreamState">位置流: -</div>
-        <div class="button-row">
-          <button id="btnPosToggle" type="button">开启位置流</button>
-        </div>
-      </div>
-    </section>
-
-    <section class="side-log side-panel" data-panel="log">
-      <h3><span>日志</span><small>EVENT STREAM</small></h3>
-      <div id="logBox" aria-live="polite"></div>
-    </section>
-    </div>
-    </div>
-
-    <div id="sideRail" aria-label="侧边栏快捷入口">
-      <button id="btnSideToggle" class="rail-toggle" type="button"
-              aria-label="展开检查器" title="展开检查器">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="m9 6 6 6-6 6"></path>
-        </svg>
-      </button>
-      <div class="rail-tools">
-        <button id="btnBrowse" class="rail-mode is-active" type="button" data-rail-mode="browse"
-                aria-label="浏览" aria-pressed="true" title="浏览">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M4 5.5 9 3l6 2.5L20 3v15.5L15 21l-6-2.5L4 21Z"></path>
-            <path d="M9 3v15.5M15 5.5V21"></path>
-          </svg>
-        </button>
-        <button id="btnCalib" class="rail-mode" type="button" data-rail-mode="calib"
-                aria-label="标定" aria-pressed="false" title="标定">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="6"></circle>
-            <path d="M12 2v4M12 18v4M2 12h4M18 12h4"></path>
-          </svg>
-        </button>
-        <button id="btnEdit" class="rail-mode" type="button" data-rail-mode="edit"
-                aria-label="网格" aria-pressed="false" title="网格">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="4" y="4" width="16" height="16" rx="2"></rect>
-            <path d="M4 10h16M10 4v16M16 4v16"></path>
-          </svg>
-        </button>
-        <button id="btnLink" class="rail-mode" type="button" data-rail-mode="link"
-                aria-label="连接" aria-pressed="false" title="连接">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M8 8h8v8H8z"></path>
-            <path d="M4 12h4M16 12h4M12 4v4M12 16v4"></path>
-          </svg>
-        </button>
-        <button id="btnPick" class="rail-mode" type="button" data-rail-mode="pick"
-                aria-label="取坐标" aria-pressed="false" title="取坐标">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="3"></circle>
-            <path d="M12 2v5M12 17v5M2 12h5M17 12h5"></path>
-          </svg>
-        </button>
-        <button id="btnPerspective" class="rail-mode" type="button"
-                aria-label="透视视图" aria-pressed="false" title="透视视图（3D）">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 3 21 8v8l-9 5-9-5V8Z"></path>
-            <path d="M3 8l9 5 9-5M12 13v8"></path>
-          </svg>
-        </button>
-      </div>
-      <span class="rail-status" aria-hidden="true"></span>
-    </div>
-  </aside>
-</main>
-
-<footer id="status" role="status" data-state="connecting"><span id="statusIndicator" aria-hidden="true"></span><span id="statusText">正在连接服务器…</span></footer>
-
-<div id="calibDlg" role="dialog" aria-modal="true" aria-labelledby="calibTitle">
-  <strong id="calibTitle">添加标定控制点</strong>
-  <div>像素: <b id="calibPx" class="mono">-</b></div>
-  <div class="calib-fields">
-    <label>X <input id="calibX" type="number" step="any"></label>
-    <label>Z <input id="calibZ" type="number" step="any"></label>
-  </div>
-  <div class="dialog-actions">
-    <button id="calibOk">确定</button>
-    <button id="calibCancel">取消</button>
-  </div>
-</div>
-
-<div id="floorRegionDlg" role="dialog" aria-modal="true" aria-labelledby="floorRegionTitle">
-  <strong id="floorRegionTitle">标记重合区高度区间</strong>
-  <label class="floor-component">重合连通区
-    <select id="floorComponent"></select>
-  </label>
-  <label class="floor-component">重合地图网格
-    <select id="floorLayer"></select>
-  </label>
-  <div class="calib-fields">
-    <label>Y MIN <input id="floorYMin" type="number" step="any"></label>
-    <label>Y MAX <input id="floorYMax" type="number" step="any"></label>
-  </div>
-  <div class="floor-marked">
-    <div class="floor-marked-head">已标记区间
-      <span id="floorMarkedCount"></span>
-    </div>
-    <div id="floorMarkedList" class="floor-marked-list"></div>
-  </div>
-  <div id="floorRegionStatus" class="panel-note"></div>
-  <div class="dialog-actions">
-    <button id="floorSave">标记所选网格</button>
-    <button id="floorClear">清除所选网格区间</button>
-    <button id="floorCancel">取消</button>
-  </div>
-</div>
-
-<div id="overlapWarningDlg" role="dialog" aria-modal="true" aria-labelledby="overlapWarningTitle">
-  <strong id="overlapWarningTitle">黄色重合区尚未标注高度</strong>
-  <div id="overlapWarningList" class="panel-note"></div>
-  <div class="dialog-actions">
-    <button id="overlapWarningContinue">仍然保存</button>
-    <button id="overlapWarningCancel">返回标记</button>
-  </div>
-</div>
-
-<div id="pvView" class="pv-view" hidden>
-  <canvas id="pvCanvas"></canvas>
-  <div id="pvLabels" class="pv-labels" aria-hidden="true"></div>
-  <div class="pv-bar">
-    <span class="pv-title">透视视图</span>
-    <label class="pv-field">分层组
-      <select id="pvGroup"></select>
-    </label>
-    <label class="pv-field pv-field-range">垂直间距
-      <input id="pvSpacing" type="range" min="0" max="400" step="5" value="80">
-    </label>
-    <label class="pv-toggle"><input type="checkbox" id="pvBase" checked>底图</label>
-    <label class="pv-toggle"><input type="checkbox" id="pvLayers" checked>分层图片</label>
-    <label class="pv-toggle"><input type="checkbox" id="pvGrid" checked>网格</label>
-    <label class="pv-toggle"><input type="checkbox" id="pvMarks" checked>高度区间</label>
-    <label class="pv-toggle"><input type="checkbox" id="pvLinks" checked>连接</label>
-    <button id="pvReset" type="button">重置视角</button>
-    <button id="pvClose" type="button">关闭</button>
-  </div>
-  <div class="pv-legend">
-    <span><i style="background:#23c8af"></i>Free</span>
-    <span><i style="background:#dc4434"></i>Blocked</span>
-    <span><i style="background:#46beff"></i>高度区间</span>
-    <span><i style="background:#f0c66c"></i>连接</span>
-  </div>
-  <div class="pv-hint">左键旋转 · 右键平移 · 滚轮缩放</div>
-  <div id="pvStatus" class="pv-status"></div>
-</div>
-
-</body>
+  </body>
 </html>

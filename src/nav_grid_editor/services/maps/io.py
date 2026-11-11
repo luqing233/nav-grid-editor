@@ -15,6 +15,37 @@ from pathlib import Path
 from .settings import Image, WEBP_OK
 
 
+def image_media_type(data: bytes) -> str | None:
+    """Use the payload, since the upstream .png URL can actually serve WebP."""
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    return None
+
+
+def preferred_image(directory: Path, stem: str) -> Path | None:
+    """New WebP takes precedence; existing PNG resources remain readable."""
+    for suffix in (".webp", ".png"):
+        path = directory / (stem + suffix)
+        if path.is_file():
+            return path
+    return None
+
+
+def save_lossless_webp(image, target) -> None:
+    save_webp(image, target, lossless=True)
+
+
+def save_webp(image, target, *, lossless: bool = False) -> None:
+    if not WEBP_OK:
+        raise ValueError("当前 Pillow 不支持 WebP，请重新执行 uv sync --locked")
+    if max(image.size) > 16383:
+        raise ValueError(f"WebP 单边最大 16383 像素，当前为 {image.width}×{image.height}；未缩放或覆盖原图")
+    image.save(target, "WEBP", lossless=lossless, quality=100 if lossless else 90,
+               method=4, exact=True)
+
+
 def solid_png(w: int, h: int, rgb: tuple) -> bytes:
     def chunk(typ: bytes, data: bytes) -> bytes:
         return (

@@ -8,6 +8,8 @@ map02 报 11 块、规划器看 12 块，base01 报 5、看 8。
 同层还要和规划器的邻域规则一致：八连通，斜向时两条正交邻格都要过守卫。
 """
 
+import hashlib
+import io
 import json
 import shutil
 import subprocess
@@ -22,6 +24,39 @@ MODULE = (ROOT / "src" / "nav_grid_editor" / "web" / "static" / "js" /
           "grid" / "walk-policy.js")
 DOC_MODULE = (ROOT / "src" / "nav_grid_editor" / "web" / "static" / "js" /
               "grid" / "grid-document.js")
+BASELINES = ROOT / "tests" / "data" / "walk_policy"
+
+
+def _load_baseline(name):
+    manifest = json.loads((BASELINES / "baselines.json").read_text(encoding="utf-8"))
+    baseline = manifest["snapshots"][name]
+    raw = (BASELINES / baseline["file"]).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != baseline["sha256"]:
+        raise AssertionError(f"固定网格快照 {name} 的 SHA-256 不匹配；请核对来源后显式更新基线")
+    with np.load(io.BytesIO(raw), allow_pickle=False) as data:
+        return data["cells"].copy(), baseline
+
+
+def _four_connected_free_components(cells):
+    """独立测试 oracle：严格禁切角的八连通与 Free 四连通有相同的连通分量。
+
+    合法斜步的两条正交邻格都是 Free，因此总能替换为两步正交移动。
+    这里只比较连通分量，不声称路径长度相等，也不用于生产诊断。
+    """
+    remaining = set(zip(*np.nonzero(cells == 1)))
+    sizes = []
+    while remaining:
+        stack = [remaining.pop()]
+        size = 0
+        while stack:
+            z, x = stack.pop()
+            size += 1
+            for neighbor in ((z - 1, x), (z + 1, x), (z, x - 1), (z, x + 1)):
+                if neighbor in remaining:
+                    remaining.remove(neighbor)
+                    stack.append(neighbor)
+        sizes.append(size)
+    return sorted(sizes, reverse=True)
 
 
 def _run(script: str) -> str:
@@ -52,6 +87,24 @@ function doc(width, height, free, blocked) {{
 const B = (w, h) => ({{ x0: 0, x1: w - 1, z0: 0, z1: h - 1 }});
 const strict = WALK_POLICIES.noUnknown;
 """
+
+
+def _grid_components(cells):
+    """Python 解 NPZ，Node 执行生产 ESM；避免在命令行嵌入大网格。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        payload = Path(tmp) / "grid.json"
+        payload.write_text(json.dumps({
+            "free": np.argwhere(cells == 1)[:, ::-1].tolist(),
+            "blocked": np.argwhere(cells == 2)[:, ::-1].tolist(),
+            "shape": list(cells.shape),
+        }), encoding="utf-8")
+        out = _run(_PRELUDE + f"""
+import {{ readFileSync }} from "node:fs";
+const data = JSON.parse(readFileSync({str(payload)!r}, "utf8"));
+const d = doc(data.shape[1], data.shape[0], data.free, data.blocked);
+console.log(JSON.stringify(walkableComponents(d, B(data.shape[1], data.shape[0]), strict)));
+""")
+    return json.loads(out)
 
 
 @unittest.skipUnless(shutil.which("node"), "Node.js is required for frontend tests")
@@ -119,39 +172,26 @@ walkableComponents(d, B(2, 2), WALK_POLICIES.allowUnknown);
         self.assertIn("只支持 noUnknown", result.stderr)
         self.assertIn("少报", result.stderr)
 
-    def test_real_map02_fragmentation_matches_the_strict_predicate(self):
-        """真实数据基线（nav-grid-data 1a23931）：主图 14 块、最大 32119。
+    def test_real_map02_snapshots_match_the_strict_baselines(self):
+        """固定已提交快照：旧版 14 块、新版 16 块，完整块大小列表均须匹配。"""
+        for name in ("map02_1a23931", "map02_8f34d18"):
+            with self.subTest(snapshot=name):
+                cells, baseline = _load_baseline(name)
+                expected = baseline["components"]
+                self.assertEqual(_four_connected_free_components(cells), expected,
+                                 "快照与经过独立复核的基线不符")
+                self.assertEqual(_grid_components(cells), expected,
+                                 "固定输入上的连通性逻辑发生变化")
 
-        npz 由 Python 这边解好写成 JSON（别在 node 里嵌 python 字符串，
-        引号和换行会把它弄坏），node 只负责跑被测模块。
-        缺文件时跳过（子模块未检出）。
-        """
+    def test_working_map02_matches_independent_connectivity(self):
+        """工作区可以继续编辑；验证计算正确性，不把旧快照的数字套到新数据。"""
         grid = ROOT / "assets" / "nav-grid-data" / "map02_4.grid.npz"
         if not grid.is_file():
             self.skipTest("nav-grid-data 子模块未检出")
-
         with np.load(grid, allow_pickle=False) as z:
             cells = np.asarray(z["cells"])
-        free = [[int(x), int(y)] for y, x in zip(*np.nonzero(cells == 1))]
-        blocked = [[int(x), int(y)] for y, x in zip(*np.nonzero(cells == 2))]
-
-        with tempfile.TemporaryDirectory() as tmp:
-            payload = Path(tmp) / "map02.json"
-            payload.write_text(json.dumps({
-                "free": free, "blocked": blocked, "shape": list(cells.shape),
-            }), encoding="utf-8")
-            out = _run(_PRELUDE + f"""
-import {{ readFileSync }} from "node:fs";
-const data = JSON.parse(readFileSync({str(payload)!r}, "utf8"));
-const d = GridDocument.fromSparse({{
-  origin: [0, 0], shape: data.shape, cellSize: 1,
-  cells: data.free, blocked: data.blocked,
-}});
-const bounds = {{ x0: 0, x1: data.shape[1] - 1, z0: 0, z1: data.shape[0] - 1 }};
-const comps = walkableComponents(d, bounds, strict);
-console.log(JSON.stringify([comps.length, comps[0]]));
-""")
-        self.assertEqual(json.loads(out), [14, 32119])
+        self.assertEqual(_grid_components(cells), _four_connected_free_components(cells),
+                         "工作区网格的 JS 结果与独立四连通结果不一致")
 
     def test_anomaly_buckets_are_mutually_exclusive(self):
         """八邻全阻挡的格子必然也没有可走邻居：不能被两条提示各报一次。"""
@@ -234,16 +274,9 @@ console.log(JSON.stringify({
         self.assertEqual(got["walled"], [1, 0, 1, 0])
         self.assertEqual(got["unknownOnlyNeighbour"], [1, 1, 0, 0])
 
-    def test_real_grids_are_never_trapped(self):
-        """真实数据上钉住方向：块数 > 1 但一个真被困都没有。
-
-        也就是多出来的块**全是**我们自己的禁斜穿规则造成的假孤立。缺文件时跳过。
-        """
-        grid = ROOT / "assets" / "nav-grid-data" / "base01_4.grid.npz"
-        if not grid.is_file():
-            self.skipTest("nav-grid-data 子模块未检出")
-        with np.load(grid, allow_pickle=False) as z:
-            cells = np.asarray(z["cells"])
+    def test_base01_snapshot_anomaly_baseline(self):
+        """帝江号固定快照：8 块、2 个孤立单格、0 个被困；不是假孤立。"""
+        cells, baseline = _load_baseline("base01_8f34d18")
         free = [[int(x), int(y)] for y, x in zip(*np.nonzero(cells == 1))]
         blocked = [[int(x), int(y)] for y, x in zip(*np.nonzero(cells == 2))]
         with tempfile.TemporaryDirectory() as tmp:
@@ -261,11 +294,11 @@ const d = GridDocument.fromSparse({{
 const b = {{ x0: 0, x1: data.shape[1] - 1, z0: 0, z1: data.shape[0] - 1 }};
 const comps = walkableComponents(d, b, strict);
 const r = walkableAnomalies(d, b);
-console.log(JSON.stringify([comps.length,
-                            comps.filter(c => c === 1).length,
-                            r.lone.length, r.trapped.length]));
+console.log(JSON.stringify({{components: comps.length,
+                            singletons: comps.filter(c => c === 1).length,
+                            lone: r.lone.length, trapped: r.trapped.length}}));
 """)
-        self.assertEqual(json.loads(out), [8, 2, 2, 0])
+        self.assertEqual(json.loads(out), baseline["anomaly_summary"])
 
     def test_reported_anomalies_are_singleton_blocks_on_real_data(self):
         """真实数据上：两组互斥，且每个报出的异常格确实都在单格块里。

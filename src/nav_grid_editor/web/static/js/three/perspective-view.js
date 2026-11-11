@@ -158,6 +158,7 @@ function regionBox(region, y, exaggeration) {
 export class PerspectiveView {
   constructor(root) {
     this.root = root;
+    this.viewport = root.querySelector("#pvViewport");
     this.canvas = root.querySelector("#pvCanvas");
     this.labelLayer = root.querySelector("#pvLabels");
     this.statusEl = root.querySelector("#pvStatus");
@@ -171,6 +172,8 @@ export class PerspectiveView {
       links: root.querySelector("#pvLinks"),
     };
     this.open = false;
+    this.loadGeneration = 0;
+    this.plateGeneration = 0;
     this.ready = false;
     this.map = "";
     this.zoom = "";
@@ -213,7 +216,7 @@ export class PerspectiveView {
   bindEvents() {
     this.controls.addEventListener("change", () => this.syncLabels());
     this.resizeObserver = new ResizeObserver(() => this.resize());
-    this.resizeObserver.observe(this.root);
+    this.resizeObserver.observe(this.viewport);
     this.groupSelect.addEventListener("change", () => {
       this.groupKey = this.groupSelect.value;
       this.rebuildPlates();
@@ -229,8 +232,8 @@ export class PerspectiveView {
 
   resize() {
     if (!this.open) return;
-    const width = this.root.clientWidth || 1;
-    const height = this.root.clientHeight || 1;
+    const width = this.viewport.clientWidth || 1;
+    const height = this.viewport.clientHeight || 1;
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
@@ -241,6 +244,7 @@ export class PerspectiveView {
   }
 
   async show({ map, zoom, tier }) {
+    const generation = ++this.loadGeneration;
     this.open = true;
     this.root.hidden = false;
     this.resize();
@@ -249,12 +253,15 @@ export class PerspectiveView {
     this.tier = tier || "";
     this.setStatus("正在加载地图与网格…");
     try {
-      await this.loadData();
+      await this.loadData(generation);
+      if (!this.open || generation !== this.loadGeneration) return;
       this.spacingInput.value = String(this.autoSpacing());
       await this.rebuildPlates();
+      if (!this.open || generation !== this.loadGeneration) return;
       this.frameScene();
       this.setStatus("");
     } catch (e) {
+      if (!this.open || generation !== this.loadGeneration) return;
       this.setStatus("加载失败: " + (e && e.message ? e.message : e));
     }
     this.renderer.setAnimationLoop(() => {
@@ -263,7 +270,7 @@ export class PerspectiveView {
     });
   }
 
-  async loadData() {
+  async loadData(generation = this.loadGeneration) {
     const [calib, layersRes, floorsRes, linksRes] = await Promise.all([
       fetch("/api/calib?" + qs({ map: this.map, zoom: this.zoom }))
         .then(r => r.json()),
@@ -274,6 +281,7 @@ export class PerspectiveView {
         .then(r => r.json()),
       fetch("/api/grid-links?" + qs({ map: this.map })).then(r => r.json()),
     ]);
+    if (!this.open || generation !== this.loadGeneration) return;
     this.calib = calib && calib.matrix ? calib : null;
     this.layers = Array.isArray(layersRes.layers) ? layersRes.layers : [];
     this.floorLayers = new Map(
@@ -404,14 +412,15 @@ export class PerspectiveView {
 
   async rebuildPlates() {
     if (!this.open) return;
+    const generation = ++this.plateGeneration;
     this.clearPlates();
     const group = this.currentGroup();
     const yMap = group ? this.groupPlateYs(group) : new Map();
     const tasks = [];
-    if (this.calib) tasks.push(this.buildBasePlate());
+    if (this.calib) tasks.push(this.buildBasePlate(generation));
     if (group) {
       for (const layer of group.layers) {
-        tasks.push(this.buildLayerPlate(layer, yMap.get(layer.id) || 0));
+        tasks.push(this.buildLayerPlate(layer, yMap.get(layer.id) || 0, generation));
       }
     }
     const linkY = tier => {
@@ -419,12 +428,13 @@ export class PerspectiveView {
       return this.plateYs.get(tier) || 0;
     };
     await Promise.all(tasks);
+    if (!this.open || generation !== this.plateGeneration) return;
     if (this.toggles.links.checked) this.buildLinks(linkY);
     this.applyVisibility();
     this.frameScene(true);
   }
 
-  async buildBasePlate() {
+  async buildBasePlate(generation) {
     const size = this.calib.image_size || {};
     const width = Number(size.width);
     const height = Number(size.height);
@@ -442,6 +452,7 @@ export class PerspectiveView {
     try {
       const texture = makeTexture(await decodeBitmap(
         "/api/overview?" + qs({ map: this.map, zoom: this.zoom }), 2048));
+      if (!this.open || generation !== this.plateGeneration) { releaseTexture(texture); return; }
       this.pendingTextures.push(texture);
       mesh = quadMesh(corners, y, new THREE.MeshBasicMaterial({
         map: texture, transparent: true, opacity: 0.94,
@@ -451,6 +462,7 @@ export class PerspectiveView {
       mesh.userData.kind = "base";
       this.plateGroup.add(mesh);
     } catch (e) {
+      if (!this.open || generation !== this.plateGeneration) return;
       this.setStatus("底图缩略图加载失败，只显示网格");
     }
     if (mesh) {
@@ -458,11 +470,12 @@ export class PerspectiveView {
       const cz = corners.reduce((sum, p) => sum + p[1], 0) / 4;
       this.addLabel(MAIN_TIER, "大地图", cx, y, cz);
     }
-    await this.buildGridFor(MAIN_TIER, corners, y);
+    await this.buildGridFor(MAIN_TIER, corners, y, generation);
+    if (!this.open || generation !== this.plateGeneration) return;
     if (this.toggles.marks.checked) this.buildMarks(MAIN_TIER, y);
   }
 
-  async buildLayerPlate(layer, y) {
+  async buildLayerPlate(layer, y, generation) {
     const bounds = layer.bounds || {};
     const west = Number(bounds.west);
     const east = Number(bounds.east);
@@ -485,6 +498,7 @@ export class PerspectiveView {
       const texture = makeTexture(await decodeBitmap(
         "/api/layer-image?" +
         qs({ map: this.map, zoom: this.zoom, tier: layer.id }), 1536));
+      if (!this.open || generation !== this.plateGeneration) { releaseTexture(texture); return; }
       this.pendingTextures.push(texture);
       mesh.material.map = texture;
       mesh.material.opacity = 0.9;
@@ -492,14 +506,16 @@ export class PerspectiveView {
     } catch (e) {
       // 拿不到官方图也要保留网格，所以这里只降级不抛错。
     }
+    if (!this.open || generation !== this.plateGeneration) return;
     this.addLabel(
       layer.id, layer.name || layer.id,
       (west + east) / 2, y, (south + north) / 2);
-    await this.buildGridFor(layer.id, corners, y);
+    await this.buildGridFor(layer.id, corners, y, generation);
+    if (!this.open || generation !== this.plateGeneration) return;
     if (this.toggles.marks.checked) this.buildMarks(layer.id, y);
   }
 
-  async buildGridFor(tierId, corners, y) {
+  async buildGridFor(tierId, corners, y, generation) {
     const xs = corners.map(point => point[0]);
     const zs = corners.map(point => point[1]);
     const tier = tierId === MAIN_TIER ? "" : tierId;
@@ -510,6 +526,7 @@ export class PerspectiveView {
     } catch (e) {
       return;
     }
+    if (!this.open || generation !== this.plateGeneration) return;
     const data = res && res.data;
     if (!data) return;
     const cells = data.cells || [];
@@ -637,8 +654,8 @@ export class PerspectiveView {
 
   syncLabels() {
     if (!this.open) return;
-    const width = this.root.clientWidth || 1;
-    const height = this.root.clientHeight || 1;
+    const width = this.viewport.clientWidth || 1;
+    const height = this.viewport.clientHeight || 1;
     const showBase = this.toggles.base.checked;
     const showLayers = this.toggles.layers.checked;
     for (const [key, label] of this.labels) {
@@ -662,6 +679,8 @@ export class PerspectiveView {
 
   close() {
     this.open = false;
+    this.loadGeneration++;
+    this.plateGeneration++;
     this.renderer.setAnimationLoop(null);
     this.clearPlates();
     this.root.hidden = true;

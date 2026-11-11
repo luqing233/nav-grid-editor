@@ -29,12 +29,13 @@ import sys
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from ..services import marks as marks_mod
 from ..services.maps import MapService, default_assets_dir
+from ..services.maps.io import image_media_type
 
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
 HOST = "127.0.0.1"
@@ -196,6 +197,55 @@ def grid2d_get(map: str = "", zoom: str = "", tier: str = "") -> JSONResponse:
     return JSONResponse({"ok": True, **_svc().get_grid2d(map, zoom, tier)})
 
 
+@app.post("/api/data-repository/sync")
+async def data_repository_sync(request: Request) -> Response:
+    req, err = await _json_body(request)
+    if err:
+        return _bad_request(err)
+    if req.get("replace_local") is not True:
+        return _bad_request("同步会用远端仓库覆盖本地数据，请明确确认")
+    result = await run_in_threadpool(_svc().sync_data_repository)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+
+@app.get("/api/pr-review/open")
+async def pr_review_open() -> JSONResponse:
+    try:
+        result = await run_in_threadpool(_svc().pr_review.list_open)
+        return JSONResponse(result)
+    except Exception as error:
+        return JSONResponse({"ok": False, "error": str(error)}, status_code=502)
+
+
+@app.get("/api/local-pr/accounts")
+async def local_pr_accounts() -> JSONResponse:
+    try:
+        return JSONResponse(await run_in_threadpool(_svc().local_pr.accounts))
+    except Exception as error:
+        return JSONResponse({"ok": False, "error": str(error)},status_code=400)
+
+
+@app.post("/api/local-pr")
+async def local_pr_action(request: Request) -> JSONResponse:
+    try:
+        body=await request.json()
+        if not isinstance(body,dict):raise ValueError("请提供发布请求")
+        service=_svc().local_pr
+        action=body.get("action")
+        if action=="prepare":
+            result=await run_in_threadpool(service.prepare,body.get("account"),body.get("paths"))
+        elif action=="publish":
+            if not isinstance(body.get("token"),str):raise ValueError("请先检查修改")
+            result=await run_in_threadpool(service.publish,body["token"],body.get("account"),body.get("title"))
+        elif action in ("status","retry"):
+            if not isinstance(body.get("id"),str):raise ValueError("缺少发布标识")
+            result=await run_in_threadpool(service.action,body["id"],action=="retry")
+        else:raise ValueError("未知发布操作")
+        return JSONResponse(result)
+    except Exception as error:
+        return JSONResponse({"ok":False,"error":str(error)},status_code=400)
+
+
 @app.post("/api/pr-review/load")
 async def pr_review_load(request: Request) -> JSONResponse:
     body = await request.json()
@@ -203,6 +253,26 @@ async def pr_review_load(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "请提供 PR 编号或链接"}, status_code=400)
     try:
         result = await run_in_threadpool(_svc().pr_review.load, body["pr"])
+        return JSONResponse(result)
+    except Exception as error:
+        return JSONResponse({"ok": False, "error": str(error)}, status_code=400)
+
+
+@app.post("/api/pr-review/merge")
+async def pr_review_merge(request: Request) -> Response:
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("请提供合并请求")
+        action = body.get("action")
+        if action == "prepare":
+            result = await run_in_threadpool(_svc().pr_review.merge_prepare, body.get("prs"))
+        elif action in ("resolve", "export", "publish", "publication_status", "merge_to_base") and isinstance(body.get("token"), str):
+            result = await run_in_threadpool(_svc().pr_review.merge_action, body["token"], action, body.get("choices"))
+            if action == "export":
+                return FileResponse(result, media_type="application/zip", filename="grid-merge.zip")
+        else:
+            raise ValueError("未知合并操作或缺少会话")
         return JSONResponse(result)
     except Exception as error:
         return JSONResponse({"ok": False, "error": str(error)}, status_code=400)
@@ -321,7 +391,7 @@ def layer_image(request: Request, map: str = "", zoom: str = "",
     if data is None:
         return Response("layer image not found", status_code=404,
                         media_type="text/plain; charset=utf-8")
-    return _cached(request, data, "image/png", max_age=86400,
+    return _cached(request, data, image_media_type(data) or "image/png", max_age=86400,
                    etag=_etag_of_bytes(data))
 
 
@@ -330,7 +400,7 @@ def tile(request: Request, map_name: str, zoom: str, filename: str) -> Response:
     # 限长 7 位：坐标本来就被 serve_tile 限制在 ±1_000_000，而不限长的话一个
     # 几千位的数字串会让 int() 抛 ValueError（Python 3.12 对 int(str) 有 4300
     # 位上限）
-    m = re.fullmatch(r"(-?\d{1,7})_(-?\d{1,7})\.png", filename)
+    m = re.fullmatch(r"(-?\d{1,7})_(-?\d{1,7})\.(?:png|webp)", filename)
     if not m:
         return Response("Not Found", status_code=404, media_type="text/plain; charset=utf-8")
     data = _svc().serve_tile(map_name, zoom, int(m.group(1)), int(m.group(2)))
@@ -340,7 +410,7 @@ def tile(request: Request, map_name: str, zoom: str, filename: str) -> Response:
     # 瓦片按坐标寻址、内容只在重抓后才变。以前 max-age=30 且没有 ETag，等于浏览
     # 过程中每 30 秒把视野里那几百张瓦片全部重下一遍；现在 5 分钟有效期 + 内容
     # ETag：有效期内一个请求都不发，过期后也只回 304。
-    return _cached(request, data, "image/png", max_age=300, etag=_etag_of_bytes(data))
+    return _cached(request, data, image_media_type(data) or "image/png", max_age=300, etag=_etag_of_bytes(data))
 
 
 @app.get("/maps/{rest:path}")
@@ -348,16 +418,16 @@ def saved_map(request: Request, rest: str) -> Response:
     root = _svc().store.tiles_root / "maps"
     cands: list[Path] = []
     # 新结构: maps/<地图>/<zoom>/<文件>.png（只保留一份）
-    nested = re.fullmatch(r"([A-Za-z0-9_\-]+)/(\d+)/([A-Za-z0-9_\-]+\.png)", rest)
+    nested = re.fullmatch(r"([A-Za-z0-9_\-]+)/(\d+)/([A-Za-z0-9_\-]+\.(?:png|webp))", rest)
     if nested:
         cands.append(root / nested.group(1) / nested.group(2) / nested.group(3))
     # 旧结构: maps/<文件>.png（兼容早期拼接输出）
-    flat = re.fullmatch(r"([A-Za-z0-9_\-]+\.png)", rest)
+    flat = re.fullmatch(r"([A-Za-z0-9_\-]+\.(?:png|webp))", rest)
     if flat:
         cands.append(root / flat.group(1))
     for p in cands:
         if p.is_file():
-            resp = _cached_file(request, p, "image/png", max_age=300)
+            resp = _cached_file(request, p, _image_type(p), max_age=300)
             if resp:
                 return resp
     return Response("map not found", status_code=404, media_type="text/plain; charset=utf-8")

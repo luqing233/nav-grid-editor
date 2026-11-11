@@ -7,6 +7,7 @@
 """
 
 import json
+from io import BytesIO
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,6 +76,21 @@ class TileMergeTest(unittest.TestCase):
         _tile(self.root, "run_20260202_000000/m/4", 1, 1, b"newer")
         got = {(x, y): f.read_bytes() for x, y, f in self.store.iter_tiles("m", "4")}
         self.assertEqual(got[(1, 1)], b"newer")
+
+    def test_mixed_formats_keep_latest_coordinate_and_remove_stale_variant(self):
+        old = _tile(self.root, "run_20260101/m/4", 0, 0, b"old png")
+        new = _tile(self.root, "run_20260202/m/4", 0, 0, b"new webp")
+        new.rename(new.with_suffix(".webp"))
+        merge_tiles(self.root)
+        self.assertEqual(self.store.tile_bytes("m", "4", 0, 0), b"new webp")
+        self.assertFalse((self.root / "latest/m/4/0_0.png").exists())
+        # A still newer PNG must replace WebP too, rather than being shadowed by it.
+        _tile(self.root, "run_20260303/m/4", 0, 0, b"newest png")
+        merge_tiles(self.root)
+        self.assertEqual(self.store.tile_bytes("m", "4", 0, 0), b"newest png")
+        self.assertFalse((self.root / "latest/m/4/0_0.webp").exists())
+        self.assertEqual(len(list(self.store.iter_tiles("m", "4"))), 1)
+        self.assertTrue(old.is_file())
 
     def test_saved_map_info_uses_merged_bounds(self):
         """已保存总图的边界要按合并后的全集算，否则前端贴图会错位。"""
@@ -165,7 +181,7 @@ class ComposeSaveSafetyTest(unittest.TestCase):
             profile_dir=self.root / "profile", grid2d_dir=self.root / "grids")
         self.td = self.root / "tiles" / "latest" / "m" / "4"
         self.td.mkdir(parents=True, exist_ok=True)
-        self.out = self.root / "tiles" / "maps" / "m" / "4" / "m_4.png"
+        self.out = self.root / "tiles" / "maps" / "m" / "4" / "m_4.webp"
         self.out.parent.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
@@ -186,10 +202,52 @@ class ComposeSaveSafetyTest(unittest.TestCase):
         self._tile(1, 0, (30, 200, 30))
         self._compose()
         with Image.open(self.out) as im:
+            self.assertEqual(im.format, "WEBP")
             self.assertEqual(im.size, (512, 256))
             self.assertEqual(im.getpixel((5, 5)), (200, 30, 30))
             self.assertEqual(im.getpixel((261, 5)), (30, 200, 30))
         self.assertFalse(list(self.out.parent.glob("*.tmp")), "临时文件没清干净")
+
+    def test_fetch_preserves_webp_bytes_even_when_url_and_mime_say_png(self):
+        buffer = BytesIO()
+        Image.new("RGB", (256, 256), (200, 30, 30)).save(buffer, "WEBP", lossless=True)
+        raw = buffer.getvalue()
+        state = FetchState(self.root / "tiles/run_test", None)
+        self.svc._save_tile(state, "https://example/tile/m/4/0_0.png", "image/png", raw)
+        target = state.session_dir / "m/4/0_0.webp"
+        self.assertEqual(target.read_bytes(), raw)
+        self.assertFalse(target.with_suffix(".png").exists())
+        self.assertEqual(state.manifest["new"], ["m/4/0_0.webp"])
+        self.svc.store.active_session_dir = state.session_dir
+        self.assertEqual(self.svc.store.tile_bytes("m", "4", 0, 0), raw)
+        self._compose()
+        self.assertTrue(self.svc.saved_map_info("m", "4")["file"].endswith(".webp"))
+        with Image.open(self.out) as composed:
+            self.assertEqual(composed.getpixel((0, 0)), (200, 30, 30))
+
+    def test_oversized_composite_does_not_resize_or_replace_existing_map(self):
+        self._tile(0, 0, (200, 30, 30))
+        self._tile(64, 0, (30, 200, 30))
+        self.out.write_bytes(b"existing map")
+        with mock.patch.object(map_service_impl.Image, "new") as create:
+            self._compose()
+        create.assert_not_called()
+        self.assertEqual(self.out.read_bytes(), b"existing map")
+
+    def test_corrupt_webp_can_retry_without_poisoning_cache(self):
+        state = FetchState(self.root / "tiles/run_test", None)
+        url = "https://example/tile/m/4/0_0.webp"
+        self.svc._save_tile(state, url, "image/webp", b"RIFF\x00\x00\x00\x00WEBPbroken")
+        self.assertEqual(state.counts["error"], 1)
+        self.assertNotIn(url, state.downloaded)
+        self.assertNotIn("m/4/0_0", state.known)
+        buffer = BytesIO()
+        Image.new("RGB", (256, 256), (10, 20, 30)).save(buffer, "WEBP", lossless=True)
+        self.svc._save_tile(state, url, "image/webp", buffer.getvalue())
+        self.assertEqual(state.counts["new"], 1)
+        state.save_manifest()
+        manifest = json.loads((state.session_dir / "manifest.json").read_text())
+        self.assertEqual(manifest["errors"], [])
 
     def test_first_tile_failure_does_not_write_1x1_image(self):
         """第一张瓦片读取失败时，绝不能把画布停在 1x1 黑图再保存出去。
@@ -233,13 +291,15 @@ class ComposeSaveSafetyTest(unittest.TestCase):
             self.assertEqual(im.size, (512, 256))
 
     def test_overview_is_much_smaller_than_the_composite(self):
-        """缩略图要真的"缩"——WebP 下同一张图比 PNG 小一个数量级。"""
-        for x in range(4):
-            self._tile(x, 0, (x * 60, 120, 200 - x * 40))
+        """用有纹理且需要缩小的总图验证预览；纯色无损 WebP 可以比预览更小。"""
+        for x in range(9):
+            Image.effect_noise((256, 256), 60).convert("RGB").save(self.td / f"{x}_0.png")
         self._compose()
         src = self.out.stat().st_size
         ov = self.svc.overview_path("m", "4").stat().st_size
         self.assertLess(ov, src, "缩略图不比总图小")
+        with Image.open(self.svc.overview_path("m", "4")) as preview:
+            self.assertLessEqual(max(preview.size), 2048)
         self.assertLessEqual(len(list(self.out.parent.glob("*.overview.*"))), 1,
                              "同时存在多份缩略图")
 

@@ -92,7 +92,8 @@ class PostBoundaryTest(_ServerMixin, unittest.TestCase):
         """body 是合法 JSON 但不是对象（[] / 3 / "x" / null）时，
         以前 req.get() 抛 AttributeError，连接被断开、没有任何 JSON。
         """
-        for path in ("/api/compose", "/api/grid2d", "/api/calib", "/api/fetch/start"):
+        for path in ("/api/compose", "/api/grid2d", "/api/calib", "/api/fetch/start",
+                     "/api/data-repository/sync"):
             for body in ("[]", "3", '"x"', "null"):
                 with self.subTest(path=path, body=body):
                     status, res = self._post_json(path, body)
@@ -136,6 +137,30 @@ class PostBoundaryTest(_ServerMixin, unittest.TestCase):
         status, raw_body, _ = self._request("/api/dataset/export/status")
         self.assertEqual(status, 200)
         self.assertIn("running", json.loads(raw_body))
+
+    def test_data_repository_sync_requires_confirmation_and_returns_result(self):
+        status, data = self._post_json("/api/data-repository/sync", {})
+        self.assertEqual(status, 400)
+        self.assertFalse(data["ok"])
+        with mock.patch.object(
+            self.svc, "sync_data_repository",
+            return_value={"ok": True, "current": "a" * 40},
+        ) as sync:
+            status, data = self._post_json(
+                "/api/data-repository/sync", {"replace_local": True}
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        sync.assert_called_once_with()
+        with mock.patch.object(
+            self.svc, "sync_data_repository",
+            return_value={"ok": False, "error": "同步已在运行中"},
+        ):
+            status, data = self._post_json(
+                "/api/data-repository/sync", {"replace_local": True}
+            )
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "同步已在运行中")
 
     def test_normal_request_still_works(self):
         """边界不能把正常请求也变成错误。"""
@@ -181,6 +206,23 @@ class ConditionalGetTest(_ServerMixin, unittest.TestCase):
     def test_composite_revalidates_with_etag(self):
         self._check_revalidation("/maps/m/4/m_4.png")
 
+    def test_webp_routes_serve_actual_mime_and_preserve_png_compatibility(self):
+        from io import BytesIO
+        from PIL import Image
+        output = BytesIO()
+        Image.new("RGB", (2, 2), (80, 80, 80)).save(output, "WEBP", lossless=True)
+        raw = output.getvalue()
+        (self.tiles / "latest/m/4/0_0.webp").write_bytes(raw)
+        (self.tiles / "maps/m/4/m_4.webp").write_bytes(raw)
+        for url in ("/tiles/m/4/0_0.webp", "/tiles/m/4/0_0.png", "/maps/m/4/m_4.webp"):
+            status, body, headers = self._request(url)
+            self.assertEqual(status, 200)
+            self.assertEqual(body, raw)
+            self.assertEqual(headers.get("Content-Type"), "image/webp")
+            self._check_revalidation(url)
+        (self.tiles / "latest/m/4/0_0.webp").unlink()
+        self.assertEqual(self._request("/tiles/m/4/0_0.webp")[1], b"tile-bytes")
+
     def test_etag_changes_when_content_changes(self):
         """ETag 必须跟着内容走：瓦片重抓后内容变了，不能还回 304。"""
         _, _, h1 = self._request("/tiles/m/4/0_0.png")
@@ -216,8 +258,12 @@ class StaticAssetsTest(_ServerMixin, unittest.TestCase):
         self.assertIn('type="importmap"', html)
         self.assertIn('id="btnPerspective"', html)
         self.assertIn('id="pvView"', html)
+        self.assertIn('id="btnRepoSync"', html)
         self.assertIn('data-mode="edit"', html)
-        self.assertIn('id="sideTabs"', html)
+        self.assertIn('id="selMap"', html)
+        self.assertIn('id="selTier"', html)
+        self.assertIn('id="resourceDialog"', html)
+        self.assertIn('id="commandDialog"', html)
         self.assertIn('id="layerGrid"', html)
 
     def test_css_and_javascript_are_served(self):
@@ -378,6 +424,7 @@ class ServiceThreadPoolTest(unittest.IsolatedAsyncioTestCase):
             (server.compose, "start_compose"),
             (server.fetch_start, "start_fetch"),
             (server.coords, "relay_coords"),
+            (server.data_repository_sync, "sync_data_repository"),
         )
         for route, method in routes:
             with self.subTest(route=route.__name__):
@@ -391,8 +438,9 @@ class ServiceThreadPoolTest(unittest.IsolatedAsyncioTestCase):
                         raise RuntimeError("事件循环未能释放保存任务")
                     return {"ok": True, "method": method}
 
+                body = b'{"replace_local":true}' if method == "sync_data_repository" else b"{}"
                 async def receive():
-                    return {"type": "http.request", "body": b"{}", "more_body": False}
+                    return {"type": "http.request", "body": body, "more_body": False}
 
                 request = server.Request({"type": "http", "method": "POST",
                                           "path": "/", "headers": []}, receive)

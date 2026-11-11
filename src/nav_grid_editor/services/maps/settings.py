@@ -115,10 +115,10 @@ DEBUG = bool(os.environ.get("NAV_DEBUG", ""))
 # map_name 会被拼进文件系统路径（session_dir / "C:/4/0_0.png" 在 Windows 上
 # 会被 pathlib 当成绝对路径、丢掉基目录），等于把写入点交给远端页面摆布。
 tile_pattern = re.compile(
-    r"/tile(?:_[^/]+)?/([A-Za-z0-9_\-]+)/(\d+)/(-?\d+)_(-?\d+)\.png"
+    r"/tile(?:_[^/]+)?/([A-Za-z0-9_\-]+)/(\d+)/(-?\d+)_(-?\d+)\.(?:png|webp)"
 )
 # 瓦片文件名: x_y.png
-TILE_FILE_PATTERN = re.compile(r"^(-?\d+)_(-?\d+)\.png$")
+TILE_FILE_PATTERN = re.compile(r"^(-?\d+)_(-?\d+)\.(?:png|webp)$")
 
 #: 地图名同时用作目录名/文件名，统一在这里把关
 MAP_NAME_RE = re.compile(r"[A-Za-z0-9_\-]+")

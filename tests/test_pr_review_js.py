@@ -13,7 +13,7 @@ class PRReviewJsTest(unittest.TestCase):
     def test_stale_mapping_request_cannot_replace_restored_calibration(self):
         script=f"""
 import assert from 'node:assert/strict';import fs from 'node:fs';import vm from 'node:vm';
-const source=fs.readFileSync({json.dumps((JS/'map_composer.js').as_posix())},'utf8');
+const source=fs.readFileSync({json.dumps((JS/'map_composer.js').as_posix())},'utf8').replace(/\\r\\n/g,'\\n');
 const start=source.indexOf('async function loadMappingForCurrent()');
 const pending=[],noop=()=>{{}};
 const c={{state:{{activeKey:'map02@4'}},calib:{{}},calibHistory:{{undo:[],redo:[]}},lastPos:null,

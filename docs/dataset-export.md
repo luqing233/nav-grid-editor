@@ -15,10 +15,15 @@
 需要更新现有 nav-grid-data 仓库时，把导出目录作为完整目标快照，对照旧版本复制变化文件，
 显式审查需要删除的旧资源；不要只叠加新文件而留下已移除的 grid。工具不自动 commit/push。
 
-原始彩色素材仍在编辑器的数据目录内；发布包中所有 PNG 转成原分辨率 8 位单通道灰度。
-主图使用 OpenCV IMREAD_GRAYSCALE，分层按 IMREAD_UNCHANGED 读取后 BGR/BGRA2GRAY，
-alpha==0 的像素置零，2D 灰度原样。不缩放或重采样，不能用 Pillow convert('L') 替代而假定逐像素相同。
+原始彩色素材仍在编辑器的数据目录内；发布包图片统一保存为原分辨率彩色 WebP Q90，
+使用 Pillow `quality=90, method=4, lossless=False`，RGB 或 RGBA。不转灰度、不缩放或重采样，
+楼层图保留原 alpha，逐像素验证 alpha 无损；不把透明背景压成黑色。RGB 为有损编码，不声称逐像素相等。
 NPZ 保持原始字节，JSON 输出规范 UTF-8/LF 后计算 SHA-256。
+旧 PNG 输入继续兼容；同名主图优先选择 WebP。清单字段及 schema_version 不变，
+catalog.path / filename、mapping.map_name、manifest 和 dataset 中的路径同步指向实际 WebP，摘要按输出重算。
+消费端按清单取图，以 OpenCV IMREAD_COLOR 读取基础图、IMREAD_UNCHANGED 读取含 alpha 的楼层图；
+不得再强制单通道灰度或 RGB 三通道相同。截图中纯白及周围 2 px 的蒙版由定位算法处理，不写入地图资源。
+WebP 单边上限 16383 像素，超限拒绝整个导出，不做隐式缩放。发布时 WebP 同样纳入 Git LFS。
 
 ## 目录与内层格式
 
@@ -32,10 +37,10 @@ nav-grid-data/
   <map>__<tier>_<zoom>.grid.npz          分层网格
   localization/
     manifest.json                      既有定位清单，不更换其schema
-    maps/<map>/4/<map>_4.png
+    maps/<map>/4/<map>_4.webp
     maps/<map>/4/<map>_4_mapping.json
     layers/catalog.json
-    layers/<map>/<level>/<tier>.png
+    layers/<map>/<level>/<tier>.webp
 ```
 
 网格继续使用 magic=okef-nav-grid/schema_version=2：cells[z,x] 为二维 uint8，
@@ -68,12 +73,12 @@ zoom 是字符串资源档次，和 NPZ 的 cell_size 无换算关系。当前�
 visual 为 null（仅网格），或以下二选一：
 
 ```json
-{"kind":"base","image":"localization/maps/map02/4/map02_4.png",
+{"kind":"base","image":"localization/maps/map02/4/map02_4.webp",
  "mapping":"localization/maps/map02/4/map02_4_mapping.json"}
 ```
 
 ```json
-{"kind":"layer","image":"localization/layers/map02/map02_lv005/scene_map02_lv005_layer_tips_7.png",
+{"kind":"layer","image":"localization/layers/map02/map02_lv005/scene_map02_lv005_layer_tips_7.webp",
  "catalog_entry":"scene_map02_lv005_layer_tips_7"}
 ```
 
@@ -116,21 +121,21 @@ inverse_new = T(dx,dy) * inverse_old
 ```
 
 同时更新 image_size 和控制点像素位置。只在右/下扩边且旧像素位置不变时矩阵可不变，尺寸仍须更新。
-有缩放/旋转时使用实际变换的逆矩阵；不要把 PNG 向下的像素行与网格向上的正 Z 混为一谈。
-分层沿用官方 bounds；其尺寸/bounds/PNG 要一起核对。整个 PNG bounds 不等于已经绘制的地形覆盖。
+有缩放/旋转时使用实际变换的逆矩阵；不要把图片向下的像素行与网格向上的正 Z 混为一谈。
+分层沿用官方 bounds；其尺寸/bounds/图片要一起核对。整个图片 bounds 不等于已经绘制的地形覆盖。
 
 ## 最小上传集合
 
 | 变化 | 本次 Git 提交至少包含 |
 |---|---|
-| 通行或阻挡笔画 | 变化的 NPZ + dataset.json；未变化的 PNG 不重复上传 |
+| 通行或阻挡笔画 | 变化的 NPZ + dataset.json；未变化的图片不重复上传 |
 | 只改高度区间 | 带该 floor_regions 的 NPZ + dataset.json |
-| 主图扩区域 | PNG与mapping成对更新 + 定位manifest + dataset；网格范围也扩时追加相应NPZ |
-| 分层图片变化 | PNG + 同步后的catalog + 定位manifest + dataset |
+| 主图扩区域 | 图片与mapping成对更新 + 定位manifest + dataset；网格范围也扩时追加相应NPZ |
+| 分层图片变化 | 图片 + 同步后的catalog + 定位manifest + dataset |
 | 新增层 | 完整levels与相关catalog；实际已有图片/网格才增加对应文件；需要跨层时追加links |
 | 连接变化 | links + dataset；所有端点引用的网格必须在完整目标快照中存在 |
 
-首次上传还须包含导出的 .gitattributes。PNG/NPZ 使用 Git LFS；普通 JSON 使用文本/LF，便于审查，
+首次上传还须包含导出的 .gitattributes。WebP/PNG/NPZ 使用 Git LFS；普通 JSON 使用文本/LF，便于审查，
 先固定最终字节再生成清单。不要用 GitHub 网页逐文件上传来替代 LFS 实体上传。
 
 每个提交描述完整快照；Git/LFS 按变化文件传输，不另做手工 patch 格式。
@@ -141,7 +146,7 @@ AnyLabeling 模板仓不负责同步本数据。
 
 ## 校验与验收边界
 
-导出器检查原 PNG 与标定尺寸、矩阵有限且互逆、分层目录与图片匹配、网格文件名和meta身份、
+导出器检查原图片与标定尺寸、矩阵有限且互逆、分层目录与图片匹配、网格文件名和meta身份、
 连接端点网格/zoom引用、层声明、hash与资源引用闭包。floor_regions 也必须通过保存时同源的严格校验：六个字段齐全、数值有限、区间有序；cells 子矩形维度/数值/区间合法；最多256个区域，每个区域最多50,000个子矩形。坏元数据会拒绝整个导出，不会丢弃或改写后继续发布。先复制输入再生成，交付前复核输入文件集合和摘要；
 源数据变化会中止。任务结束前不交付正式目录，非空目标不会被删除或覆盖。
 

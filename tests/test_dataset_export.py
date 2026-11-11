@@ -1,4 +1,4 @@
-"""Snapshot integrity, grayscale fidelity and non-destructive publication."""
+"""Snapshot integrity, color/alpha retention and non-destructive publication."""
 
 import json
 import tempfile
@@ -78,7 +78,7 @@ class DatasetExportTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         return target, self.wait()
 
-    def test_complete_snapshot_preserves_grids_and_runtime_gray_pixels(self):
+    def test_complete_snapshot_preserves_grids_color_and_alpha(self):
         source_bytes = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
         out, status = self.run_export()
         self.assertIsNone(status["error"], status)
@@ -94,15 +94,23 @@ class DatasetExportTest(unittest.TestCase):
         self.assertEqual(export._json(out / "localization/layers/catalog.json")["missing_logic_ids"], ["missing_layer"])
         for key in ("m_4.grid.npz", "m__layer_4.grid.npz"):
             self.assertEqual((out / key).read_bytes(), (self.grids / key).read_bytes())
-        expected = cv2.cvtColor(self.bgra, cv2.COLOR_BGRA2GRAY)
-        expected[self.bgra[:, :, 3] == 0] = 0
-        images = (("maps/m/4/m_4.png", export._read_image(self.base, cv2.IMREAD_GRAYSCALE)),
-                  ("layers/m/lv/layer.png", expected),
-                  ("layers/m/lv/indie.png", np.full((4, 5), 70, np.uint8)))
-        for name, expected in images:
+        images = ("maps/m/4/m_4.webp", "layers/m/lv/layer.webp", "layers/m/lv/indie.webp")
+        for name in images:
             path = out / "localization" / name
-            self.assertEqual(path.read_bytes()[24:26], b"\x08\x00")
-            np.testing.assert_array_equal(export._read_image(path, cv2.IMREAD_UNCHANGED), expected)
+            self.assertEqual(path.read_bytes()[8:12], b"WEBP")
+            decoded = export._read_image(path, cv2.IMREAD_UNCHANGED)
+            self.assertEqual(decoded.shape[:2], (4, 5))
+        base = export._read_image(out / "localization" / images[0], cv2.IMREAD_COLOR)
+        self.assertFalse(np.array_equal(base[:, :, 0], base[:, :, 2]), "彩色主图变成了灰度")
+        layer = export._read_image(out / "localization" / images[1], cv2.IMREAD_UNCHANGED)
+        self.assertEqual(layer.shape[2], 4)
+        np.testing.assert_array_equal(layer[:, :, 3], self.bgra[:, :, 3])
+        self.assertFalse(np.array_equal(layer[:, :, 0], layer[:, :, 2]), "彩色楼层变成了灰度")
+        manifest = export._json(out / "localization/manifest.json")
+        self.assertIn("quality=90 method=4", manifest["provenance"]["processing"])
+        catalog = export._json(out / "localization/layers/catalog.json")
+        self.assertTrue(all(row["path"].endswith(".webp") for row in catalog["layers"]))
+        self.assertIn("*.webp filter=lfs", (out / ".gitattributes").read_text())
         for path, raw in source_bytes.items():
             self.assertEqual(path.read_bytes(), raw, str(path))
         self.assertFalse((out / ".inputs").exists())
@@ -119,10 +127,31 @@ class DatasetExportTest(unittest.TestCase):
         self.assertEqual(sentinel.read_bytes(), b"keep")
         self.assertFalse(list(self.root.glob(".*.export-*")))
 
+    def test_webp_source_preferred_over_legacy_png_and_manifest_paths_match(self):
+        from PIL import Image
+        source = self.base.with_suffix(".webp")
+        # Distinct content proves the exporter selects the new file over stale PNG.
+        Image.new("RGB", (5, 4), (80, 80, 80)).save(source, "WEBP", lossless=True)
+        mapping_path = self.base.with_name("m_4_mapping.json")
+        mapping = export._json(mapping_path)
+        mapping["map_name"] = "m_4.png"
+        export._write_json(mapping_path, mapping)
+        out, status = self.run_export()
+        self.assertIsNone(status["error"], status)
+        manifest = export._json(out / "localization/manifest.json")
+        base = manifest["base_maps"][0]
+        self.assertEqual(base["image"], "maps/m/4/m_4.webp")
+        pixels = export._read_image(out / "localization" / base["image"], cv2.IMREAD_GRAYSCALE)
+        np.testing.assert_array_equal(pixels, np.full((4, 5), 80, np.uint8))
+        self.assertEqual(export._json(out / "localization" / base["mapping"])["map_name"], "m_4.webp")
+        self.assertEqual(export._json(mapping_path)["map_name"], "m_4.png")
+        self.assertEqual(manifest["schema_version"], 1)
+        export.verify_dataset(out)
+
     def test_empty_target_is_published_only_after_validation(self):
         target = self.root / "empty"
         target.mkdir()
-        with mock.patch.object(export, "_gray_png", side_effect=ValueError("decode failed")):
+        with mock.patch.object(export, "_color_webp", side_effect=ValueError("decode failed")):
             _, status = self.run_export(target)
         self.assertIn("decode failed", status["error"])
         self.assertTrue(target.is_dir())
@@ -142,7 +171,7 @@ class DatasetExportTest(unittest.TestCase):
         self.assertFalse(out.exists())
 
     def test_changed_source_or_new_grid_aborts_frozen_snapshot(self):
-        original = export._gray_png
+        original = export._color_webp
         for add_file in (False, True):
             with self.subTest(add_file=add_file):
                 changed = False
@@ -155,20 +184,20 @@ class DatasetExportTest(unittest.TestCase):
                         else:
                             self.mapping.write_text(self.mapping.read_text() + " ", encoding="utf-8")
                     return original(*args, **kwargs)
-                with mock.patch.object(export, "_gray_png", side_effect=change):
+                with mock.patch.object(export, "_color_webp", side_effect=change):
                     out, status = self.run_export()
                 self.assertIsNotNone(status["error"])
                 self.assertFalse(out.exists())
 
     def test_duplicate_jobs_and_cross_instance_target_lock(self):
         entered, release = threading.Event(), threading.Event()
-        original = export._gray_png
+        original = export._color_webp
         def paused(*args, **kwargs):
             entered.set()
             self.assertTrue(release.wait(10))
             return original(*args, **kwargs)
         target = self.root / "output"
-        with mock.patch.object(export, "_gray_png", side_effect=paused):
+        with mock.patch.object(export, "_color_webp", side_effect=paused):
             try:
                 self.assertTrue(self.job.start(str(target))["ok"])
                 self.assertTrue(entered.wait(5))
@@ -196,12 +225,12 @@ class DatasetExportTest(unittest.TestCase):
 
     def test_destination_populated_during_export_is_not_deleted(self):
         target = self.root / "output"
-        original = export._gray_png
+        original = export._color_webp
         def occupy(*args, **kwargs):
             target.mkdir(exist_ok=True)
             (target / "keep.txt").write_text("keep", encoding="utf-8")
             return original(*args, **kwargs)
-        with mock.patch.object(export, "_gray_png", side_effect=occupy):
+        with mock.patch.object(export, "_color_webp", side_effect=occupy):
             _, status = self.run_export(target)
         self.assertIsNotNone(status["error"])
         self.assertEqual((target / "keep.txt").read_text(), "keep")

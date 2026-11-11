@@ -6,7 +6,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from .io import _log, _path_lock, _replace_with_retry, _unique_tmp
+from .io import _log, _path_lock, _replace_with_retry, _unique_tmp, preferred_image
 from .settings import RUN_PREFIX, TILE_FILE_PATTERN, valid_map_zoom
 
 
@@ -58,8 +58,8 @@ class TileStore:
 
     def tile_bytes(self, map_name: str, zoom: str, x: int, y: int) -> bytes | None:
         for d in self._compose_candidates(map_name, zoom):
-            f = d / f"{x}_{y}.png"
-            if f.is_file():
+            f = preferred_image(d, f"{x}_{y}")
+            if f is not None:
                 try:
                     return f.read_bytes()
                 except OSError as e:
@@ -113,7 +113,7 @@ class TileStore:
             if not d.is_dir():
                 continue
             try:
-                entries = list(d.iterdir())
+                entries = sorted(d.iterdir(), key=lambda p: (p.suffix != ".webp", p.name))
             except OSError as e:
                 _log(f"读取瓦片目录失败 {d}: {e}")
                 continue
@@ -171,11 +171,13 @@ def merge_tiles(tiles_root: Path, run_prefix: str = RUN_PREFIX) -> dict:
                 continue
             dest = latest / rel / f.name
             dest.parent.mkdir(parents=True, exist_ok=True)
+            alternate = dest.with_suffix(".png" if dest.suffix == ".webp" else ".webp")
             if dest.exists():
                 # 先比大小（不等必然不同，省掉一次全量读取），再比字节
                 if (dest.stat().st_size == f.stat().st_size
                         and dest.read_bytes() == f.read_bytes()):
                     stats["unchanged"] += 1
+                    alternate.unlink(missing_ok=True)
                     continue
                 stats["updated"] += 1
             else:
@@ -191,6 +193,7 @@ def merge_tiles(tiles_root: Path, run_prefix: str = RUN_PREFIX) -> dict:
                 except Exception:
                     tmp.unlink(missing_ok=True)
                     raise
+            alternate.unlink(missing_ok=True)
             stats["copied"] += 1
     return stats
 

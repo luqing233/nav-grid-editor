@@ -119,7 +119,105 @@ class PRSnapshotTest(unittest.TestCase):
             with self.assertRaises(ValueError):svc._read("a"*40,"../outside",root/"cache")
 
 
+class OpenPRListTest(unittest.TestCase):
+    def service(self):
+        return DataPRReview(Path("unused"), Path("unused"))
+
+    def test_lists_every_page_including_drafts_and_deduplicates(self):
+        svc = self.service()
+        def pr(number, **kwargs):
+            return dict(number=number, title=f"PR {number}", state="open",
+                        html_url=f"https://github.com/owner/data/pull/{number}", **kwargs)
+        pages = [[pr(n) for n in range(1, 101)],
+                 [pr(100), pr(101, draft=True), {**pr(102), "state": "closed"}]]
+        with patch.object(svc, "_git", return_value=b"git@github.com:owner/data.git\n") as git, \
+             patch.object(svc, "_github_request", side_effect=pages) as github:
+            result = svc.list_open()
+        self.assertEqual(result["repository"], "owner/data")
+        self.assertEqual([item["number"] for item in result["pulls"]], list(range(101, 0, -1)))
+        self.assertTrue(result["pulls"][0]["draft"])
+        self.assertEqual(set(result["pulls"][0]), {"number", "title", "url", "draft"})
+        self.assertIn("state=open", github.call_args_list[0].args[0])
+        self.assertTrue(github.call_args_list[1].args[0].endswith("per_page=100&page=2"))
+        git.assert_called_once_with("remote", "get-url", "origin")
+
+    def test_empty_list_and_failure_are_distinct(self):
+        svc = self.service()
+        with patch.object(svc, "_git", return_value=b"https://github.com/owner/data.git"), \
+             patch.object(svc, "_github_request", return_value=[]):
+            self.assertEqual(svc.list_open()["pulls"], [])
+        with patch.object(svc, "_git", return_value=b"https://github.com/owner/data.git"), \
+             patch.object(svc, "_github_request", side_effect=ValueError("limited")):
+            with self.assertRaisesRegex(ValueError, "limited"):
+                svc.list_open()
+
+    def test_rejects_non_github_repository_without_network(self):
+        svc = self.service()
+        with patch.object(svc, "_git", return_value=b"https://example.com/data"), \
+             patch.object(svc, "_github_request") as github:
+            with self.assertRaisesRegex(ValueError, "GitHub"):
+                svc.list_open()
+            github.assert_not_called()
+
+    def test_later_page_error_does_not_return_incomplete_list(self):
+        svc = self.service()
+        with patch.object(svc, "_repository_name", return_value="owner/data"), \
+             patch.object(svc, "_github_request", side_effect=[[{"state": "closed"}] * 100, ValueError("page failed")]):
+            with self.assertRaisesRegex(ValueError, "page failed"):
+                svc.list_open()
+
+
 class PRReviewApiTest(_ServerMixin, unittest.TestCase):
+    def test_merge_api_validates_requests_and_exports_zip(self):
+        with tempfile.TemporaryDirectory() as temp:
+            svc=MapService(data_root=Path(temp))
+            self._start_server(svc)
+            try:
+                for body in ([],{},dict(action="export"),dict(action="bogus")):
+                    code,data=self._post_json("/api/pr-review/merge",body)
+                    self.assertEqual(code,400)
+                expected=dict(ok=True,token="session",files=[],ready=False)
+                with patch.object(svc.pr_review,"merge_prepare",return_value=expected) as prepare:
+                    code,data=self._post_json("/api/pr-review/merge",dict(action="prepare",prs=["1","2"]))
+                    self.assertEqual(code,200);self.assertEqual(data,expected)
+                    prepare.assert_called_once_with(["1","2"])
+                with patch.object(svc.pr_review,"merge_action",return_value=expected) as resolve:
+                    code,data=self._post_json("/api/pr-review/merge",dict(action="resolve",token="session",choices={"a":"incoming"}))
+                    self.assertEqual(code,200)
+                    resolve.assert_called_once_with("session","resolve",{"a":"incoming"})
+                for action in ("publish","publication_status","merge_to_base"):
+                    with patch.object(svc.pr_review,"merge_action",return_value=dict(ok=True,phase="checking",running=True)) as publish:
+                        code,data=self._post_json("/api/pr-review/merge",dict(action=action,token="session"))
+                        self.assertEqual(code,200);self.assertTrue(data["running"])
+                        publish.assert_called_once_with("session",action,None)
+                archive=Path(temp)/"result.zip";archive.write_bytes(b"PK-test")
+                with patch.object(svc.pr_review,"merge_action",return_value=archive):
+                    code,body,headers=self._request("/api/pr-review/merge",data=json.dumps(dict(action="export",token="session")).encode(),headers={"Content-Type":"application/json"})
+                    self.assertEqual(code,200);self.assertEqual(body,b"PK-test")
+                with patch.object(svc.pr_review,"merge_action",side_effect=ValueError("过期")):
+                    code,data=self._post_json("/api/pr-review/merge",dict(action="export",token="expired"))
+                    self.assertEqual(code,400);self.assertIn("过期",data["error"])
+            finally:self._stop_server()
+
+    def test_open_pr_endpoint_returns_list_and_reports_errors(self):
+        with tempfile.TemporaryDirectory() as temp:
+            svc = MapService(data_root=Path(temp))
+            self._start_server(svc)
+            try:
+                expected = dict(ok=True, repository="owner/data", pulls=[dict(number=3, title="Test", draft=False)])
+                with patch.object(svc.pr_review, "list_open", return_value=expected) as listing:
+                    code, body, _ = self._request("/api/pr-review/open")
+                    self.assertEqual(code, 200)
+                    self.assertEqual(json.loads(body), expected)
+                    listing.assert_called_once_with()
+                with patch.object(svc.pr_review, "list_open", side_effect=ValueError("GitHub unavailable")):
+                    code, body, _ = self._request("/api/pr-review/open")
+                    self.assertEqual(code, 502)
+                    self.assertFalse(json.loads(body)["ok"])
+                    self.assertIn("GitHub", json.loads(body)["error"])
+            finally:
+                self._stop_server()
+
     def test_load_endpoint_validates_input_and_returns_read_only_snapshot(self):
         with tempfile.TemporaryDirectory() as temp:
             svc=MapService(data_root=Path(temp))

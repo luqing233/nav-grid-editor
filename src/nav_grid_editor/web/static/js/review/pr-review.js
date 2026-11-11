@@ -1,5 +1,6 @@
 import { GridRasterCache } from "../grid/grid-raster-cache.js";
 import { TRANSITIONS, STATE_NAMES, regionsOf, snapshotDocument, transitionAt } from "./model.js";
+import { initMergeReview } from "./merge-review.js";
 
 const element = (tag, text, className) => {
   const node = document.createElement(tag);
@@ -19,6 +20,9 @@ export function initPRReview(host) {
       <button id="prReviewClose" class="pr-review-icon" type="button" aria-label="关闭审阅" title="关闭审阅（Esc）">×</button>
     </div>
     <div class="pr-review-loader">
+      <label for="prReviewOpenSelect">打开的 PR</label>
+      <div class="pr-review-input-row"><select id="prReviewOpenSelect" aria-describedby="prReviewListStatus" disabled><option value="">正在获取 PR 列表…</option></select><button id="prReviewRefresh" type="button" title="刷新 open PR 列表" aria-label="刷新 open PR 列表">刷新</button></div>
+      <div id="prReviewListStatus" role="status"></div>
       <label for="prReviewInput">PR 链接或编号</label>
       <div class="pr-review-input-row"><input id="prReviewInput" placeholder="编号或 GitHub PR 链接" value="2" autocomplete="off" spellcheck="false"><button id="prReviewLoad" type="button" aria-label="加载 data PR">加载 <span aria-hidden="true">↵</span></button></div>
       <div id="prReviewStatus" role="status">输入 PR，开始地图审阅。</div>
@@ -41,7 +45,7 @@ export function initPRReview(host) {
   const dock = element("section", undefined, "pr-review-dock");
   dock.id="prReviewDock";dock.hidden=true;dock.setAttribute("aria-label","地图对比工具");
   dock.innerHTML=`<div class="pr-review-dock-main">
-      <div class="pr-review-views" role="group" aria-label="对比视图"><button data-pr-view="diff" title="地图差异（1）">地图差异</button><button data-pr-view="before" title="修改前（2）">修改前</button><button data-pr-view="after" title="修改后（3）">修改后</button></div>
+      <div class="pr-review-views" role="group" aria-label="对比视图"><button data-pr-view="diff" title="地图差异（1）">地图差异</button><button data-pr-view="before" title="修改前（2）">修改前</button><button data-pr-view="after" title="修改后（3）">修改后</button><button data-pr-view="ancestor" hidden>共同祖先</button><button data-pr-view="current" hidden>当前主线</button><button data-pr-view="incoming" hidden>此 PR</button><button data-pr-view="result" hidden>合并结果</button></div>
       <div class="pr-review-navigation"><button id="prReviewPrev" class="pr-review-icon" aria-label="上一个变化区" title="上一个变化区（K）">←</button><span id="prReviewRegionCount"></span><button id="prReviewNext" class="pr-review-icon" aria-label="下一个变化区" title="下一个变化区（J）">→</button><button id="prReviewFocus" class="pr-review-icon" aria-label="定位变化区" title="定位变化区（F）">⌖</button></div>
     </div><div class="pr-review-dock-detail">
       <label class="pr-review-opacity">透明度<input id="prReviewOpacity" aria-label="叠加透明度" type="range" min="0" max="1" step="0.05" value="0.8"><output id="prReviewOpacityValue">80%</output></label>
@@ -61,8 +65,91 @@ export function initPRReview(host) {
   let lookup = new Map(), documents = {}, diffToken = {}, checks = null, checksError = "";
   let diagnosticTimer = null, diffChunks = new Map();
   let worker = null, controller = null, selection = 0, closed = true, active = false;
+  let listController = null, listGeneration = 0;
   const status = (text, tone="neutral") => { $("prReviewStatus").textContent=text;$("prReviewStatus").dataset.tone=tone; };
   const number=value=>value.toLocaleString("zh-CN");
+  function mergeViews(enabled) {
+    for(const button of dock.querySelectorAll("[data-pr-view]")) {
+      const key=button.dataset.prView;
+      button.hidden=key!=="diff" && (enabled ? ["before","after"].includes(key) : !["before","after"].includes(key));
+    }
+  }
+  const mergeUI=initMergeReview(panel,{
+    exit:()=>void load(),
+    begin(){generation++;selection++;controller?.abort();worker?.terminate();clearTimeout(diagnosticTimer);
+      $("prReviewLoad").disabled=false;$("prReviewLoad").textContent="加载 ↵";panel.removeAttribute("aria-busy");},
+    render:()=>host.render(),
+    focus(conflict){
+      const found=regions.findIndex(r=>r.conflict_id===conflict.id);
+      const fallback=regions.findIndex(r=>report.files[r.fileIndex].path===conflict.path);
+      if(found>=0 || fallback>=0)void selectRegion(found>=0?found:fallback);
+    },
+    async result(data){
+      const request=++generation;
+      if(!host.canOpen())throw new Error("请先结束正在进行的编辑操作");
+      if(!active){await host.activate();active=true;}
+      if(closed || request!==generation)return;
+      report=data;regions=regionsOf(report,host.mapLabel);file=null;checks=null;checksError="";index=0;
+      document.body.classList.add("pr-review-active");
+      $("prReviewHeading").textContent="网格三方合并";$("prReviewContent").hidden=false;dock.hidden=!regions.length;
+      $("prReviewLink").textContent=data.prs.map(p=>"#"+p.number).join(" → ");$("prReviewLink").removeAttribute("href");
+      $("prReviewCounts").textContent=`${data.changed_paths.length} 个文件 · ${data.unresolved} 个未解决冲突`;
+      $("prReviewRevision").textContent=`目标 ${data.branch} @ ${data.target}\n`+data.prs.map(p=>`#${p.number} 祖先 ${p.base.slice(0,8)} · PR ${p.head.slice(0,8)}`).join("\n");
+      $("prReviewRegions").disabled=!regions.length;
+      $("prReviewRegions").replaceChildren(...regions.map((r,i)=>new Option(`${i+1}. ${r.conflict_id?"冲突 · ":""}${r.label}`,String(i))));
+      mergeViews(true);setView("result");renderChecks();
+      worker?.terminate();clearTimeout(diagnosticTimer);
+      if(regions.length){
+        const job=new Worker(new URL("./checks-worker.js",import.meta.url),{type:"module"});worker=job;
+        const finish=(result,error)=>{job.terminate();if(closed||request!==generation)return;
+          clearTimeout(diagnosticTimer);worker=null;checks=result?.files || null;checksError=error || result?.error || "";renderSummary();};
+        job.onmessage=({data})=>finish(data);job.onerror=e=>finish(null,e.message);
+        diagnosticTimer=setTimeout(()=>finish(null,"检查超时，请重新预览"),60000);
+        job.postMessage(data.files.map(f=>({before:f.current,after:f.result})));await selectRegion(0);
+      }else{$("prReviewSummary").textContent="本次仅包含非网格文件变化；请检查冲突列表。";host.render();}
+    },
+  });
+
+  function syncOpenSelection(value = $("prReviewInput").value) {
+    const match = String(value).trim().match(/^(?:#)?(\d+)$|\/pull\/(\d+)(?:\/|$)/);
+    const selected = match ? match[1] || match[2] : "";
+    $("prReviewOpenSelect").value = [...$("prReviewOpenSelect").options].some(option => option.value === selected) ? selected : "";
+    $("prReviewOpenSelect").title = $("prReviewOpenSelect").selectedOptions[0]?.textContent || "选择 open PR";
+  }
+
+  async function refreshOpenPRs() {
+    const request = ++listGeneration;
+    listController?.abort();
+    listController = new AbortController();
+    const select = $("prReviewOpenSelect"), message = $("prReviewListStatus");
+    select.disabled = true;
+    $("prReviewRefresh").disabled = true;
+    select.replaceChildren(new Option("正在获取 PR 列表…", ""));
+    message.textContent = "";
+    try {
+      const response = await fetch("/api/pr-review/open", { signal: listController.signal, cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || "HTTP " + response.status);
+      if (closed || request !== listGeneration) return;
+      if (!Array.isArray(data.pulls)) throw new Error("PR 列表格式无效");
+      select.replaceChildren(new Option(data.pulls.length ? "选择待审阅 PR…" : "当前没有 open 的 PR", ""));
+      for (const pr of data.pulls) {
+        const option = new Option(`#${pr.number} ${pr.title}${pr.draft ? "（草稿）" : ""}`, String(pr.number));
+        option.title = option.textContent;
+        select.append(option);
+      }
+      select.disabled = !data.pulls.length;
+      message.textContent = `${data.repository} · ${data.pulls.length} 个 open PR`;
+      mergeUI.offer(data.pulls);
+      syncOpenSelection();
+    } catch (error) {
+      if (closed || request !== listGeneration || error.name === "AbortError") return;
+      select.replaceChildren(new Option("列表获取失败", ""));
+      message.textContent = "获取失败：" + error.message + "；可刷新或手动输入 PR。";
+    } finally {
+      if (request === listGeneration) $("prReviewRefresh").disabled = false;
+    }
+  }
 
   function setCollapsed(collapsed) {
     panel.classList.toggle("is-collapsed",collapsed);
@@ -98,7 +185,7 @@ export function initPRReview(host) {
 
   function buildRasters() {
     raster.clear(); documents = {};
-    for (const side of ["before", "after"]) {
+    for (const side of (report?.token ? ["ancestor", "current", "incoming", "result"] : ["before", "after"])) {
       documents[side] = snapshotDocument(file, side);
     }
     diffToken = {}; lookup = new Map();
@@ -142,7 +229,7 @@ export function initPRReview(host) {
   function renderSummary() {
     const summary=$("prReviewSummary");summary.replaceChildren();
     if (!file) return;
-    summary.append(element("div",file.path,"pr-review-file"));
+    summary.append(element("div",file.path+(file.contributors?" · PR "+file.contributors.map(n=>"#"+n).join(" + "):(file.pr?` · PR #${file.pr}`:"")),"pr-review-file"));
     const diagnostic=checks?.[regions[index]?.fileIndex];
     const metrics=element("div",undefined,"pr-review-metrics");
     const metric=(label,value)=>{const item=element("div");item.append(element("strong",value),element("span",label));metrics.append(item);};
@@ -199,13 +286,14 @@ export function initPRReview(host) {
       status(`正在定位 ${index+1}/${regions.length}…`);
       const ready = await host.select(file,regions[index].bounds,()=>request===selection && current===generation && !closed);
       if (request!==selection || current!==generation || closed) return;
-      status(ready===false ? "当前地图没有可用底图或标定；检查摘要仍可查看" : `只读审阅 · 变化区 ${index+1}/${regions.length}`,ready===false?"warning":"ready");
+      status(ready===false ? "当前地图没有可用底图或标定；检查摘要仍可查看" : `${report.token?"合并预览":"只读审阅"} · 变化区 ${index+1}/${regions.length}`,ready===false?"warning":"ready");
       host.render();
     } catch(error) { if (request===selection && !closed) status("定位失败："+error.message); }
   }
 
   async function load() {
     if (!host.canOpen()) { status("请先结束正在进行的编辑操作");return; }
+    mergeUI.reset();mergeViews(false);if(!["diff","before","after"].includes(view))setView("diff");
     const request=++generation;
     controller?.abort();worker?.terminate();clearTimeout(diagnosticTimer);
     controller=new AbortController();
@@ -220,6 +308,7 @@ export function initPRReview(host) {
       if (!active) { await host.activate();active=true; }
       report=data;regions=regionsOf(report,host.mapLabel);file=null;checks=null;checksError="";index=0;
       preferences.pr=String(data.number);remember();
+      syncOpenSelection(data.number);
       document.body.classList.add("pr-review-active");
       $("prReviewHeading").textContent=`PR #${data.number} 审阅`;
       $("prReviewContent").hidden=false;
@@ -263,6 +352,15 @@ export function initPRReview(host) {
   }
 
   $("prReviewLoad").onclick=load;
+  $("prReviewRefresh").onclick=refreshOpenPRs;
+  $("prReviewOpenSelect").onchange=()=>{
+    const value = $("prReviewOpenSelect").value;
+    if (!value) return;
+    $("prReviewInput").value=value;
+    syncOpenSelection();
+    void load();
+  };
+  $("prReviewInput").oninput=()=>syncOpenSelection();
   $("prReviewInput").onkeydown=event=>{if(event.key==="Enter"&&!$("prReviewLoad").disabled)void load();};
   $("prReviewRegions").onchange=event=>void selectRegion(Number(event.target.value));
   $("prReviewPrev").onclick=()=>void selectRegion(index-1);
@@ -278,12 +376,12 @@ export function initPRReview(host) {
   $("prReviewCollapse").onclick=()=>setCollapsed(!panel.classList.contains("is-collapsed"));
   for(const surface of [panel,dock])for(const type of ["pointerdown","pointermove","pointerup","wheel","dblclick","contextmenu"])surface.addEventListener(type,event=>event.stopPropagation());
   document.addEventListener("keydown",event=>{
-    if(!active || closed || event.ctrlKey || event.metaKey || event.altKey || event.repeat)return;
+    if(event.defaultPrevented || document.querySelector("dialog[open]") || !active || closed || event.ctrlKey || event.metaKey || event.altKey || event.repeat)return;
     if(event.target.closest?.("input,textarea,select,[contenteditable=true]"))return;
     const key=event.key.toLowerCase();
     if(key==="j")void selectRegion(index+1);
     else if(key==="k")void selectRegion(index-1);
-    else if(["1","2","3"].includes(key))setView({1:"diff",2:"before",3:"after"}[key]);
+    else if(["1","2","3"].includes(key))setView((report?.token?{1:"diff",2:"current",3:"result"}:{1:"diff",2:"before",3:"after"})[key]);
     else if(key==="f")void selectRegion(index);
     else if(key==="h")setCollapsed(!panel.classList.contains("is-collapsed"));
     else if(key==="escape")void api.close();
@@ -295,16 +393,20 @@ export function initPRReview(host) {
     get active() { return active; },
     get report() { return report; },
     get viewportInsets() {
-      return {left:panel.classList.contains("is-collapsed")?16:panel.offsetLeft+panel.offsetWidth+16,
+      return {left:panel.offsetLeft+panel.offsetWidth+16,
         bottom:dock.hidden?16:dock.offsetHeight+32};
     },
     open() {
+      mergeUI.open();
       closed=false;panel.hidden=false;setCollapsed(false);document.body.classList.add("pr-review-open");
       if(!active){$("prReviewContent").hidden=true;$("prReviewHeading").textContent="数据 PR 审阅";status("输入 PR，开始地图审阅。");}
       $("prReviewInput").focus();$("prReviewInput").select();
+      void refreshOpenPRs();
     },
     async close() {
+      mergeUI.reset(true);mergeViews(false);
       closed=true;generation++;selection++;controller?.abort();worker?.terminate();worker=null;clearTimeout(diagnosticTimer);
+      listGeneration++;listController?.abort();
       panel.hidden=true;dock.hidden=true;$("prReviewLoad").disabled=false;$("prReviewLoad").textContent="加载 ↵";panel.removeAttribute("aria-busy");
       document.body.classList.remove("pr-review-active","pr-review-open","pr-review-collapsed");
       const restore=active;active=false;raster.clear();file=null;report=null;checks=null;
@@ -319,9 +421,30 @@ export function initPRReview(host) {
       context.save();context.globalAlpha=Number($("prReviewOpacity").value);
       raster.drawAll(context, view==="diff"?diffToken:document,transform,visible);
       context.restore();
+      const conflict=mergeUI.conflict;
+      if(conflict?.bounds && conflict.path===file.path){
+        const t=transformFor({origin:file.origin,cellSize:file.cellSize});
+        if(t){
+          const b=conflict.bounds,points=[[b.x0,b.z0],[b.x1,b.z0],[b.x1,b.z1],[b.x0,b.z1]].map(([x,z])=>{
+            const ix=(x-file.origin[0])/file.cellSize,iz=(z-file.origin[1])/file.cellSize;
+            return [t.a00*ix+t.a01*iz+t.a02,t.a10*ix+t.a11*iz+t.a12];
+          });
+          context.save();context.strokeStyle="#ffb94e";context.lineWidth=2;context.setLineDash([5,3]);context.beginPath();
+          points.forEach(([x,z],i)=>i?context.lineTo(x,z):context.moveTo(x,z));context.closePath();context.stroke();context.restore();
+        }
+      }
     },
     hover(x,z) {
       if(!active||!file)return;
+      if(report?.token){
+        const states=[["ancestor","祖先"],["current","主线"],["incoming","PR"],["result","结果"]].map(([side,label])=>{
+          const doc=documents[side],snapshot=file[side];
+          if(!doc)return label+" 无网格";
+          const ix=Math.floor((x-doc.origin[0])/doc.cellSize),iz=Math.floor((z-doc.origin[1])/doc.cellSize);
+          return label+" "+(ix<0||iz<0||ix>=snapshot.shape[1]||iz>=snapshot.shape[0]?"范围外":STATE_NAMES[doc.getCell(ix,iz)]);
+        });
+        $("prReviewHover").textContent=`X ${x.toFixed(2)} · Z ${z.toFixed(2)} · ${states.join(" / ")}`;return;
+      }
       const transition=transitionAt(file,x,z,lookup);
       $("prReviewHover").textContent=`X ${x.toFixed(2)} · Z ${z.toFixed(2)}${transition ? " · "+STATE_NAMES[transition[0]]+" → "+STATE_NAMES[transition[1]] : " · 无逐格变化"}`;
     },

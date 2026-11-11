@@ -14,7 +14,7 @@ export function initDatasetExport({ hasUnsaved = () => false, onOpen = () => {},
       (data.phase || "未导出") +
       (data.running && data.total ? ` · ${data.done}/${data.total}` : "") +
       (data.output ? "\n目标：" + data.output : "") +
-      (data.summary ? `\n${data.summary.images} 张灰度图 · ${data.summary.grids} 份网格` : "");
+      (data.summary ? `\n${data.summary.images} 张彩色 WebP · ${data.summary.grids} 份网格` : "");
     if (data.default_parent) target.placeholder = data.default_parent + " 下自动生成新目录（可留空）";
   };
   async function poll() {

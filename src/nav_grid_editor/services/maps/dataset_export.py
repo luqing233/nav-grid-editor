@@ -1,4 +1,4 @@
-"""Build an isolated, grayscale nav-grid-data snapshot; never perform Git writes."""
+"""Build an isolated, color WebP nav-grid-data snapshot; never perform Git writes."""
 
 from __future__ import annotations
 
@@ -16,10 +16,10 @@ import cv2
 import numpy as np
 
 from .grid import _load_grid_npz, _normalize_floor_regions
-from .io import _path_lock
+from .io import _path_lock, preferred_image, save_webp
 from .layers import build_level_index
 from .links import normalize_link
-from .settings import disk_tier, valid_grid_tier, valid_map_zoom
+from .settings import Image, disk_tier, valid_grid_tier, valid_map_zoom
 
 
 def _json(path: Path):
@@ -65,37 +65,30 @@ def _read_image(path: Path, flags: int) -> np.ndarray:
     return image
 
 
-def _gray_png(source: Path, target: Path, *, layer: bool) -> tuple[int, int]:
-    image = _read_image(source, cv2.IMREAD_UNCHANGED if layer else cv2.IMREAD_GRAYSCALE)
-    if layer and image.ndim == 3:
-        channels = image.shape[2]
-        if channels == 4:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
-            gray[image[:, :, 3] == 0] = 0
-        elif channels == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            raise ValueError(f"不支持的图片通道: {source.name}")
-    else:
-        gray = image
-    if gray.ndim != 2 or gray.dtype != np.uint8:
-        raise ValueError(f"发布图片必须能转换为 8 位灰度: {source.name}")
-    ok, encoded = cv2.imencode(".png", gray, [cv2.IMWRITE_PNG_COMPRESSION, 9])
-    if not ok:
-        raise ValueError(f"灰度编码失败: {source.name}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(encoded.tobytes())
-    decoded = _read_image(target, cv2.IMREAD_UNCHANGED)
-    if not np.array_equal(decoded, gray) or target.read_bytes()[24:26] != b"\x08\x00":
-        raise ValueError(f"灰度图片读回校验失败: {source.name}")
-    return gray.shape[1], gray.shape[0]
+def _color_webp(source: Path, target: Path, *, layer: bool) -> tuple[int, int]:
+    """Publish Q90 RGB/RGBA at original dimensions; alpha remains lossless."""
+    with Image.open(source) as original:
+        transparent = "A" in original.getbands() or "transparency" in original.info
+        image = original.convert("RGBA" if transparent else "RGB")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        save_webp(image, target)
+        with Image.open(target) as decoded:
+            if decoded.format != "WEBP" or decoded.size != image.size:
+                raise ValueError(f"彩色图片读回校验失败: {source.name}")
+            if transparent and not np.array_equal(np.asarray(image.getchannel("A")),
+                                                  np.asarray(decoded.convert("RGBA").getchannel("A"))):
+                raise ValueError(f"透明通道读回校验失败: {source.name}")
+        return image.size
+    finally:
+        image.close()
 
 
 def _calibration(mapping: dict, size: tuple[int, int]) -> None:
     try:
         actual = mapping["image_size"]
         if (actual["width"], actual["height"]) != size:
-            raise ValueError("PNG 尺寸与 image_size 不匹配")
+            raise ValueError("图片尺寸与 image_size 不匹配")
         a = np.asarray(mapping["matrix"], dtype=float)
         b = np.asarray(mapping["inverse_matrix"], dtype=float)
         if a.shape != (2, 3) or b.shape != (2, 3):
@@ -121,13 +114,18 @@ def _plan(tiles: Path, grids: Path) -> dict[str, Path]:
     if not isinstance(missing, list) or not all(isinstance(tier, str) for tier in missing):
         raise ValueError("missing_logic_ids 必须是层 ID 数组")
     plan = {"localization/layers/catalog.json": catalog}
+    image_outputs = set()
     for entry in data["layers"]:
         if not isinstance(entry, dict):
             raise ValueError("分层目录条目必须是对象")
         source = _relative(tiles / "layers", entry.get("path"))
         key = "localization/layers/" + entry["path"]
-        if key in plan:
+        output_key = str(Path(key).with_suffix(".webp").as_posix())
+        if source.suffix not in (".png", ".webp"):
+            raise ValueError(f"分层图片必须为 PNG 或 WebP: {key}")
+        if key in plan or output_key in image_outputs:
             raise ValueError(f"重复的分层图片路径: {key}")
+        image_outputs.add(output_key)
         plan[key] = source
     for directory in sorted((tiles / "maps").glob("*/4")):
         mid = directory.parent.name
@@ -136,7 +134,10 @@ def _plan(tiles: Path, grids: Path) -> dict[str, Path]:
             continue  # Uncalibrated captures cannot be published as world-space base maps.
         if not valid_map_zoom(mid, "4"):
             raise ValueError(f"非法地图 ID: {mid}")
-        for path in (directory / f"{mid}_4.png", mapping):
+        image = preferred_image(directory, f"{mid}_4")
+        if image is None:
+            raise ValueError(f"缺少已标定地图图片: {mid}_4.webp / .png")
+        for path in (image, mapping):
             plan[f"localization/maps/{mid}/4/{path.name}"] = path
     if not any(key.startswith("localization/maps/") for key in plan):
         raise ValueError("没有已标定的 zoom 4 基础地图")
@@ -219,32 +220,39 @@ def _build(frozen: dict[str, Path], out: Path, progress) -> dict:
                 raise ValueError(f"levels 与 catalog 身份冲突: {tier}")
             declared[tier] = {**(old or {}), **row}
 
-    image_keys = [name for name in frozen if name.endswith(".png")]
+    image_keys = [name for name in frozen if name.endswith((".png", ".webp"))]
     for number, key in enumerate(image_keys, 1):
-        progress("灰度图片", number, len(image_keys))
+        progress("彩色 WebP Q90", number, len(image_keys))
         layer = key.startswith("localization/layers/")
-        size = _gray_png(frozen[key], out / key, layer=layer)
+        output_key = str(Path(key).with_suffix(".webp").as_posix())
+        size = _color_webp(frozen[key], out / output_key, layer=layer)
         if layer:
             entry = next(e for e in entries if "localization/layers/" + e["path"] == key)
             if size != (entry["width"], entry["height"]):
                 raise ValueError(f"分层图片尺寸不符: {entry['id']}")
             mid, tier, sid = entry["map_name"], entry["id"], _space(entry)
-            visual = {"kind": "layer", "image": key, "catalog_entry": tier}
+            entry["path"] = output_key.removeprefix("localization/layers/")
+            if "filename" in entry:
+                entry["filename"] = Path(output_key).name
+            visual = {"kind": "layer", "image": output_key, "catalog_entry": tier}
         else:
             mid, tier = key.split("/")[2], ""
             sid = mid
-            mapping_key = key[:-4] + "_mapping.json"
-            _calibration(_json(frozen[mapping_key]), size)
-            _write_json(out / mapping_key, _json(frozen[mapping_key]))
+            mapping_key = str(Path(key).with_suffix("").as_posix()) + "_mapping.json"
+            mapping = _json(frozen[mapping_key])
+            _calibration(mapping, size)
+            if "map_name" in mapping:
+                mapping["map_name"] = Path(output_key).name
+            _write_json(out / mapping_key, mapping)
             visual_files.append(out / mapping_key)
             spaces[sid] = {"id": sid, "kind": "world", "map_name": mid, "unit": "game_world_unit"}
-            visual = {"kind": "base", "image": key, "mapping": mapping_key}
-            base_maps.append({"map_id": mid, "zoom": "4", "image": key.removeprefix("localization/"),
+            visual = {"kind": "base", "image": output_key, "mapping": mapping_key}
+            base_maps.append({"map_id": mid, "zoom": "4", "image": output_key.removeprefix("localization/"),
                               "mapping": mapping_key.removeprefix("localization/"), "width": size[0],
                               "height": size[1], "coordinate_space": sid})
         registrations[(sid, mid, tier, "4")] = {"coordinate_space_id": sid, "map_name": mid,
                                                "tier": tier, "zoom": "4", "visual": visual, "grid": None}
-        visual_files.append(out / key)
+        visual_files.append(out / output_key)
 
     navigation_files = []
     for key, source in frozen.items():
@@ -310,7 +318,7 @@ def _build(frozen: dict[str, Path], out: Path, progress) -> dict:
         "coverage": {"layer_count": len(entries), "independent_layer_count": sum(e["map_category"] == "independent" for e in entries),
                      "missing_logic_ids": catalog.get("missing_logic_ids", []),
                      "catalog_generated_at": catalog.get("generated_at")},
-        "provenance": {"producer": "nav-grid-editor", "processing": "OpenCV grayscale PNG level 9; original dimensions; no resampling"},
+        "provenance": {"producer": "nav-grid-editor", "processing": "Color WebP Q90; Pillow quality=90 method=4; original dimensions; lossless alpha; no resampling"},
         "files": sorted((_record(local_root, p) for p in visual_files), key=lambda x: x["path"]),
     }
     if set(by_tier).intersection(manifest["coverage"]["missing_logic_ids"]):
@@ -327,13 +335,13 @@ def _build(frozen: dict[str, Path], out: Path, progress) -> dict:
     (out / "schemas").mkdir()
     shutil.copyfile(schema, out / "schemas/dataset.schema.json")
     (out / ".gitattributes").write_text(
-        "*.png filter=lfs diff=lfs merge=lfs -text\n*.grid.npz filter=lfs diff=lfs merge=lfs -text\n"
+        "*.webp filter=lfs diff=lfs merge=lfs -text\n*.png filter=lfs diff=lfs merge=lfs -text\n*.grid.npz filter=lfs diff=lfs merge=lfs -text\n"
         "*.json !filter !diff !merge text eol=lf\n*.md !filter !diff !merge text eol=lf\n", encoding="utf-8")
     (out / "README.md").write_text(
-        "# nav-grid-data 导出包\n\n完整磁盘快照，所有 PNG 为原尺寸 8 位灰度，网格保持原字节。\n"
+        "# nav-grid-data 导出包\n\n完整磁盘快照，图片为原尺寸彩色 WebP Q90（method=4），保留透明通道，网格保持原字节。\n"
         "dataset.json 是统一发布清单，localization/manifest.json 是定位资源清单。\n"
         "编辑用彩色素材未修改；新增区域中的未知格仍为未知，缺失高度不推断。\n"
-        "提交前安装 Git LFS；PNG/NPZ 使用 LFS，不要通过网页逐文件上传。\n"
+        "提交前安装 Git LFS；WebP/PNG/NPZ 使用 LFS，不要通过网页逐文件上传。\n"
         "导出器不执行 commit/push。接入 ok-end-field 仍需更新子模块指针并发布。\n", encoding="utf-8")
     verify_dataset(out)
     return {"grids": len(grid_meta), "images": len(image_keys), "layers": len(entries),

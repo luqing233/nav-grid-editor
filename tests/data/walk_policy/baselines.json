@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "policy": "noUnknown",
+  "note": "固定真实数据快照；期望值须经独立四连通算法复核。测试不从工作区自动更新基线，不需要 Git/LFS 历史。",
+  "snapshots": {
+    "map02_1a23931": {
+      "file": "map02_1a23931.npz",
+      "source_path": "map02_4.grid.npz",
+      "source_commit": "1a239314601c50f58afc0f57879b8d072b023da6",
+      "sha256": "6dd3cce58b572ff9e5e5e90f476b8bb3af6de3b7116aa5f4638d988936db87d5",
+      "components": [
+        32119,
+        5535,
+        1082,
+        1026,
+        1024,
+        948,
+        506,
+        501,
+        281,
+        249,
+        170,
+        87,
+        3,
+        2
+      ]
+    },
+    "map02_8f34d18": {
+      "file": "map02_8f34d18.npz",
+      "source_path": "map02_4.grid.npz",
+      "source_commit": "8f34d18f8491e31d69f884147caa99928deb8103",
+      "sha256": "42972878b110eab4c24b29fe0faa0effc5e4839efb333af0cad759e8924db86d",
+      "components": [
+        32119,
+        5535,
+        1082,
+        1026,
+        1024,
+        948,
+        760,
+        506,
+        501,
+        281,
+        273,
+        249,
+        170,
+        87,
+        3,
+        2
+      ]
+    },
+    "base01_8f34d18": {
+      "file": "base01_8f34d18.npz",
+      "source_path": "base01_4.grid.npz",
+      "source_commit": "8f34d18f8491e31d69f884147caa99928deb8103",
+      "sha256": "42bd14d763872cf19039fed968d154edb754d0c6c0e1971ad499fb470fcbe8ee",
+      "anomaly_summary": {
+        "components": 8,
+        "singletons": 2,
+        "lone": 2,
+        "trapped": 0
+      }
+    }
+  }
+}

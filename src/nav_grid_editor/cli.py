@@ -25,6 +25,7 @@
 - POST /api/calib                         计算并保存标定
 - GET  /api/grid2d?map=&zoom=&tier=       读取某地图/分层的 2D 网格（无高度）
 - POST /api/grid2d                        保存某地图/分层的 2D 网格（稠密 uint8）
+- POST /api/data-repository/sync          用远端数据仓库强制覆盖本地数据
 - GET  /api/grid-links?map=&zoom=         读取跨地图/分层连接（带端点校验结果）
 - POST /api/grid-links                    新增或更新连接（端点悬空会被拒绝）
 - DELETE /api/grid-links/<id>             删除连接

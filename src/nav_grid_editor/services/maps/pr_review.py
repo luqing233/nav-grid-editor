@@ -136,31 +136,85 @@ class DataPRReview:
         self.repository, self.cache = Path(repository), Path(cache)
         self._lock = threading.Lock()
         self._results = {}
+        self._merges = {}
+        self._publications = {}
+
+    def merge_prepare(self, values):
+        from .pr_merge import PRMergeSession
+        with self._lock:
+            session = PRMergeSession(self, values)
+            if len(self._merges) >= 2:
+                self._merges.pop(next(iter(self._merges)))
+            self._merges[session.token] = session
+            return copy.deepcopy(session.response)
+
+    def merge_action(self, token, action, choices=None):
+        with self._lock:
+            session = self._merges.get(token)
+            if action in ("publish", "publication_status", "merge_to_base"):
+                from .pr_publish import IntegrationPublisher
+                if not isinstance(token,str) or not re.fullmatch(r"[0-9a-f]{32}",token):
+                    raise ValueError("合并会话标识非法")
+                record=self.cache.parent/"pr-merge"/token/"publication.json"
+                if record.is_file():
+                    identity=json.loads(record.read_text(encoding="utf-8"))["id"]
+                    publisher=self._publications.get(identity)
+                    if publisher is None:
+                        publisher=IntegrationPublisher(self,session,identity=identity)
+                elif session is not None and action=="publish":
+                    if not session.response["ready"]:
+                        raise ValueError("仍有未解决冲突，不能发布")
+                    candidate=IntegrationPublisher(self,session)
+                    publisher=self._publications.get(candidate.state["id"],candidate)
+                    record.write_text(json.dumps({"id":publisher.state["id"]}),encoding="utf-8")
+                else:
+                    raise ValueError("未找到发布记录，请重新预览")
+                self._publications[publisher.state["id"]]=publisher
+                if session is not None:
+                    session.publication=publisher
+                    if publisher.session is None:publisher.session=session
+                if action=="merge_to_base":return publisher.merge_to_base()
+                return publisher.start() if action=="publish" else publisher.status()
+            if session is None:
+                raise ValueError("合并会话已过期，请重新预览")
+            if action == "resolve":
+                return session.resolve(choices)
+            if action == "export":
+                if session.publication is not None and session.publication.running:
+                    raise ValueError("正在发布，请等待完成后再导出")
+                return session.export()
+            raise ValueError("未知合并操作")
 
     def _git(self, *args, data=None):
         try:
-            process = subprocess.run(["git", "-C", str(self.repository), *args], input=data,
+            process = subprocess.run(["git", "-C", str(self.repository), *getattr(self, "git_options", []), *args], input=data,
+                                     env=self.command_environment() if hasattr(self, "command_environment") else None,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180,
                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except FileNotFoundError:
             raise ValueError("未找到 Git；PR 审阅需要 Git 和 Git LFS") from None
         if process.returncode:
-            raise ValueError("Git 读取 PR 失败：" + process.stderr.decode("utf-8", "replace")[-1000:])
+            detail=process.stderr.decode("utf-8", "replace")[-1000:]
+            if hasattr(self,"redact"):detail=self.redact(detail)
+            raise ValueError("Git 读取 PR 失败：" + detail)
         return process.stdout
 
     def _github(self, repo, number):
+        return self._github_request(f"repos/{repo}/pulls/{number}")
+
+    def _github_request(self, path):
         # Reuse the user's existing gh login without copying credentials into the app.
         gh = shutil.which("gh")
         if gh:
             try:
-                response = subprocess.run([gh, "api", f"repos/{repo}/pulls/{number}"],
+                response = subprocess.run([gh, "api", path],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 if response.returncode == 0:
                     return json.loads(response.stdout)
             except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
                 pass
-        request = urllib.request.Request(f"https://api.github.com/repos/{repo}/pulls/{number}",
+        request = urllib.request.Request(f"https://api.github.com/{path}",
                                          headers={"Accept": "application/vnd.github+json", "User-Agent": "nav-grid-editor"})
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
@@ -169,6 +223,35 @@ class DataPRReview:
             if error.code in (403, 429) and error.headers.get("x-ratelimit-remaining") == "0":
                 raise ValueError("GitHub 匿名 API 已限流；请先用 GitHub CLI 执行 gh auth login，再重新加载") from None
             raise ValueError(f"GitHub 返回 {error.code}：请检查 PR 是否公开可访问或稍后重试") from None
+
+    def _repository_name(self):
+        remote = self._git("remote", "get-url", "origin").decode().strip()
+        match = re.fullmatch(r"(?:https://github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?/?", remote)
+        if not match:
+            raise ValueError("网格目录的 origin 必须指向 GitHub 数据仓库")
+        return match[1]
+
+    def list_open(self):
+        repository = self._repository_name()
+        pulls = {}
+        page = 1
+        while True:
+            # Fetch every page, including drafts. Creation order stays stable when PRs are updated.
+            batch = self._github_request(
+                f"repos/{repository}/pulls?state=open&sort=created&direction=asc&per_page=100&page={page}")
+            if not isinstance(batch, list):
+                raise ValueError("GitHub 返回了无效的 PR 列表")
+            for pr in batch:
+                if pr.get("state") != "open":
+                    continue
+                number = pr["number"]
+                pulls[number] = {"number": number, "title": pr["title"],
+                                 "draft": bool(pr.get("draft")), "url": pr["html_url"]}
+            if len(batch) < 100:
+                break
+            page += 1
+        return {"ok": True, "repository": repository,
+                "pulls": sorted(pulls.values(), key=lambda pr: pr["number"], reverse=True)}
 
     def _read(self, revision, path, directory):
         relative = PurePosixPath(path)
@@ -195,11 +278,7 @@ class DataPRReview:
 
     def load(self, value):
         with self._lock:
-            remote = self._git("remote", "get-url", "origin").decode().strip()
-            match = re.fullmatch(r"(?:https://github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?/?", remote)
-            if not match:
-                raise ValueError("网格目录的 origin 必须指向 GitHub 数据仓库")
-            repository = match[1]
+            repository = self._repository_name()
             number = parse_pr(value, repository)
             pr = self._github(repository, number)
             base_tip, head = pr["base"]["sha"], pr["head"]["sha"]

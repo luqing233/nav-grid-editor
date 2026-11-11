@@ -33,7 +33,7 @@ const result = data => ({ok: true, json: async () => data});
         self.run_js(r'''
 let calls = [], dirty = true;
 const replies = [result({running: false}), result({ok: true}),
-  result({running: true, phase: "灰度图片", done: 2, total: 72}),
+  result({running: true, phase: "彩色 WebP Q90", done: 2, total: 72}),
   result({running: false, phase: "导出完成", output: "E:/数据", summary: {images: 72, grids: 6}})];
 globalThis.fetch = async (url, options) => {calls.push({url, options}); return replies.shift();};
 const ui = initDatasetExport({hasUnsaved: () => dirty});
@@ -49,7 +49,7 @@ assert.equal(button.disabled, true);
 await button.onclick(); assert.equal(calls.length, 3);
 await ui.poll();
 assert.equal(button.disabled, false);
-assert.match(elements.get("datasetExportStatus").textContent, /72 张灰度图.*6 份网格/);
+assert.match(elements.get("datasetExportStatus").textContent, /72 张彩色 WebP.*6 份网格/);
 ui.stop();
 ''')
 

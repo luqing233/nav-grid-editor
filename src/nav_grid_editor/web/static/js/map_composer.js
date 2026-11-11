@@ -1,13 +1,21 @@
-import {storeDraft, removeDraft, listDrafts} from "./grid/drafts.js";
+import {storeDraft, removeDraft, listDrafts, clearDrafts} from "./grid/drafts.js";
 "use strict";
 
 import { diagnoseGrid } from "./grid/diagnostics.js";
 import { sharedJson } from "./grid/requests.js";
+import { initWorkbenchUI } from "./workbench.js";
+import { initDataSync } from "./data-sync.js";
+import { initLocalPR } from "./review/local-pr.js";
 import { initDatasetExport } from "./dataset-export.js";
+import { centeredPlayerPan, playerMapPixel, playerPositionMoved } from "./player-follow.js";
 import { initPRReview } from "./review/pr-review.js";
 
 import { CELL_BLOCKED, CELL_FREE, CELL_UNKNOWN, GridDocument } from "./grid/grid-document.js";
 import { GridRasterCache } from "./grid/grid-raster-cache.js";
+import {
+  CAPTURE_FREE_MAX_SPEED,
+  paintCaptureFreeSegment,
+} from "./grid/capture-free.js";
 import { MAIN_TIER_ID, sameTier, toApiTier, toDiskTier } from "./grid/tier-id.js";
 import { loadGridDocument, saveGridDocument } from "./grid/grid-transport.js";
 import {
@@ -65,6 +73,8 @@ const state = {
     path: true,
   },
   gridOpacity: 0.82,
+  discardOnUnload: false,
+  captureFreeLast: null,
 };
 
 const $ = id => document.getElementById(id);
@@ -76,6 +86,7 @@ const canvas = $("composeCanvas");
 const calibOverlay = $("calibOverlay");
 const gridRasterCache = new GridRasterCache();
 let prReview = null;
+let workbench = null;
 const gridLayerState = { valid: false, key: "", width: 0, height: 0 };
 const gridBoundsEl = $("gridBounds");
 const brushCursor = $("brushCursor");
@@ -275,6 +286,7 @@ const tileCache = new Map();     // "map/zoom/x_y" -> ImageBitmap | "loading" | 
 let tileCacheBytes = 0;
 let tileCacheGeneration = 0;
 const renderScheduler = new RenderScheduler((layers) => render(layers));
+const renderStats = { frames: 0, lastMs: 0, totalMs: 0 };
 
 function requestRender(layers = RENDER_LAYERS.ALL) {
   if (isPanning) {
@@ -421,7 +433,7 @@ function pumpBitmaps() {
   }
 }
 function requestTileBitmap(map, zoom, x, y) {
-  requestQueuedBitmap(TILE_KEY(map,zoom,x,y),`/tiles/${map}/${zoom}/${x}_${y}.png`,viewKey(map,zoom));
+  requestQueuedBitmap(TILE_KEY(map,zoom,x,y),`/tiles/${map}/${zoom}/${x}_${y}.webp`,viewKey(map,zoom));
 }
 
 async function loadOverview(map, zoom) {
@@ -509,6 +521,7 @@ function drawTierOverlay(g, vis) {
 }
 
 function render(layers = RENDER_LAYERS.ALL) {
+  const started = performance.now();
   const s = mapView.scale;
   const vis = visibleRect();
   dragBufferRect = { x: vis.x, y: vis.y, w: vis.w, h: vis.h };
@@ -581,7 +594,7 @@ function render(layers = RENDER_LAYERS.ALL) {
         }
         g.stroke();
       }
-      if (v.overview && !drewTile) {
+      if (v.overview && useTiles && !drewTile) {
         g.imageSmoothingEnabled = true;
         g.drawImage(v.overview, 0, 0, size.w, size.h);
       }
@@ -611,16 +624,28 @@ function render(layers = RENDER_LAYERS.ALL) {
     else gs.clearRect(vis.x, vis.y, vis.w, vis.h);
   }
   if (layers & RENDER_LAYERS.LINK) {
-    const gl = layoutLayer(linkCanvasEl, lctx, vis, s);
-    if (state.layers.links) drawLinkLayer(gl);
-    else gl.clearRect(vis.x, vis.y, vis.w, vis.h);
+    const hasLinks = link.source || link.target || link.drag || state.gridLinks.length;
+    if (state.layers.links && calib.mapping && hasLinks) {
+      layoutLayer(linkCanvasEl, lctx, vis, s);
+      drawLinkLayer();
+    } else releaseLayer(linkCanvasEl);
   }
   // 4) 路径层
   if (layers & RENDER_LAYERS.PATH) {
-    const gp = layoutLayer(pathCanvasEl, pctx, vis, s);
-    if (state.layers.path) drawPath(gp);
-    else gp.clearRect(vis.x, vis.y, vis.w, vis.h);
+    if (state.layers.path && calib.mapping && v?.path?.points?.length >= 2) {
+      layoutLayer(pathCanvasEl, pctx, vis, s);
+      drawPath();
+    } else releaseLayer(pathCanvasEl);
   }
+  renderStats.frames++;
+  renderStats.lastMs = performance.now() - started;
+  renderStats.totalMs += renderStats.lastMs;
+}
+
+// Empty overlays need no screen-sized backing store (especially during overscan).
+function releaseLayer(element) {
+  if (element.width !== 1) element.width = 1;
+  if (element.height !== 1) element.height = 1;
 }
 
 function applyViewTransform() {
@@ -630,6 +655,8 @@ function applyViewTransform() {
 
 function applyViewChrome() {
   applyViewTransform();
+  const scaleLabel = Math.round(mapView.scale * 100) + "%";
+  if ($("viewScale").textContent !== scaleLabel) $("viewScale").textContent = scaleLabel;
   if (calib.mode) renderCalibMarks();
   updatePlayerMarker(lastPos);
   if (edit.mode && edit.cursorCell) updateBrushCursor(edit.cursorCell[0], edit.cursorCell[1]);
@@ -640,6 +667,7 @@ function applyView(renderNow = false, renderDeferred = true) {
   if (renderNow || !isPanning) syncTierResolution();
   if (renderNow) {
     deferredRenderLayers = 0;
+    renderScheduler.cancel(); // This full draw also satisfies any queued partial draw.
     render(RENDER_LAYERS.ALL);
   } else if (renderDeferred && !isPanning) {
     requestRender();
@@ -647,6 +675,7 @@ function applyView(renderNow = false, renderDeferred = true) {
 }
 
 function scheduleViewFrame(renderNow = false) {
+  if (renderNow) renderScheduler.cancel();
   viewFrameNeedsRender = viewFrameNeedsRender || renderNow;
   if (viewFrame) return;
   viewFrame = requestAnimationFrame(() => {
@@ -706,7 +735,7 @@ function activatePanBuffer() {
   deferredRenderLayers = 0;
   renderScheduler.cancel();
   resetViewFrame();
-  applyView(true);
+  scheduleViewFrame(true);
 }
 
 function finishPanGesture() {
@@ -720,15 +749,20 @@ function finishPanGesture() {
 }
 
 // 地图小于窗口时居中，大于窗口时限制拖出边界
-function clampPan() {
+function clampPan(allowCenter = false) {
   const v = state.views.get(state.activeKey);
   const size = hasBounds(v) ? viewSize(v) : { w: 0, h: 0 };
   const w = size.w * mapView.scale, h = size.h * mapView.scale;
   const vw = canvasWrap.clientWidth, vh = canvasWrap.clientHeight;
-  if (w <= vw) mapView.panX = (vw - w) / 2;
-  else mapView.panX = Math.min(0, Math.max(vw - w, mapView.panX));
-  if (h <= vh) mapView.panY = (vh - h) / 2;
-  else mapView.panY = Math.min(0, Math.max(vh - h, mapView.panY));
+  if (allowCenter) {
+    mapView.panX = Math.min(vw / 2, Math.max(vw / 2 - w, mapView.panX));
+    mapView.panY = Math.min(vh / 2, Math.max(vh / 2 - h, mapView.panY));
+  } else {
+    if (w <= vw) mapView.panX = (vw - w) / 2;
+    else mapView.panX = Math.min(0, Math.max(vw - w, mapView.panX));
+    if (h <= vh) mapView.panY = (vh - h) / 2;
+    else mapView.panY = Math.min(0, Math.max(vh - h, mapView.panY));
+  }
 }
 
 // 缩放并居中显示整张总图
@@ -755,8 +789,8 @@ function zoomAt(cx, cy, factor) {
   const k = mapView.scale / old;
   mapView.panX = cx - (cx - mapView.panX) * k;
   mapView.panY = cy - (cy - mapView.panY) * k;
-  clampPan();
-  applyView(true);
+  clampPan(true);
+  scheduleViewFrame(true);
 }
 
 function clearView(map, zoom) {
@@ -952,10 +986,10 @@ const MODES = {
   pick:   { label: "取坐标", color: "#c3fd43" },
 };
 const DEFAULT_SIDE_TAB = {
-  browse: "capture", calib: "calib", edit: "grid",
-  link: "grid", pick: "coords",
+  browse: "browse", calib: "calib", edit: "grid",
+  link: "link", pick: "coords",
 };
-const MODE_BY_SIDE_TAB = { capture: "browse", calib: "calib", grid: "edit", coords: "pick" };
+const MODE_BY_SIDE_TAB = { browse: "browse", calib: "calib", grid: "edit", link: "link", coords: "pick" };
 let activeSideTab = null;
 
 function currentMode() {
@@ -988,14 +1022,13 @@ function syncModeChrome() {
   // 上下文工具组仍按模式显示；侧栏由 Tab 管理，不再把所有面板纵向堆在一起。
   const inMode = el => (el.dataset.mode || "").split(/\s+/).includes(m);
   document.querySelectorAll(".tb-act").forEach(el => { el.hidden = !inMode(el); });
-  const tabMode = activeSideTab && MODE_BY_SIDE_TAB[activeSideTab];
-  if (!activeSideTab || (tabMode && tabMode !== m)) {
+  if (activeSideTab !== DEFAULT_SIDE_TAB[m]) {
     setSideTab(DEFAULT_SIDE_TAB[m], { syncMode: false });
   }
+  workbench?.syncMode(m);
   $("modeTag").textContent = MODES[m].label;
   $("canvasModeLabel").textContent = MODES[m].label;
   $("sideModeCode").textContent = modeOrder[m];
-  $("sideModeLabel").textContent = MODES[m].label;
   document.querySelectorAll(".rail-mode").forEach(btn => {
     btn.classList.toggle("is-active", btn.dataset.railMode === m);
   });
@@ -1004,12 +1037,14 @@ function syncModeChrome() {
 }
 
 function setSidePanel(open) {
+  if (!open && $("sidePanel").contains(document.activeElement)) $("btnSideToggle").focus();
+  $("sidePanel").inert = !open;
   document.body.classList.toggle("side-open", open);
   document.body.classList.toggle("side-collapsed", !open);
   document.body.classList.remove("side-closed");
   const toggle = $("btnSideToggle");
-  toggle.setAttribute("aria-label", open ? "收起检查器" : "展开检查器");
-  toggle.title = open ? "收起检查器" : "展开检查器";
+  toggle.setAttribute("aria-label", open ? "收起属性面板" : "展开属性面板");
+  toggle.title = open ? "收起属性面板" : "展开属性面板";
   toggle.setAttribute("aria-expanded", String(open));
   if (open && !activeSideTab) setSideTab(DEFAULT_SIDE_TAB[currentMode()]);
 }
@@ -1019,6 +1054,7 @@ function isSidePanelOpen() {
 }
 
 function setSideTab(name, { syncMode = true } = {}) {
+  if (["capture", "markers", "log", "export"].includes(name)) { workbench?.openResource(name); return; }
   let target = name;
   const mode = MODE_BY_SIDE_TAB[name];
   if (syncMode && mode && currentMode() !== mode) {
@@ -1026,14 +1062,10 @@ function setSideTab(name, { syncMode = true } = {}) {
     if (currentMode() !== mode) target = DEFAULT_SIDE_TAB[currentMode()];
   }
   activeSideTab = target;
-  document.querySelectorAll("[data-side-tab]").forEach(button => {
-    const active = button.dataset.sideTab === target;
-    button.classList.toggle("is-active", active);
-    button.setAttribute("aria-selected", String(active));
-  });
-  document.querySelectorAll(".side-panel").forEach(panel => {
-    panel.hidden = panel.dataset.panel !== target;
-  });
+  $("sideModeLabel").textContent = {
+    browse: "视图设置", calib: "标定控制点", grid: "网格属性", link: "连接属性", coords: "坐标与位置",
+  }[target];
+  document.querySelectorAll(".side-panel").forEach(panel => { panel.hidden = panel.dataset.panel !== target; });
 }
 
 function setMode(name) {
@@ -1092,12 +1124,12 @@ function openCalibDialog(px, py) {
   calib.pendingPixel = [px, py];
   $("calibPx").textContent = Math.round(px) + ", " + Math.round(py);
   $("calibX").value = ""; $("calibZ").value = "";
-  $("calibDlg").style.display = "block";
+  $("calibDlg").showModal();
   $("calibX").focus();
 }
 
 function closeCalibDialog() {
-  $("calibDlg").style.display = "none";
+  $("calibDlg").close();
   calib.pendingPixel = null;
 }
 
@@ -1202,18 +1234,39 @@ async function loadMappingForCurrent() {
 
 // 玩家定位：游戏坐标 (x,z) → 地图像素 → 固定屏幕尺寸的十字准星
 let lastPos = null;
-function updatePlayerMarker(pos) {
-  lastPos = pos || lastPos;
+
+function centerViewOnPlayer(pos = lastPos) {
+  if (!state.follow || state.prReviewActive || !calib.mapping ||
+      !calib.key || calib.key !== state.activeKey) return false;
+  const point = playerMapPixel(pos, calib.mapping);
+  const pan = centeredPlayerPan(
+    point, canvasWrap.clientWidth, canvasWrap.clientHeight, mapView.scale,
+  );
+  if (!pan) return false;
+  mapView.panX = pan.x;
+  mapView.panY = pan.y;
+  mapView.focus = null;
+  applyView();
+  return true;
+}
+
+function updatePlayerMarker(pos, { center = false, forceCenter = false } = {}) {
+  const incoming = pos || null;
+  const moved = incoming ? playerPositionMoved(lastPos, incoming) : false;
+  if (incoming) lastPos = incoming;
   const mk = $("playerMarker");
   if (!lastPos || !calib.mapping || !calib.key || calib.key !== state.activeKey) {
     mk.style.display = "none";
     return;
   }
-  const inv = calib.mapping.inverse_matrix;
   const x = Number(lastPos.x), z = Number(lastPos.z);
   if (isNaN(x) || isNaN(z)) { mk.style.display = "none"; return; }
-  const px = inv[0][0] * x + inv[0][1] * z + inv[0][2];
-  const py = inv[1][0] * x + inv[1][1] * z + inv[1][2];
+  if (center && state.follow && (moved || forceCenter)) {
+    centerViewOnPlayer(lastPos);
+  }
+  const point = playerMapPixel(lastPos, calib.mapping);
+  if (!point) { mk.style.display = "none"; return; }
+  const [px, py] = point;
   const v = state.views.get(state.activeKey);
   const size = hasBounds(v) ? viewSize(v) : { w: 0, h: 0 };
   if (px < -5000 || py < -5000 || px > size.w + 5000 || py > size.h + 5000) {
@@ -1232,6 +1285,67 @@ function updatePlayerMarker(pos) {
   mk.style.top = screenY + "px";
   $("playerMarkerLabel").textContent = "(" + x.toFixed(1) + ", " + z.toFixed(1) + ")";
   mk.style.display = "block";
+}
+
+// 抓包位置自动探涂：保守地只接受 speed <= 7.5 的样本；同层相邻点最多补 7m。
+function markCapturePositionFree(data) {
+  if (!$('captureFreeEnabled')?.checked || !edit.mode) {
+    state.captureFreeLast = null;
+    return;
+  }
+  if (!data || data.speed == null || data.speed === '' ||
+      !Number.isFinite(Number(data.speed))) {
+    state.captureFreeLast = null;
+    return;
+  }
+  const speed = Number(data.speed);
+  if (speed < 0 || speed > CAPTURE_FREE_MAX_SPEED) {
+    state.captureFreeLast = null;
+    return;
+  }
+  const pos = data.pos || data;
+  const e = ed();
+  if (!e || !pos || !Number.isFinite(Number(pos.x)) || !Number.isFinite(Number(pos.z))) {
+    state.captureFreeLast = null;
+    return;
+  }
+  const [map] = (state.activeKey || '').split('@');
+  if (String(data.mapId || '') !== map) {
+    state.captureFreeLast = null;
+    return;
+  }
+  const tierId = currentTierId();
+  if (data.gridTierId != null && !sameTier(data.gridTierId, tierId)) {
+    state.captureFreeLast = null;
+    return;
+  }
+  if (e.busy || e.saving) {
+    state.captureFreeLast = null;
+    return;
+  }
+  const radius = Math.max(0, Math.min(50, parseInt($('captureFreeRadius').value, 10) || 0));
+  const point = { x: Number(pos.x), z: Number(pos.z) };
+  const previous = state.captureFreeLast;
+  const from = previous && previous.document === e &&
+    previous.key === state.activeKey && sameTier(previous.tierId, tierId)
+    ? previous.point : point;
+  beginEditTransaction(e);
+  let result = paintCaptureFreeSegment(e, from, point, radius);
+  if (from !== point && !result.connected) {
+    result = paintCaptureFreeSegment(e, point, point, radius);
+  }
+  commitEditTransaction(e);
+  state.captureFreeLast = {
+    document: e,
+    key: state.activeKey,
+    tierId,
+    point,
+  };
+  if (!result.changed) return;
+  setGridDirty(true);
+  updateEditStats();
+  requestRender(RENDER_LAYERS.GRID);
+  scheduleFloorOverlapLiveRefresh();
 }
 
 // ---------------- 2D 网格编辑（无高度信息，需先标定） ----------------
@@ -2124,11 +2238,11 @@ function openFloorRegionDialog() {
   populateFloorComponentSelect();
   fillFloorHeightFromSelection();
   renderFloorMarkedList();
-  dialog.style.display = "block";
+  if (!dialog.open) dialog.showModal();
 }
 
 function closeFloorRegionDialog() {
-  $("floorRegionDlg").style.display = "none";
+  $("floorRegionDlg").close();
   {
     state.floorHighlight = { componentId: "", layerId: "" };
   }
@@ -3320,23 +3434,15 @@ function confirmUnmarkedYellowComponents(components) {
     const dialog = $("overlapWarningDlg");
     const list = $("overlapWarningList");
     const names = components.slice(0, 8).map((component, index) =>
-      "连通区 " + (index + 1) + "：" +
-      component.cells.length + " 格，" +
-      component.layer_names.join(" / ")
-    );
-    if (components.length > names.length) {
-      names.push("另有 " + (components.length - names.length) + " 个未标注连通区");
-    }
-    list.innerHTML = names.map(text => "<div>" + text + "</div>").join("");
-    dialog.style.display = "block";
-    $("overlapWarningContinue").onclick = () => {
-      dialog.style.display = "none";
-      resolve(true);
-    };
-    $("overlapWarningCancel").onclick = () => {
-      dialog.style.display = "none";
-      resolve(false);
-    };
+      "连通区 " + (index + 1) + "：" + component.cells.length + " 格，" + component.layer_names.join(" / "));
+    if (components.length > names.length) names.push("另有 " + (components.length - names.length) + " 个未标注连通区");
+    list.replaceChildren(...names.map(text => { const row = document.createElement("div"); row.textContent = text; return row; }));
+    const finish = value => { dialog.close(); dialog.oncancel = null; resolve(value); };
+    $("overlapWarningContinue").onclick = () => finish(true);
+    $("overlapWarningCancel").onclick = () => finish(false);
+    dialog.oncancel = event => { event.preventDefault(); finish(false); };
+    dialog.showModal();
+    $("overlapWarningCancel").focus();
   });
 }
 
@@ -3775,7 +3881,7 @@ async function syncPositionLocation(data) {
   }
   if (requestId !== state.positionView.requestId || state.activeKey !== key) return;
   state.positionView.appliedKey = locationKey;
-  updatePlayerMarker(data.pos || data);
+  updatePlayerMarker(data.pos || data, { center: true, forceCenter: true });
 }
 
 async function loadPositionStatus() {
@@ -4256,9 +4362,11 @@ async function showLayerEntrancePicker(hit) {
     '<div class="mark-layer-list">' + options + "</div>" +
     '<button type="button" class="mark-layer-option quiet" data-tier="">退出分层</button>';
   el.classList.add("interactive");
-  el.style.left = (hit.px * s + mapView.panX) + "px";
-  el.style.top = ((hit.py - MARK_POINTER_PX / s) * s + mapView.panY - 8) + "px";
   el.style.display = "block";
+  el.style.left = Math.max(12, Math.min(hit.px * s + mapView.panX,
+    canvasWrap.clientWidth - el.offsetWidth - 12)) + "px";
+  el.style.top = Math.max(12, Math.min(hit.py * s + mapView.panY - MARK_POINTER_PX - 8,
+    canvasWrap.clientHeight - el.offsetHeight - 12)) + "px";
 
   el.querySelectorAll("[data-tier]").forEach(button => {
     button.onclick = async () => {
@@ -4434,9 +4542,10 @@ async function handleEvent(evt) {
       $("coordsReadout").textContent = JSON.stringify((evt.data || {}).pos || evt.data);
       {
         const d = evt.data || {};
+        markCapturePositionFree(d);
         const pos = d.pos || d;
         if (pos && pos.x != null && pos.z != null) {
-          updatePlayerMarker({ x: pos.x, y: pos.y, z: pos.z });
+          updatePlayerMarker({ x: pos.x, y: pos.y, z: pos.z }, { center: true });
         }
         void syncPositionLocation(d);
       }
@@ -4482,7 +4591,7 @@ function populateTierSelect() {
   sel.innerHTML = "";
   const none = document.createElement("option");
   none.value = "";
-  none.textContent = "关闭";
+  none.textContent = "主图（无分层）";
   sel.appendChild(none);
   const appendGroup = (label, items, textOf) => {
     if (!items.length) return;
@@ -4906,18 +5015,23 @@ $("btnDownload").onclick = async () => {
     if (!info || !info.file) { addLog("该地图还没有保存过的总图，请先点“合成总图”", "t-err"); return; }
     const a = document.createElement("a");
     a.href = "/maps/" + info.file;
-    a.download = (state.activeKey || "map").replace("@", "_") + ".png";
+    a.download = info.file.split("/").pop();
     a.click();
     addLog("已下载总图 " + info.file);
   } catch (e) { addLog("下载失败: " + e.message, "t-err"); }
 };
-$("chkFollow").onchange = () => { state.follow = $("chkFollow").checked; };
+$("chkFollow").onchange = () => {
+  state.follow = $("chkFollow").checked;
+  if (state.follow && lastPos) {
+    updatePlayerMarker(lastPos, { center: true, forceCenter: true });
+  }
+};
 $("mpAll").onclick = () => setAllMarkItems(true);
 $("mpNone").onclick = () => setAllMarkItems(false);
 $("mpReset").onclick = resetMarkFilter;
 $("btnFit").onclick = fitView;
 $("btnSideToggle").onclick = () => setSidePanel(!isSidePanelOpen());
-$("btnCapturePanel").onclick = () => { if(state.prReviewActive)return;setSideTab("capture");setSidePanel(true);$("sideContent").scrollTop=0; };
+$("btnCapturePanel").onclick = () => workbench?.openResource("capture");
 $("btnUndo").onclick = () => {
   if (edit.mode) undoGridEdit();
   else if (calib.mode) undoCalibEdit();
@@ -4976,14 +5090,28 @@ $("btnPerspective").onclick = () => {
   if (perspectiveView && perspectiveView.open) closePerspective();
   else void openPerspective();
 };
-document.querySelectorAll("[data-side-tab]").forEach(btn => {
-  btn.onclick = () => setSideTab(btn.dataset.sideTab);
+for (const id of ["btnGridSettings", "btnLinkSettings"]) {
+  $(id).onclick = () => {
+    setSideTab(DEFAULT_SIDE_TAB[currentMode()], { syncMode: false });
+    setSidePanel(true);
+    $("sideContent").scrollTop = 0;
+    $("btnInspectorClose").focus();
+  };
+}
+$("captureFreeEnabled").addEventListener("change", () => {
+  $("captureFreeIndicator").hidden = !$("captureFreeEnabled").checked;
+  state.captureFreeLast = null;
 });
-$("sideBackdrop").onclick = () => setSidePanel(false);
+$("captureFreeIndicator").onclick = () => {
+  $("captureFreeEnabled").checked = false;
+  $("captureFreeEnabled").dispatchEvent(new Event("change"));
+};
+$("calibDlg").addEventListener("cancel", closeCalibDialog);
+$("floorRegionDlg").addEventListener("cancel", closeFloorRegionDialog);
 $("calibOk").onclick = submitCalibPoint;
 $("calibCancel").onclick = closeCalibDialog;
-$("calibX").addEventListener("keydown", (e) => { if (e.key === "Enter") submitCalibPoint(); });
-$("calibZ").addEventListener("keydown", (e) => { if (e.key === "Enter") submitCalibPoint(); });
+$("calibX").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submitCalibPoint(); } });
+$("calibZ").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submitCalibPoint(); } });
 // 网格模式的快捷键。只在 edit 模式下生效，且正在输入框里打字时不抢键
 // （宽度输入框、控制点坐标框都要能正常输入数字）。
 const BRUSH_BY_KEY = { "1": "free", "2": "blocked", "3": "erase" };
@@ -4998,14 +5126,10 @@ function isTextEditingTarget(target) {
 }
 
 document.addEventListener("keydown", (e) => {
-  if ($("shortcutDialog")?.open) {
-    if (e.key === "Escape") { e.preventDefault(); $("shortcutDialog").close(); }
-    return;
-  }
+  if (e.defaultPrevented || document.querySelector("dialog[open]")) return;
   if (e.key === "Escape") {
     if (perspectiveView && perspectiveView.open) closePerspective();
-    else if ($("calibDlg").style.display === "block") closeCalibDialog();
-    else if ($("floorRegionDlg").style.display === "block") closeFloorRegionDialog();
+    else if ($("markTip").classList.contains("interactive")) showMarkTip(null);
     else if (isSidePanelOpen()) setSidePanel(false);
     else if (edit.mode) clearSelection();
     return;
@@ -5378,12 +5502,8 @@ canvasWrap.addEventListener("pointermove", (e) => {
       activatePanBuffer();
       mapView.panX = dragState.px + (e.clientX - dragState.sx);
       mapView.panY = dragState.py + (e.clientY - dragState.sy);
-      clampPan();
-      if (!viewportInsideDragBuffer()) applyView(true);
-      else {
-        applyViewTransform();
-        scheduleViewFrame(false);
-      }
+      clampPan(true);
+      scheduleViewFrame(!viewportInsideDragBuffer());
       e.preventDefault();
     }
     return;
@@ -5482,17 +5602,38 @@ canvasWrap.addEventListener("pointerleave", () => {
   hideBrushCursor();
 });
 
-window.addEventListener("resize", () => {
+// Inspector, selection tools and responsive rows also resize the actual map viewport.
+// Preserve the world point at its center; do not re-fit or discard the user's zoom.
+let viewportSize = null;
+const viewportObserver = new ResizeObserver(() => {
+  const width = canvasWrap.clientWidth, height = canvasWrap.clientHeight;
+  if (!width || !height) return;
+  if (viewportSize?.width === width && viewportSize?.height === height) return;
+  if (gestureRect) {
+    // A marquee may reveal its actions while the pointer is held. Keep the map
+    // anchored under that pointer instead of recentering halfway through a stroke.
+    const rect = canvasWrap.getBoundingClientRect();
+    const dx = gestureRect.left - rect.left, dy = gestureRect.top - rect.top;
+    mapView.panX += dx; mapView.panY += dy;
+    if (dragState) { dragState.px += dx; dragState.py += dy; }
+    gestureRect = rect;
+  } else if (viewportSize) {
+    mapView.panX += (width - viewportSize.width) / 2;
+    mapView.panY += (height - viewportSize.height) / 2;
+  }
+  viewportSize = { width, height };
+  mapView.focus = null;
   refreshUiMetrics();
-  clampPan();
-  applyView();
+  if (!gestureRect) clampPan(true);
+  scheduleViewFrame(true);
 });
+viewportObserver.observe(canvasWrap);
 
 // PR snapshots have their own documents and raster cache; never adopt them as edit.v.
 window.addEventListener("load", () => {
   let previous = null;
   const lockControls = locked => {
-    for (const selector of [".tb-context", ".tb-fetch", "#btnCapturePanel", "#btnDatasetPanel", "#btnUndo", "#btnRedo"]) {
+    for (const selector of [".tb-context", ".tb-fetch", "#btnCapturePanel", "#btnDatasetPanel", "#btnRepoSync", "#btnUndo", "#btnRedo"]) {
       document.querySelector(selector).inert = locked;
     }
   };
@@ -5616,6 +5757,9 @@ window.__NAV_GRID_EDITOR__ = {
       overviewBytes,
       tierBytes,
       canvasBytes,
+      renderFrames: renderStats.frames,
+      renderLastMs: renderStats.lastMs,
+      renderTotalMs: renderStats.totalMs,
       rasterBytes: [...gridRasterCache.caches.values()].reduce((n,chunks)=>n+chunks.size*256*256*4,0),
       historyEstimatedBytes: allDocuments().reduce((n,{document})=>n+[...document.history.undo,...document.history.redo].reduce((v,op)=>v+op.changes.length*48,0),0),
       documentCount: allDocuments().length,
@@ -5630,14 +5774,35 @@ window.__NAV_GRID_EDITOR__ = {
 };
 
 window.addEventListener("load", () => {
+  workbench = initWorkbenchUI({
+    fit: fitView,
+    back: () => { if (state.previousTier !== undefined) void setActiveTier(state.previousTier); },
+    jump: (x, z) => focusWorldBounds({x0:x-10,x1:x+10,z0:z-10,z1:z+10}, 0.5, 0.5),
+    zoom: factor => zoomAt(canvasWrap.clientWidth / 2, canvasWrap.clientHeight / 2, factor),
+    setSidePanel, isSidePanelOpen,
+  });
+  initLocalPR({hasUnsaved:()=>allDocuments().some(({document})=>document.unsaved || document.busy || document.saving),saveAll:saveAllDocuments});
+  initDataSync({
+    confirmSync: message => workbench.confirm(message),
+    hasUnsaved: () => allDocuments().some(({document}) => document.unsaved || document.busy || document.saving),
+    unsavedNames: () => allDocuments()
+      .filter(({document}) => document.unsaved)
+      .map(({key,document}) => key + "/" + (document.sourceTier || "主图")),
+    setStatus,
+    onSynced: async () => {
+      state.discardOnUnload = true;
+      try { await clearDrafts(); } catch (error) { console.warn("清理网格草稿失败", error); }
+      window.location.reload();
+    },
+  });
   initDatasetExport({
     hasUnsaved: () => allDocuments().some(({document}) => document.unsaved || document.busy || document.saving),
     unsavedNames: () => allDocuments().filter(({document}) => document.unsaved).map(({key,document}) => key + "/" + (document.sourceTier || "主图")),
     saveAll: saveAllDocuments,
-    onOpen: () => { setSideTab("capture", { syncMode: false }); setSidePanel(true); },
+    onOpen: () => workbench.openResource("export"),
   });
   refreshUiMetrics();
-  setSidePanel(false);   // 画布优先：检查器默认收起，模式轨始终保留
+  setSidePanel(true);
   syncModeChrome();      // 初始状态：浏览模式，只显示它的动作组与侧栏面板
   syncButtons();
   syncHistoryButtons();
@@ -5669,41 +5834,10 @@ async function saveAllDocuments() {
   setStatus("已保存全部网格", "ready");
 }
 window.addEventListener("beforeunload", event => {
-  if (allDocuments().some(({document}) => document.unsaved || document.busy || document.saving) || link.source || link.target) {
+  if (!state.discardOnUnload &&
+      (allDocuments().some(({document}) => document.unsaved || document.busy || document.saving) ||
+       link.source || link.target)) {
     event.preventDefault(); event.returnValue = "";
-  }
-});
-window.addEventListener("load", () => {
-  const tools = document.createElement("div"); tools.className = "quick-tools";
-  tools.setAttribute("aria-label","地图导航");
-  tools.innerHTML = `<button id="quickFit" title="缩放并居中显示当前地图">适应窗口</button><button id="quickBack" title="返回上一次查看的分层">上一分层</button>
-    <input id="tierSearch" aria-label="搜索分层" placeholder="搜索分层">
-    <details class="quick-location"><summary>坐标定位</summary><div class="quick-location-fields"><label>X<input id="jumpX" type="number" step="any" aria-label="定位 X" placeholder="世界 X"></label><label>Z<input id="jumpZ" type="number" step="any" aria-label="定位 Z" placeholder="世界 Z"></label><button id="jumpGo">定位</button></div></details>
-    <button id="quickHelp" title="查看快捷键与操作说明">快捷键 <kbd>?</kbd></button>`;
-  canvasWrap.appendChild(tools);
-  for(const type of ["pointerdown","pointermove","pointerup","dblclick","wheel"]) tools.addEventListener(type,event=>event.stopPropagation());
-  $("quickFit").onclick = fitView;
-  $("quickBack").onclick = () => { if (state.previousTier !== undefined) void setActiveTier(state.previousTier); };
-  $("tierSearch").oninput = event => { for (const option of $("selTier").options) option.hidden = !!option.value && !option.textContent.includes(event.target.value.trim()); };
-  $("jumpGo").onclick = () => { if (!$("jumpX").value || !$("jumpZ").value) return; const x=Number($("jumpX").value),z=Number($("jumpZ").value); if(Number.isFinite(x)&&Number.isFinite(z)) {focusWorldBounds({x0:x-10,x1:x+10,z0:z-10,z1:z+10},0.5,0.5);tools.querySelector("details").open=false;} };
-  document.addEventListener("pointerdown",event=>{if(!tools.contains(event.target))tools.querySelector("details").open=false;});
-  for(const id of ["jumpX","jumpZ"])$(id).onkeydown=event=>{if(event.key==="Enter")$("jumpGo").click();};
-  const help=document.createElement("dialog");help.id="shortcutDialog";help.setAttribute("aria-labelledby","shortcutTitle");
-  help.innerHTML=`<div class="shortcut-heading"><div><span class="panel-note">地图工作台</span><h2 id="shortcutTitle">操作与快捷键</h2></div><button type="button" aria-label="关闭操作说明">×</button></div>
-    <dl><dt>右键拖动 / 滚轮</dt><dd>平移地图 / 缩放</dd><dt>1 / 2 / 3</dt><dd>可走 / 阻挡 / 未知；有选区时直接填充</dd><dt>按住数字 + 滚轮</dt><dd>调整画笔宽度</dd><dt>Shift + 左键拖动</dt><dd>框选网格</dd><dt>Ctrl + S</dt><dd>保存当前网格、标定或连接</dd><dt>Ctrl + Z / Y</dt><dd>撤销 / 重做</dd><dt>Esc</dt><dd>关闭窗口或取消选择</dd></dl><p class="panel-note">PR 审阅内支持 J / K 切区、1 / 2 / 3 切对比视图、F 定位、H 收起面板。</p>`;
-  document.body.append(help);help.querySelector("button").onclick=()=>help.close();
-  help.onclick=event=>{if(event.target===help){const r=help.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)help.close();}};
-  $("quickHelp").onclick = () => help.showModal();
-  $("btnLayerCollapse").onclick=()=>{
-    const collapsed=!$("layerPanelContent").hidden;$("layerPanelContent").hidden=collapsed;
-    $("btnLayerCollapse").setAttribute("aria-expanded",String(!collapsed));
-    $("btnLayerCollapse").setAttribute("aria-label",collapsed?"展开图层控制":"收起图层控制");
-    $("btnLayerCollapse").title=collapsed?"展开图层控制":"收起图层控制";
-    $("btnLayerCollapse").textContent=collapsed?"+":"−";
-  };
-  for(const button of document.querySelectorAll(".rail-mode")) {
-    const label=document.createElement("span");label.className="rail-caption";label.setAttribute("aria-hidden","true");
-    label.textContent=button.id==="btnPerspective"?"3D":button.getAttribute("aria-label");button.append(label);
   }
 });
 

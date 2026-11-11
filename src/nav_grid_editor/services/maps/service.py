@@ -22,8 +22,10 @@ from .. import marks as marks_mod
 from ..capture_position import CAPTURE_SOURCE_NAME, CapturePositionClient
 from ..endfield_ws import EndfieldPositionClient
 from .calibration import _fit_affine_ransac, _invert_affine, _mat_vec
+from .data_sync import DataRepositorySync
 from .dataset_export import DatasetExport
 from .pr_review import DataPRReview
+from .local_pr import LocalPRService
 from .events import EventBus
 from .grid import (
     _load_grid_meta_npz, _load_grid_npz, _normalize_floor_regions,
@@ -37,7 +39,7 @@ from .io import (
     _replace_with_retry,
     _save_overview,
     _unique_tmp,
-    solid_png,
+    solid_png, image_media_type, preferred_image, save_lossless_webp,
 )
 from .layers import (
     CATALOG_FILENAME,
@@ -226,7 +228,9 @@ class MapService:
                            or (Path(env_dir) if env_dir else None)
                            or default_assets_dir(self.data_root) / "nav-grid-data")
         self.dataset_export = DatasetExport(self.data_root, self.store.tiles_root, self.grid2d_dir)
+        self.data_sync = DataRepositorySync(self.grid2d_dir)
         self.pr_review = DataPRReview(self.grid2d_dir, self.data_root / "output" / "pr-review")
+        self.local_pr = LocalPRService(self.pr_review)
         self._lock = threading.Lock()
         self._fetch: FetchState | None = None
         self._fetch_thread: threading.Thread | None = None
@@ -259,6 +263,26 @@ class MapService:
         self._layer_image_lock = threading.Lock()
         self._decoded_layer = None
         self._grid_array_cache: dict[Path, tuple[int, tuple]] = {}
+
+    def sync_data_repository(self) -> dict:
+        """Replace local navigation data with the remote repository snapshot."""
+        result = self.data_sync.sync()
+        if result.get("ok"):
+            with self._layer_image_lock:
+                self._layer_catalog_cache = None
+                self._floor_grid_cache.clear()
+                self._overlap_cache.clear()
+                self._sparse_cache.clear()
+                self._image_preview_cache.clear()
+                self._decoded_layer = None
+                self._grid_array_cache.clear()
+            current = str(result.get("current") or "")
+            self.bus.emit(type="data_sync", current=current, branch=result.get("branch"))
+            self.bus.emit(
+                type="log",
+                text=f"数据仓库已同步到 {result.get('branch')} @ {current[:8]}",
+            )
+        return result
 
     def _build_position_client(self):
         """按 ``position_source`` 建位置源客户端（两者 start/stop/status 同接口）。
@@ -405,7 +429,7 @@ class MapService:
             def handle_response(response):
                 url = response.url
                 try:
-                    is_tile = "tile" in url or url.split("?", 1)[0].lower().endswith(".png")
+                    is_tile = "tile" in url or url.split("?", 1)[0].lower().endswith((".png", ".webp"))
                     if not is_tile or url in state.downloaded:
                         return
                     status = response.status
@@ -441,12 +465,12 @@ class MapService:
                             # 非白名单值一律不碰本地缓存也不落盘，交回网络
                             route.continue_()
                             return
-                        key = f"{map_name}/{zoom}/{xs}/{ys}"
+                        key = f"{map_name}/{zoom}/{int(xs)}_{int(ys)}"
                         if key in known:
                             # 已下载过的瓦片：用本地缓存直接应答，不再请求网络
                             cached = self.store.tile_bytes(map_name, zoom, int(xs), int(ys))
                             if cached is not None:
-                                route.fulfill(status=200, content_type="image/png",
+                                route.fulfill(status=200, content_type=image_media_type(cached) or "image/png",
                                               body=cached)
                                 return
                             known.discard(key)  # 缓存读取失败则退回正常抓取
@@ -458,7 +482,7 @@ class MapService:
                         content_type = resp.headers.get("content-type", "") or ""
                         body = resp.body()
                         self._save_tile(state, url, content_type, body)
-                        route.fulfill(status=resp.status, content_type=content_type or "image/png",
+                        route.fulfill(status=resp.status, content_type=image_media_type(body) or content_type or "image/png",
                                       body=body)
                     except Exception as e:
                         state.counts["error"] += 1
@@ -508,12 +532,10 @@ class MapService:
             return
         state.downloaded.add(url)
 
-        is_png = "image/png" in content_type
-        is_webp = "image/webp" in content_type
-        if not content_type and url.split("?", 1)[0].lower().endswith(".png"):
-            is_png = True
-        if not (is_png or is_webp):
+        media_type = image_media_type(data)
+        if media_type is None:
             state.counts["skipped"] += 1
+            state.downloaded.discard(url)
             return
 
         m = tile_pattern.search(url)
@@ -542,35 +564,25 @@ class MapService:
                           kind="unchanged", seq=sum(state.counts.values()))
             return
 
-        rel = f"{map_name}/{zoom}/{x}_{y}.png"
-
-        # WebP → PNG
-        if is_webp:
-            if Image is None:
-                # 不 discard：没装 Pillow 是确定性失败，重试只会把错误数刷上去
-                state.counts["error"] += 1
-                state.add_error(rel, f"缺少 Pillow，无法转换 WebP: {rel}")
-                return
+        suffix = ".webp" if media_type == "image/webp" else ".png"
+        rel = f"{map_name}/{zoom}/{x}_{y}{suffix}"
+        # 原始响应直接落盘，不重新编码；源 URL 和 Content-Type 可能与实际格式不同。
+        if Image is not None:
             try:
-                img = Image.open(BytesIO(data))
-                img = img.convert("RGBA" if img.mode in ("RGBA", "LA", "P") else "RGB")
-                buf = BytesIO()
-                img.save(buf, "PNG")
-                data = buf.getvalue()
-            except Exception as e:
-                # discard：拿到的是坏 WebP，重新取一次可能就好了；不 discard 的话
-                # 这张瓦片本次会话内再也不会被处理
+                with Image.open(BytesIO(data)) as source:
+                    source.verify()
+            except Exception as exc:
                 state.downloaded.discard(url)
                 state.counts["error"] += 1
-                state.add_error(rel, f"WebP 转换失败 {rel}: {e}")
+                state.add_error(rel, f"瓦片校验失败 {rel}: {exc}")
                 return
 
         # 与上一次会话对比分类：先只算 kind，写盘成功后才记进 manifest，
         # 否则写盘失败时 manifest 会记着一条其实没落盘的瓦片
         try:
             if state.previous is not None:
-                prev_file = state.previous / rel
-                if prev_file.exists():
+                prev_file = preferred_image(state.previous / map_name / zoom, f"{x}_{y}")
+                if prev_file is not None:
                     kind = "unchanged" if prev_file.read_bytes() == data else "updated"
                 else:
                     kind = "new"
@@ -684,6 +696,8 @@ class MapService:
             # 好的总图覆盖成一张 1x1 黑图。这是静默丢数据，比合成失败严重得多。
             canvas = None
             if save and Image:
+                if max(max_x - min_x + 1, max_y - min_y + 1) * TILE_SIZE > 16383:
+                    raise ValueError("WebP 单边最大 16383 像素；未缩放或覆盖原图")
                 canvas = Image.new(
                     "RGB",
                     ((max_x - min_x + 1) * TILE_SIZE, (max_y - min_y + 1) * TILE_SIZE),
@@ -715,7 +729,7 @@ class MapService:
             if canvas is not None and pasted:
                 # 按地图/zoom 分类存放，同名覆盖，只保留一份
                 out = (self.store.tiles_root / "maps" / map_name / zoom
-                       / f"{map_name}_{zoom}.png")
+                       / f"{map_name}_{zoom}.webp")
                 out.parent.mkdir(parents=True, exist_ok=True)
                 # 先写临时文件再原子替换：并发的"下载总图"和缩略图生成不会
                 # 读到写了一半的 PNG
@@ -723,7 +737,7 @@ class MapService:
                 with _path_lock(out):
                     try:
                         # 必须显式给格式：临时名以 .tmp 结尾，Pillow 无法从扩展名推断
-                        canvas.save(tmp, "PNG")
+                        save_lossless_webp(canvas, tmp)
                         _replace_with_retry(tmp, out)
                     except Exception:
                         tmp.unlink(missing_ok=True)
@@ -1738,8 +1752,8 @@ class MapService:
         """返回已保存总图的相对路径与瓦片边界/数量；没有则返回 None"""
         if not valid_map_zoom(map_name, zoom):
             return None
-        p = self.store.tiles_root / "maps" / map_name / zoom / f"{map_name}_{zoom}.png"
-        if not p.is_file():
+        p = preferred_image(self.store.tiles_root / "maps" / map_name / zoom, f"{map_name}_{zoom}")
+        if p is None:
             return None
         # 边界必须按"合并后的瓦片全集"算：前端拿这组边界去贴已保存的总图，
         # 只统计单个目录（比如抓取中的会话）会得到缩小的范围、图就对不上。
@@ -1760,8 +1774,8 @@ class MapService:
         """缩略总图的缓存文件路径；没有总图时返回 None。"""
         if not valid_map_zoom(map_name, zoom):
             return None
-        src = self.store.tiles_root / "maps" / map_name / zoom / f"{map_name}_{zoom}.png"
-        if not src.is_file():
+        src = preferred_image(self.store.tiles_root / "maps" / map_name / zoom, f"{map_name}_{zoom}")
+        if src is None:
             return None
         return src.with_name(f"{map_name}_{zoom}{OVERVIEW_SUFFIX}")
 
@@ -1781,7 +1795,7 @@ class MapService:
         out = self.overview_path(map_name, zoom)
         if out is None or Image is None:
             return None
-        src = self.store.tiles_root / "maps" / map_name / zoom / f"{map_name}_{zoom}.png"
+        src = preferred_image(self.store.tiles_root / "maps" / map_name / zoom, f"{map_name}_{zoom}")
         try:
             if out.is_file() and out.stat().st_mtime >= src.stat().st_mtime:
                 return out
@@ -1910,7 +1924,8 @@ class MapService:
         if not isinstance(image_size, dict):
             image_size = {}
         mapping = {
-            "map_name": f"{map_name}_{zoom}.png",
+            "map_name": (preferred_image(self.store.tiles_root / "maps" / map_name / zoom,
+                                         f"{map_name}_{zoom}") or Path(f"{map_name}_{zoom}.webp")).name,
             "image_size": {
                 "width": _as_int(image_size.get("width", 0)),
                 "height": _as_int(image_size.get("height", 0)),

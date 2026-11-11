@@ -22,3 +22,4 @@ async function transact(mode, action) {
 export const storeDraft = draft => transact("readwrite", store=>store.put(draft));
 export const removeDraft = id => transact("readwrite", store=>store.delete(id));
 export const listDrafts = () => transact("readonly", store=>store.getAll());
+export const clearDrafts = () => transact("readwrite", store=>store.clear());
