@@ -1287,9 +1287,36 @@ function updatePlayerMarker(pos, { center = false, forceCenter = false } = {}) {
   mk.style.display = "block";
 }
 
+function manualCaptureFreeActive() {
+  return !!($('captureFreeEnabled')?.checked && edit.mode &&
+    $('captureFreeMode')?.value === 'manual' && !state.prReviewActive);
+}
+
+function updateCaptureFreeTarget() {
+  const el = $('captureFreeTarget');
+  if (!el) return;
+  const tier = currentTierId();
+  const layer = currentTierCatalog().find(item => item.id === tier);
+  const name = tier ? [layer?.level_name || layer?.group, layer?.name || tier].filter(Boolean).join(' · ') : '主图';
+  const target = state.activeKey ? mapDisplayName(state.activeKey.split('@')[0]) + ' / ' + name : '未选择地图';
+  const e = ed();
+  const enabled = !!$('captureFreeEnabled')?.checked;
+  const ready = enabled && edit.mode && !state.prReviewActive && !state.tierLoading &&
+    e?.loaded && !e.busy && !e.saving && edit.v === state.views.get(state.activeKey) && sameTier(e.sourceTier, tier);
+  el.textContent = (ready ? '当前写入：' : '采集目标：') + target +
+    (!enabled ? '（未开启）' : !ready ? '（暂停，等待网格编辑就绪）' :
+      manualCaptureFreeActive() ? '（手动选层）' : '（仅接收楼层匹配的位置）');
+  const indicator = $('captureFreeIndicator');
+  if (indicator) {
+    indicator.hidden = !enabled;
+    indicator.textContent = (ready ? '自动标记 · ' : '自动标记暂停 · ') + target + ' · 停止';
+  }
+}
+
 // 抓包位置自动探涂：保守地只接受 speed <= 7.5 的样本；同层相邻点最多补 7m。
 function markCapturePositionFree(data) {
-  if (!$('captureFreeEnabled')?.checked || !edit.mode) {
+  updateCaptureFreeTarget();
+  if (!$('captureFreeEnabled')?.checked || !edit.mode || state.prReviewActive) {
     state.captureFreeLast = null;
     return;
   }
@@ -1315,11 +1342,13 @@ function markCapturePositionFree(data) {
     return;
   }
   const tierId = currentTierId();
-  if (data.gridTierId != null && !sameTier(data.gridTierId, tierId)) {
+  if (!manualCaptureFreeActive() && data.gridTierId != null && !sameTier(data.gridTierId, tierId)) {
     state.captureFreeLast = null;
     return;
   }
-  if (e.busy || e.saving) {
+  // 切层后旧文档可能尚未被异步加载替换，绝不能写入上一层。
+  if (state.tierLoading || !e.loaded || e.busy || e.saving ||
+      edit.v !== state.views.get(state.activeKey) || !sameTier(e.sourceTier, tierId)) {
     state.captureFreeLast = null;
     return;
   }
@@ -2776,6 +2805,7 @@ function paintLineTo(ix, iz) {
 }
 
 function updateEditStats() {
+  updateCaptureFreeTarget();
   const e = ed();
   if (!e) {
     $("editStats").textContent = "-";
@@ -2949,6 +2979,7 @@ function setEditMode(on) {
     return;
   }
   edit.mode = on;
+  resetCaptureFreeCollection();
   if (on) {
     if (pick.mode) setPickMode(false);
     if (link.mode) setLinkMode(false);
@@ -3801,7 +3832,7 @@ function syncMapSelectors(mapId, preferredZoom = "") {
 }
 
 async function syncPositionLocation(data) {
-  if (state.prReviewActive) return;
+  if (state.prReviewActive || manualCaptureFreeActive()) return;
   if (!data || typeof data !== "object") return;
   const mapId = String(data.mapId || "").trim();
   if (!mapId) return;
@@ -3877,7 +3908,9 @@ async function syncPositionLocation(data) {
     requestRender(RENDER_LAYERS.BASE);
   }
   if (targetTierId !== activeTierId) {
-    await setActiveTier(targetTierId);
+    await setActiveTier(targetTierId, {
+      canApply: () => requestId === state.positionView.requestId && !manualCaptureFreeActive(),
+    });
   }
   if (requestId !== state.positionView.requestId || state.activeKey !== key) return;
   state.positionView.appliedKey = locationKey;
@@ -4568,6 +4601,7 @@ function currentTierId() {
 }
 
 function syncTierControls() {
+  updateCaptureFreeTarget();
   const sel = $("selTier");
   if (!sel) return;
   const layers = currentTierCatalog();
@@ -4651,6 +4685,7 @@ async function decodeTierBitmap(blob, meta, maxEdge = 0) {
 function syncTierResolution() { /* Full resolution is fetched as visible 1024px tiles by drawTierOverlay. */ }
 
 function clearActiveTier(render = true, key = state.activeKey) {
+  state.captureFreeLast = null;
   state.tierRequestId++;
   state.tierLoading = false;
   if (state.activeTier) closeTierBitmap(state.activeTier);
@@ -4804,11 +4839,13 @@ async function loadFloorOverlaps(force = false) {
   requestRender(RENDER_LAYERS.SELECTION);
 }
 
-async function setActiveTier(layerId) {
+async function setActiveTier(layerId, { canApply = () => true } = {}) {
+  if (!canApply()) return;
   const key = state.activeKey;
   if (!key) return;
   const oldTierId = currentTierId();
   if (oldTierId === layerId && !state.tierLoading) return;
+  state.captureFreeLast = null;
   if (oldTierId !== layerId) state.previousTier = oldTierId;
   const tierView = state.views.get(key);
   if (tierView) { tierView.tierViewports ||= new Map(); tierView.tierViewports.set(oldTierId, {...mapView}); }
@@ -4853,6 +4890,12 @@ async function setActiveTier(layerId) {
     const preview = await createImageBitmap(blob);
     if (requestId !== state.tierRequestId || state.activeKey !== key) {
       if (preview && typeof preview.close === "function") preview.close();
+      return;
+    }
+    if (!canApply()) {
+      preview.close();
+      state.tierLoading = false;
+      populateTierSelect();
       return;
     }
     if (state.activeTier) closeTierBitmap(state.activeTier);
@@ -5098,10 +5141,15 @@ for (const id of ["btnGridSettings", "btnLinkSettings"]) {
     $("btnInspectorClose").focus();
   };
 }
-$("captureFreeEnabled").addEventListener("change", () => {
-  $("captureFreeIndicator").hidden = !$("captureFreeEnabled").checked;
+function resetCaptureFreeCollection() {
   state.captureFreeLast = null;
-});
+  // 使已在等待加载的自动切层失效；离开手动采集后，下个位置重新判层。
+  state.positionView.requestId++;
+  state.positionView.appliedKey = '';
+  updateCaptureFreeTarget();
+}
+$("captureFreeEnabled").addEventListener("change", resetCaptureFreeCollection);
+$("captureFreeMode").addEventListener("change", resetCaptureFreeCollection);
 $("captureFreeIndicator").onclick = () => {
   $("captureFreeEnabled").checked = false;
   $("captureFreeEnabled").dispatchEvent(new Event("change"));

@@ -411,7 +411,16 @@
                   <label class="switch-row"
                     ><span>抓包位置标为可走</span
                     ><input id="captureFreeEnabled" type="checkbox" /></label
-                  ><label class="form-field"
+                  >
+                  <label class="form-field">
+                    <span>采集楼层</span>
+                    <select id="captureFreeMode">
+                      <option value="auto">按坐标自动判层</option>
+                      <option value="manual">按手动选定层采集</option>
+                    </select>
+                  </label>
+                  <p id="captureFreeTarget" class="panel-note" role="status" aria-live="polite">采集目标：未选择地图（未开启）</p>
+                  <label class="form-field"
                     ><span>标记半径 · 格</span
                     ><input
                       id="captureFreeRadius"
@@ -422,7 +431,7 @@
                       title="以玩家所在格为中心，向外扩展的格数"
                   /></label>
                   <p class="panel-note">
-                    仅处理有效低速位置，并补齐同层相邻轨迹。
+                    仅处理有效低速位置，并补齐同层相邻轨迹。手动模式写入顶部选定层，无需高度标注；采集时暂停位置流自动切图、切层，切层后采集目标随之更新。
                   </p>
                 </section>
                 <details class="property-details">
