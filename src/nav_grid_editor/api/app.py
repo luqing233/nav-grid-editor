@@ -580,5 +580,11 @@ async def dataset_export_start(request: Request) -> Response:
     target = req.get("target", "")
     if not isinstance(target, str):
         return _bad_request("目标目录必须是字符串")
-    result = await run_in_threadpool(_svc().dataset_export.start, target)
+    export_format = req.get("format", "legacy")
+    if not isinstance(export_format, str):
+        return _bad_request("数据包格式必须是字符串")
+    if "format" in req:
+        result = await run_in_threadpool(_svc().dataset_export.start, target, export_format=export_format)
+    else:
+        result = await run_in_threadpool(_svc().dataset_export.start, target)
     return JSONResponse(result, status_code=202 if result["ok"] else 400)

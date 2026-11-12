@@ -48,6 +48,10 @@ uv run python -m nav_grid_editor.commands.build_presets --output output/new-tile
 
 输出必须是新目录，验证完成后再替换发布的预设；生成过程不访问网络或修改原始抓取缓存。
 
+定位端可以用同一批主图 Q90 瓦片生成独立资源包。包内包含完整粗搜缩图、楼层排序图及导航数据，制作方法与索引契约见 [定位瓦片数据包 v1](docs/localization-tiles-v1.md)。
+在 v1 的完整匹配图上裁去纯零外边，可生成 [定位瓦片数据包 v2](docs/localization-tiles-v2.md)，其中记录完整搜索尺寸及补零位置。
+[定位瓦片数据包 v3](docs/localization-tiles-v3.md) 将同样的零像素语义应用到精匹配原生块，并支持逐块恢复匹配 BGR。
+
 ### 常用参数
 
 | 参数 | 说明 |
@@ -373,23 +377,25 @@ level_id 的层混成一批候选，对跟随器就是静默错层。
 
 ## 一键导出发布数据包
 
-页面顶部点击“导出数据包”，填写**新目录或空目录**，再点“一键导出 nav-grid-data”。
+页面顶部点击“导出数据包”，填写**新目录或空目录**，选择资源格式，再点“一键导出 nav-grid-data”。
+页面默认使用 **定位瓦片 v3**，也可选择“兼容整图 WebP”。
 留空时在 `<data-root>/exports/` 下生成独立目录。先保存网格编辑；导出仅包含已保存的磁盘数据。
 状态区显示进度、错误原因和最终目录，刷新页面后仍可查看服务端任务。
 
-导出包包含全部已标定 zoom 4 基础图、实际 catalog 引用的分层图、现有全部 NPZ、完整层声明、
-连接、定位 manifest 和统一 `dataset.json`。图片保存为原尺寸彩色 WebP Q90（Pillow `quality=90, method=4`），
-楼层图保留原透明通道，alpha 逐像素校验；不再转灰度或压平透明背景。不重采样、不修改编辑用彩色素材；二维网格原字节保留，未知格和缺失高度不补值。
-清单结构和版本不变，图片路径、文件大小和 SHA-256 随实际文件更新；标定矩阵和坐标语义不变。
-新增 `opencv-python-headless` 依赖后请运行 `uv sync --locked`。
+导出读取全部已标定 zoom 4 基础图、实际 catalog 引用的分层图、现有全部 NPZ、层声明和连接。
+v3 主图读取与标定尺寸相符的完整 Q90 预设。楼层优先读取同目录同名原始 PNG，只有 WebP 时无损切块。
+搜索图和精匹配块从同一套解码像素生成。发布清单记录完整搜索尺寸、ROI、瓦片引用和 SHA-256。
+整图格式输出原尺寸 Q90 WebP。两种格式都通过 `dataset.json` 提供导航注册，网格保留原字节。
 
 导出先在独立暂存目录完成冻结、WebP 编码和校验，交付前复核源文件内容；源数据有变化会失败，
 请保存完成后重试。已有非空目录不会被覆盖，也不会自动执行 Git 提交或推送。
 缺少实际 `assets/tiles/layers/catalog.json` 或其中引用的图片时，会要求先补齐，不使用内置兜底目录。
 
-HTTP 接口：`POST /api/dataset/export`，请求 `{"target":"D:/nav-grid-upload"}`；
-`GET /api/dataset/export/status` 查询任务。发布目录只能是新目录或空目录，不能在素材、网格或凭证源目录中。
-具体清单字段、扩图换算与最小上传集合见 [数据包与上传约定](docs/dataset-export.md)。
+命令行使用 `uv run nav-grid-editor export-dataset --output output/nav-grid-release`。
+通过 `--format legacy` 选择整图格式。HTTP 接口 `POST /api/dataset/export` 接受
+`{"target":"D:/nav-grid-upload","format":"tiled-v3"}`，省略 `format` 时保留旧整图行为。
+通过 `GET /api/dataset/export/status` 查询任务。发布目录只能是新目录或空目录，且须位于素材、网格和凭证源目录之外。
+详见 [v3 契约及发布验证](docs/localization-tiles-v3.md) 和 [整图数据包约定](docs/dataset-export.md)。
 
 ## 数据目录
 
@@ -398,7 +404,8 @@ assets/
 ├── nav-grid-data/       导航网格数据，随仓库发布
 │                        （网格 + links.json + levels.json）
 ├── tiles/
-│   ├── layers/          官方分层图片缓存，仅本地
+│   ├── layers/          预设分层 WebP、目录及本地原图
+│   ├── presets/         完整 Q90 预设瓦片和清单，随仓库发布
 │   ├── latest/          最新合并瓦片，仅本地
 │   ├── run_<时间戳>/    抓取会话，仅本地
 │   └── maps/            拼接总图与标定，随仓库发布
@@ -409,6 +416,7 @@ GitHub 仓库只跟踪以下内容：
 
 - `assets/nav-grid-data/`
 - `assets/tiles/maps/`
+- `assets/tiles/presets/`、`assets/tiles/layers/` 中的发布清单和 WebP 预设
 
 瓦片缓存、抓取会话、地图标记、图标和缩略图缓存均保留在本机。
 `browser_profile/` 与 `configs/` 包含登录态和设备标识，始终不会进入版本库。

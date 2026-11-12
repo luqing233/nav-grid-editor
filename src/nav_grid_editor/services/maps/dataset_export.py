@@ -103,7 +103,7 @@ def _calibration(mapping: dict, size: tuple[int, int]) -> None:
         raise ValueError("标定文件缺少尺寸或仿射矩阵") from exc
 
 
-def _plan(tiles: Path, grids: Path) -> dict[str, Path]:
+def _plan(tiles: Path, grids: Path, *, tiled: bool = False) -> dict[str, Path]:
     catalog = tiles / "layers/catalog.json"
     if not catalog.is_file():
         raise ValueError("缺少分层 catalog.json，请先执行 fetch-layers；不会用内置兜底覆盖完整目录")
@@ -126,6 +126,9 @@ def _plan(tiles: Path, grids: Path) -> dict[str, Path]:
         if key in plan or output_key in image_outputs:
             raise ValueError(f"重复的分层图片路径: {key}")
         image_outputs.add(output_key)
+        original = source.with_suffix(".png")
+        if tiled and original.is_file():
+            source = _relative(tiles / "layers", Path(entry["path"]).with_suffix(".png").as_posix())
         plan[key] = source
     for directory in sorted((tiles / "maps").glob("*/4")):
         mid = directory.parent.name
@@ -134,6 +137,9 @@ def _plan(tiles: Path, grids: Path) -> dict[str, Path]:
             continue  # Uncalibrated captures cannot be published as world-space base maps.
         if not valid_map_zoom(mid, "4"):
             raise ValueError(f"非法地图 ID: {mid}")
+        if tiled:
+            plan[f"localization/maps/{mid}/4/{mapping.name}"] = mapping
+            continue
         image = preferred_image(directory, f"{mid}_4")
         if image is None:
             raise ValueError(f"缺少已标定地图图片: {mid}_4.webp / .png")
@@ -148,6 +154,16 @@ def _plan(tiles: Path, grids: Path) -> dict[str, Path]:
     for name in ("links.json", "levels.json"):
         if (grids / name).is_file():
             plan[name] = grids / name
+    if tiled:
+        preset_root = tiles / "presets"
+        manifest = preset_root / "manifest.json"
+        plan["presets/manifest.json"] = manifest
+        for record in _json(manifest)["files"]:
+            relative = record["path"]
+            key = "presets/" + relative
+            if key in plan or not relative.endswith(".webp"):
+                raise ValueError(f"预设路径重复或格式无效: {relative}")
+            plan[key] = _relative(preset_root, relative)
     return plan
 
 
@@ -165,7 +181,7 @@ def _export_grid_meta(path: Path) -> dict:
     return meta
 
 
-def _build(frozen: dict[str, Path], out: Path, progress) -> dict:
+def _build(frozen: dict[str, Path], out: Path, progress, *, metadata_only: bool = False) -> dict:
     # Reject malformed NPZ metadata before spending time converting large images.
     validated_grids = {key: _export_grid_meta(path) for key, path in frozen.items()
                        if key.endswith(".grid.npz")}
@@ -220,12 +236,23 @@ def _build(frozen: dict[str, Path], out: Path, progress) -> dict:
                 raise ValueError(f"levels 与 catalog 身份冲突: {tier}")
             declared[tier] = {**(old or {}), **row}
 
-    image_keys = [name for name in frozen if name.endswith((".png", ".webp"))]
+    image_keys = [name for name in frozen if name.startswith("localization/") and name.endswith((".png", ".webp"))]
+    if metadata_only:
+        image_keys.extend(name.removesuffix("_mapping.json") + ".webp" for name in frozen
+                          if name.startswith("localization/maps/") and name.endswith("_mapping.json"))
     for number, key in enumerate(image_keys, 1):
-        progress("彩色 WebP Q90", number, len(image_keys))
+        progress("校验标定和楼层" if metadata_only else "彩色 WebP Q90", number, len(image_keys))
         layer = key.startswith("localization/layers/")
         output_key = str(Path(key).with_suffix(".webp").as_posix())
-        size = _color_webp(frozen[key], out / output_key, layer=layer)
+        if not metadata_only:
+            size = _color_webp(frozen[key], out / output_key, layer=layer)
+        elif layer:
+            with Image.open(frozen[key]) as image:
+                size = image.size
+        else:
+            mapping_key = str(Path(key).with_suffix("").as_posix()) + "_mapping.json"
+            dims = _json(frozen[mapping_key])["image_size"]
+            size = (dims["width"], dims["height"])
         if layer:
             entry = next(e for e in entries if "localization/layers/" + e["path"] == key)
             if size != (entry["width"], entry["height"]):
@@ -252,7 +279,8 @@ def _build(frozen: dict[str, Path], out: Path, progress) -> dict:
                               "height": size[1], "coordinate_space": sid})
         registrations[(sid, mid, tier, "4")] = {"coordinate_space_id": sid, "map_name": mid,
                                                "tier": tier, "zoom": "4", "visual": visual, "grid": None}
-        visual_files.append(out / output_key)
+        if not metadata_only:
+            visual_files.append(out / output_key)
 
     navigation_files = []
     for key, source in frozen.items():
@@ -299,11 +327,19 @@ def _build(frozen: dict[str, Path], out: Path, progress) -> dict:
                               and (not end["zoom"] or k[2] == end["zoom"])]
                 if len(candidates) != 1:
                     raise ValueError(f"连接端点缺网格或 zoom 不明确: {link['id']} / {side}")
-        _write_json(out / "links.json", links)
+        if metadata_only:
+            shutil.copyfile(frozen["links.json"], out / "links.json")
+        else:
+            _write_json(out / "links.json", links)
     else:
         _write_json(out / "links.json", {"schema_version": 3, "links": []})
     # Derive declarations from the full catalog, never from the set of NPZ files.
-    _write_json(out / "levels.json", build_level_index(list(declared.values()), catalog.get("generated_at", "")))
+    normalized_levels = build_level_index(list(declared.values()), catalog.get("generated_at", ""))
+    saved_levels = _json(frozen["levels.json"]) if metadata_only and "levels.json" in frozen else None
+    if saved_levels is not None and saved_levels == {**normalized_levels, "generated_at": saved_levels.get("generated_at")}:
+        shutil.copyfile(frozen["levels.json"], out / "levels.json")
+    else:
+        _write_json(out / "levels.json", normalized_levels)
     for name, role in (("levels.json", "levels"), ("links.json", "links")):
         navigation_files.append({**_record(out, out / name), "role": role})
     target_catalog = out / "localization/layers/catalog.json"
@@ -312,7 +348,8 @@ def _build(frozen: dict[str, Path], out: Path, progress) -> dict:
     visual_files.append(target_catalog)
     local_root = out / "localization"
     manifest = {
-        "schema_version": 1, "kind": "okef-visual-localization", "maps_root": "maps", "layers_root": "layers",
+        "schema_version": 1, "kind": "okef-visual-localization-input" if metadata_only else "okef-visual-localization",
+        "maps_root": "maps", "layers_root": "layers",
         "layer_catalog": "layers/catalog.json", "base_maps": sorted(base_maps, key=lambda x: x["map_id"]),
         "coordinates": {"axes": ["x", "z"], "height_available": False},
         "coverage": {"layer_count": len(entries), "independent_layer_count": sum(e["map_category"] == "independent" for e in entries),
@@ -331,6 +368,8 @@ def _build(frozen: dict[str, Path], out: Path, progress) -> dict:
                "localization_manifest": _record(out, local_root / "manifest.json"),
                "registrations": [registrations[k] for k in sorted(registrations)]}
     _write_json(out / "dataset.json", dataset)
+    if metadata_only:
+        return {"grids": len(grid_meta), "images": len(image_keys), "layers": len(entries)}
     schema = Path(__file__).with_name("dataset.schema.json")
     (out / "schemas").mkdir()
     shutil.copyfile(schema, out / "schemas/dataset.schema.json")
@@ -413,19 +452,22 @@ class DatasetExport:
             raise ValueError("请选择新目录或空目录；不会覆盖已有仓库或非空目录")
         return target
 
-    def start(self, target: str = "") -> dict:
+    def start(self, target: str = "", *, export_format: str = "legacy") -> dict:
         with self._lock:
             if self._state["running"]:
                 return {"ok": False, "error": "已有导出任务正在运行"}
             try:
+                if export_format not in ("legacy", "tiled-v3"):
+                    raise ValueError("不支持的数据包格式")
                 output = self._target(target)
             except (ValueError, OSError) as exc:
                 return {"ok": False, "error": str(exc)}
-            self._state = {"running": True, "phase": "准备导出", "error": None, "output": str(output)}
-        threading.Thread(target=self._run, args=(output,), daemon=True).start()
+            self._state = {"running": True, "phase": "准备导出", "error": None, "output": str(output),
+                           "format": export_format}
+        threading.Thread(target=self._run, args=(output, export_format), daemon=True).start()
         return {"ok": True, "output": str(output)}
 
-    def _run(self, target: Path):
+    def _run(self, target: Path, export_format: str = "legacy"):
         stage = None
         lock_path = None
         lock_fd = None
@@ -436,7 +478,8 @@ class DatasetExport:
             stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.export-", dir=target.parent)).resolve()
             inputs = stage / ".inputs"
             inputs.mkdir()
-            plan = _plan(self.tiles, self.grids)
+            tiled = export_format == "tiled-v3"
+            plan = _plan(self.tiles, self.grids, tiled=True) if tiled else _plan(self.tiles, self.grids)
             frozen, hashes = {}, {}
             for count, (name, source) in enumerate(plan.items(), 1):
                 self._progress("冻结源文件", count, len(plan))
@@ -445,13 +488,21 @@ class DatasetExport:
                 with _path_lock(source):
                     shutil.copyfile(source, destination)
                 frozen[name], hashes[name] = destination, _digest(destination)
-            summary = _build(frozen, stage, self._progress)
+            if tiled:
+                from .dataset_tiled_export import build_tiled_export, verify_tiled_release
+
+                summary = build_tiled_export(frozen, inputs, stage, self._progress)
+            else:
+                summary = _build(frozen, stage, self._progress)
             self._progress("校验源文件一致性")
-            if _plan(self.tiles, self.grids) != plan or any(_digest(source) != hashes[name] for name, source in plan.items()):
+            current = _plan(self.tiles, self.grids, tiled=True) if tiled else _plan(self.tiles, self.grids)
+            if current != plan or any(_digest(source) != hashes[name] for name, source in plan.items()):
                 raise ValueError("源数据在导出期间发生变化，请保存完成后重新导出")
             if not inputs.is_relative_to(stage):
                 raise ValueError("临时输入目录超出暂存目录")
             shutil.rmtree(inputs)
+            if tiled:
+                verify_tiled_release(stage)
             self._target(str(target))  # Recheck immediately before publication; never delete a nonempty destination.
             if target.exists():
                 target.rmdir()

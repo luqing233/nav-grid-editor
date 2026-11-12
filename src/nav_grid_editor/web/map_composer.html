@@ -787,9 +787,13 @@
                   autocomplete="off"
                   aria-label="数据包导出目标文件夹"
               /></label>
-              <p class="panel-note">
-                发布图片使用原尺寸彩色 WebP Q90，保留透明通道；网格保留已保存数据。
-              </p>
+              <label class="form-field">
+                <span>资源格式</span>
+                <select id="datasetFormat">
+                  <option value="tiled-v3">定位瓦片 v3</option>
+                  <option value="legacy">兼容整图 WebP</option>
+                </select>
+              </label>
               <div class="button-row">
                 <button
                   id="btnDatasetExport"

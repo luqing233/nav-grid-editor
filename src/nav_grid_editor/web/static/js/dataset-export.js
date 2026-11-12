@@ -1,6 +1,7 @@
 // Disk-snapshot export: the server owns the job across page reloads.
 export function initDatasetExport({ hasUnsaved = () => false, onOpen = () => {}, unsavedNames = () => [], saveAll = null } = {}) {
   const target = document.getElementById("datasetTarget");
+  const format = document.getElementById("datasetFormat");
   const button = document.getElementById("btnDatasetExport");
   const status = document.getElementById("datasetExportStatus");
   let timer = null;
@@ -14,7 +15,9 @@ export function initDatasetExport({ hasUnsaved = () => false, onOpen = () => {},
       (data.phase || "未导出") +
       (data.running && data.total ? ` · ${data.done}/${data.total}` : "") +
       (data.output ? "\n目标：" + data.output : "") +
-      (data.summary ? `\n${data.summary.images} 张彩色 WebP · ${data.summary.grids} 份网格` : "");
+      (data.summary ? data.summary.format === "tiled-v3"
+        ? `\n定位瓦片 v3 · ${data.summary.tiles} 格 · ${data.summary.grids} 份网格`
+        : `\n${data.summary.images} 张彩色 WebP · ${data.summary.grids} 份网格` : "");
     if (data.default_parent) target.placeholder = data.default_parent + " 下自动生成新目录（可留空）";
   };
   async function poll() {
@@ -46,7 +49,7 @@ export function initDatasetExport({ hasUnsaved = () => false, onOpen = () => {},
     try {
       const response = await fetch("/api/dataset/export", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target: target.value.trim() }),
+        body: JSON.stringify({ target: target.value.trim(), format: format?.value || undefined }),
       });
       const data = await response.json();
       if (!response.ok || !data.ok) {

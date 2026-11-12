@@ -7,6 +7,7 @@
     nav-grid-editor [--port 8765] [--data-root PATH]
     nav-grid-editor fetch-marks [抓取参数]
     nav-grid-editor fetch-layers [抓取参数]
+    nav-grid-editor export-dataset [导出参数]
     python -m nav_grid_editor [同上]
 
 页面：
@@ -149,6 +150,10 @@ def _run_server(argv: list[str] | None = None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "export-dataset":
+        from .commands.export_dataset import main as export_dataset_main
+
+        return export_dataset_main(args[1:])
     if args and args[0] == "fetch-marks":
         from .commands.fetch_marks import main as fetch_marks_main
 

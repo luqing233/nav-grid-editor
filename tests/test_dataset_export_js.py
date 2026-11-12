@@ -66,6 +66,20 @@ assert.match(elements.get("datasetExportStatus").textContent, /源数据变化/)
 ui.stop();
 ''')
 
+    def test_v3_selection_reaches_server_and_uses_tile_summary(self):
+        self.run_js(r'''
+const replies = [result({running: false}), result({ok: true}),
+  result({running: false, phase: "导出完成", summary: {format: "tiled-v3", tiles: 10383, grids: 6}})];
+let request;
+globalThis.fetch = async (url, options) => { if (options) request = JSON.parse(options.body); return replies.shift(); };
+const ui = initDatasetExport(); await tick();
+elements.get("datasetFormat").value = "tiled-v3";
+await elements.get("btnDatasetExport").onclick();
+assert.equal(request.format, "tiled-v3");
+assert.match(elements.get("datasetExportStatus").textContent, /定位瓦片 v3.*10383 格.*6 份网格/);
+ui.stop();
+''')
+
     def test_explicit_bad_target_error_is_not_overwritten_by_poll(self):
         self.run_js(r'''
 let calls = 0;
