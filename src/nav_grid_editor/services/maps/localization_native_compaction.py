@@ -27,6 +27,15 @@ def _compact_tile(source, target, record, layer):
         raise ValueError(f"瓦片尺寸或像素格式错误: {record['path']}")
     roi = _nonzero_roi(image)
     left, top, right, bottom = roi
+    if layer:
+        decoded = _decode(raw)
+        alpha = decoded[:, :, 3] if decoded.shape[2] == 4 else np.full(decoded.shape[:2], 255, np.uint8)
+        if np.any(alpha):
+            # Matching BGR does not encode opaque black or partial coverage.
+            # Keep the native payload so compositing can recover all alpha.
+            name = record["path"]
+            payload = target.files.get(name) or target.write(name, raw)
+            return {"storage": "full", "roi": roi, **payload}
     if roi == [0, 0, 0, 0]:
         if np.any(image):
             raise ValueError(f"零块校验失败: {record['path']}")

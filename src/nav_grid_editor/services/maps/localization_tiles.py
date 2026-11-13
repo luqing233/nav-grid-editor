@@ -341,6 +341,10 @@ def _tile_payload_size(record, version):
     full = record["width"], record["height"]
     if version < 3:
         return full
+    if record["storage"] == "full" and record["roi"] == [0, 0, 0, 0]:
+        if not record["path"] or record["size"] <= 0 or not record["sha256"]:
+            raise ValueError("黑色非透明瓦片必须保留完整载荷")
+        return full
     size = _roi_payload_size(record)
     storage = record["storage"]
     if storage == "zero" and size is None:

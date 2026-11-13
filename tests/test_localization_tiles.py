@@ -267,11 +267,29 @@ class CompactNativeTileTest(unittest.TestCase):
                     self.assertEqual(compact["storage"], "zero")
                     self.assertIsNone(_tile_payload_size(compact, 3))
                 else:
-                    self.assertEqual(compact["storage"], "roi")
+                    self.assertEqual(compact["storage"], "full")
                     self.assertEqual(compact["roi"], [0, 10, 1, 11])
-                    self.assertEqual(_tile_payload_size(compact, 3), (1, 1))
+                    self.assertEqual(_tile_payload_size(compact, 3), (17, 11))
                     with Image.open(target.root / compact["path"]) as image:
-                        self.assertEqual(image.getpixel((0, 0)), (1, 0, 0))
+                        self.assertEqual(image.getpixel((0, 10)), (1, 0, 0, 1))
+
+    def test_opaque_black_outside_rgb_roi_and_fully_black_floor_keep_alpha(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = _Bundle(Path(temp) / "v2")
+            target = _Bundle(Path(temp) / "v3")
+            for colored in (False, True):
+                pixels = np.zeros((64, 64, 4), np.uint8)
+                pixels[:, :, 3] = 255
+                if colored:
+                    pixels[20:40, 20:40, :3] = (20, 60, 90)
+                ok, encoded = cv2.imencode(".webp", pixels, [cv2.IMWRITE_WEBP_QUALITY, 101])
+                self.assertTrue(ok)
+                tile = {**source.write(f"floor-{colored}.webp", encoded.tobytes()), "width": 64, "height": 64}
+                result = {**tile, **_compact_tile(source.root, target, tile, True)}
+                self.assertEqual(result["storage"], "full")
+                self.assertEqual(result["roi"], [20, 20, 40, 40] if colored else [0, 0, 0, 0])
+                self.assertEqual(_tile_payload_size(result, 3), (64, 64))
+                self.assertEqual((target.root / result["path"]).read_bytes(), (source.root / tile["path"]).read_bytes())
 
     def test_larger_lossless_roi_keeps_original_bytes(self):
         with tempfile.TemporaryDirectory() as temp:

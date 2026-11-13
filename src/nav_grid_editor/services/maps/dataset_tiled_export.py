@@ -50,12 +50,23 @@ def _verify_v3_pixels(before, after):
                 restored[t:bottom, l:r] = _decode(_read_verified(new, target), cv2.IMREAD_COLOR)
             if not np.array_equal(restored, expected):
                 raise ValueError(f"精匹配 BGR 还原不一致: {path} {source['column']},{source['row']}")
+            if layer:
+                original = _decode(raw)
+                alpha = original[:, :, 3] if original.shape[2] == 4 else np.full(original.shape[:2], 255, np.uint8)
+                restored_alpha = np.zeros_like(alpha)
+                if target["storage"] == "full":
+                    restored_alpha[:] = alpha  # Payload equality was verified above.
+                elif target["storage"] == "roi":
+                    restored_alpha[t:bottom, l:r] = 255
+                if not np.array_equal(restored_alpha, alpha):
+                    raise ValueError(f"楼层 alpha 还原不一致: {path} {source['column']},{source['row']}")
         for entry in (*a["coarse"], a["floor_rank"]):
             if entry is not None:
                 if entry["path"] is not None and _read_verified(old, entry) != _read_verified(new, entry):
                     raise ValueError(f"裁边改变了搜索文件: {entry['path']}")
                 search_count += 1
-    return {"images": len(paths), "tiles_pixel_equal": tile_count, "unique_tile_decodes": len(tested),
+    return {"images": len(paths), "tiles_pixel_equal": tile_count, "floor_alpha_equal": True,
+            "unique_tile_decodes": len(tested),
             "search_records_byte_equal": search_count}
 
 
