@@ -14,6 +14,11 @@ from .dataset_export import _build as build_metadata, _export_grid_meta, _json, 
 from .links import normalize_link
 from .settings import disk_tier
 from .localization_native_compaction import _build as compact_native, _tile_pixels
+from .prepared_localization import (
+    PREPARED_DIRNAME,
+    build_prepared_localization,
+    verify_prepared_localization,
+)
 from .localization_search_compaction import _build as compact_search, _read_verified
 from .localization_tiles import _build as build_tiles, _decode, verify_localization_tiles
 
@@ -81,7 +86,19 @@ def verify_tiled_release(root):
                 ".gitattributes", "schemas/dataset.schema.json"}
     expected.update(record["path"] for record in dataset["navigation_files"])
     expected.update(f"localization/{record['path']}" for record in manifest["files"])
-    actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
+    prepared = root / PREPARED_DIRNAME
+    if prepared.is_dir():
+        verify_prepared_localization(prepared)
+        expected.update(
+            path.relative_to(root).as_posix()
+            for path in prepared.rglob("*")
+            if path.is_file()
+        )
+    actual = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and path != root / ".git"
+    }
     if expected != actual:
         raise ValueError(f"发布包有缺项或孤立文件: {sorted(expected ^ actual)[:10]}")
     grids = {}
@@ -130,6 +147,8 @@ def build_tiled_export(frozen, inputs, stage, progress):
         report = compact_native(v2, stage)
         progress("逐像素核对精匹配瓦片")
         report["verification"] = _verify_v3_pixels(v2, stage)
+        progress("生成预编译定位资源")
+        report["prepared_localization"] = build_prepared_localization(stage)
 
     source_records = [_record(inputs, path) for path in sorted(frozen.values())]
     fingerprint = hashlib.sha256(json.dumps(source_records, ensure_ascii=False, sort_keys=True).encode()).hexdigest()

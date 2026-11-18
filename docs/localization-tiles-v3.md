@@ -62,6 +62,20 @@ uv run python -m nav_grid_editor.commands.compact_localization_native_tiles `
 
 `validation.json` 按图记录各存储类型的格数、完整读取的解码像素、索引体积及像素等价结果。整包统计以清单及引用文件为准。图像索引用紧凑 JSON 写出，瓦片对象节省和索引节省分别计量。真实精匹配的耗时和峰值内存需通过消费端回放测量。
 
+## 预编译运行资源
+
+`tiled-v3` 发布目录同时包含 `prepared-v1/`。它面向首次导航冷启动，避免运行端逐层生成压暗主图合成图：
+
+- `atlases/<map>-1280.webp`：该地图全部已有分层图按固定边界排入一张 Q90 WebP 竞争图集。
+- `atlases/<map>-1280-mask.bin`：与图集同尺寸的位打包候选覆盖范围。
+- `masks/<map>/<tier>.bin`：每层独立的候选覆盖位掩码，按行优先、MSB-first 打包，末尾补零。
+- `rank-images/<map>/<tier>.webp`：发布时冻结的楼层排序图。
+- `floor-index.json`：与 manifest 完全一致的楼层、边界、图集区域、掩码和排序图索引。
+- `manifest.json`：输入宽度、合成参数、源定位清单摘要、每个资源和完成状态。
+- `validation.json`、`READY`：全量回读校验结果和完成标记。
+
+这些文件直接跟随 nav-grid-data 发布，不额外生成 ZIP，也不进入客户端可删除的运行时缓存。客户端只有在 `READY` 与 `manifest.json` 摘要一致后才能使用；客户端生成逻辑不保留。
+
 正式包的验证报告另含冻结输入摘要、全量精匹配 BGR 核验、粗搜与排序统计，以及采集目录记录的真实缺项。`missing_logic_ids` 中的楼层保留缺项身份。输出校验会拒绝孤立文件、重复坐标、缺块及无效的导航注册。可对交付目录再次运行校验：
 
 ```powershell

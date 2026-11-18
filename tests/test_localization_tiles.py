@@ -17,6 +17,7 @@ from nav_grid_editor.services.maps.localization_search_compaction import _compac
 from nav_grid_editor.services.maps import MapService
 from nav_grid_editor.services.maps.dataset_export import _build, _json, _plan, _record, _write_json
 from nav_grid_editor.services.maps.dataset_tiled_export import verify_tiled_release
+from nav_grid_editor.services.maps.prepared_localization import verify_prepared_localization
 
 
 class LocalizationTilesTest(unittest.TestCase):
@@ -150,6 +151,16 @@ class LocalizationTilesTest(unittest.TestCase):
         self.assertEqual((self.output / "levels.json").read_bytes(), saved_levels)
         self.assertEqual(report["missing_layers"][0]["id"], "unavailable")
         self.assertEqual(report["verification"]["tiles_pixel_equal"], 4)
+        prepared = self.output / "prepared-v1"
+        prepared_manifest = _json(prepared / "manifest.json")
+        self.assertEqual(prepared_manifest["kind"], "okef-prepared-localization")
+        self.assertEqual(prepared_manifest["source"]["webp_quality"], 90)
+        self.assertEqual(prepared_manifest["coverage"]["layered_floors"], 1)
+        self.assertTrue((prepared / "READY").is_file())
+        self.assertEqual(verify_prepared_localization(prepared)["maps"], {"m": 1})
+        atlas_raw = (prepared / prepared_manifest["atlases"]["m"]["path"]).read_bytes()
+        self.assertEqual(atlas_raw[8:12], b"WEBP")
+        self.assertEqual(report["prepared_localization"]["layered_floors"], 1)
         dataset = _json(self.output / "dataset.json")
         manifest = _json(local / "manifest.json")
         managed_bytes = (self.output / "dataset.json").stat().st_size + dataset["localization_manifest"]["size"]
@@ -158,6 +169,19 @@ class LocalizationTilesTest(unittest.TestCase):
         (local / "orphan.webp").write_bytes(raw)
         with self.assertRaisesRegex(ValueError, "孤立"):
             verify_tiled_release(self.output)
+
+    def test_prepared_localization_rejects_corrupt_index(self):
+        self.assertTrue(self.svc.dataset_export.start(str(self.output), export_format="tiled-v3")["ok"])
+        deadline = time.monotonic() + 20
+        while self.svc.dataset_export.status()["running"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIsNone(self.svc.dataset_export.status()["error"])
+        prepared = self.output / "prepared-v1"
+        manifest = _json(prepared / "manifest.json")
+        atlas = prepared / manifest["atlases"]["m"]["path"]
+        atlas.write_bytes(atlas.read_bytes() + b"corrupt")
+        with self.assertRaisesRegex(ValueError, "摘要不符|竞争图集"):
+            verify_prepared_localization(prepared)
 
     def test_v2_keeps_tiles_navigation_and_calibration_bytes(self):
         self.build()
