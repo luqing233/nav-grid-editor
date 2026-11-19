@@ -15,8 +15,11 @@ def main(argv=None):
     parser.add_argument("--format", choices=("tiled-v3", "legacy"), default="tiled-v3")
     parser.add_argument("--output", default="")
     args = parser.parse_args(argv)
-    job = DatasetExport(args.data_root, args.tiles_root or args.data_root / "assets/tiles",
-                        args.grid2d_dir or args.data_root / "assets/nav-grid-data")
+    job = DatasetExport(
+        args.data_root,
+        args.tiles_root or args.data_root / "assets/tiles",
+        args.grid2d_dir or args.data_root / "assets/nav-grid-data" / "navigation",
+    )
     result = job.start(args.output, export_format=args.format)
     if not result["ok"]:
         parser.exit(1, result["error"] + "\n")

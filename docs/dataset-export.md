@@ -29,18 +29,24 @@ WebP 单边上限 16383 像素，超限拒绝整个导出，不做隐式缩放�
 
 ```text
 nav-grid-data/
-  dataset.json                         本次完整快照的统一发布清单
-  schemas/dataset.schema.json           根清单结构约束
-  levels.json                          全部层声明，包含没有网格的层
-  links.json                           显式跨层连接
-  <map>_<zoom>.grid.npz                 主图网格
-  <map>__<tier>_<zoom>.grid.npz          分层网格
-  localization/
-    manifest.json                      既有定位清单，不更换其schema
-    maps/<map>/4/<map>_4.webp
-    maps/<map>/4/<map>_4_mapping.json
-    layers/catalog.json
-    layers/<map>/<level>/<tier>.webp
+  README.md
+  .gitattributes
+  navigation/
+    dataset.json                       本次完整快照的统一发布清单
+    schemas/dataset.schema.json        根清单结构约束
+    levels.json                        全部层声明，包含没有网格的层
+    links.json                         显式跨层连接
+    validation.json
+    prepared-package.json
+    <map>_<zoom>.grid.npz              主图网格
+    <map>__<tier>_<zoom>.grid.npz      分层网格
+    localization/
+      manifest.json                    定位清单
+      maps/<map>/4/
+      layers/catalog.json
+      layers/<map>/<level>/<tier>/
+      objects/
+      prepared/
 ```
 
 网格继续使用 magic=okef-nav-grid/schema_version=2：cells[z,x] 为二维 uint8，
