@@ -21,6 +21,7 @@ from .settings import disk_tier
 
 MAX_BYTES = 64 * 1024 * 1024
 MAX_CELLS = 1_000_000
+NAVIGATION_DIRNAME = "navigation"
 
 
 def parse_pr(value: str, repository: str) -> int:
@@ -134,10 +135,28 @@ def object_changes(before, after, key):
 class DataPRReview:
     def __init__(self, repository: Path, cache: Path):
         self.repository, self.cache = Path(repository), Path(cache)
+        self.data_prefix = (
+            NAVIGATION_DIRNAME + "/"
+            if (self.repository / NAVIGATION_DIRNAME).is_dir()
+            else ""
+        )
         self._lock = threading.Lock()
         self._results = {}
         self._merges = {}
         self._publications = {}
+
+    def data_path(self, path: str) -> str:
+        """Map a navigation data path to its repository-relative Git path."""
+        safe_path = str(path)
+        if not self.data_prefix or safe_path.startswith(self.data_prefix):
+            return safe_path
+        return self.data_prefix + safe_path
+
+    def data_relative(self, path: str) -> str | None:
+        """Return a navigation data path, or None for files outside that root."""
+        if not self.data_prefix:
+            return str(path)
+        return str(path).removeprefix(self.data_prefix) if str(path).startswith(self.data_prefix) else None
 
     def merge_prepare(self, values):
         from .pr_merge import PRMergeSession
@@ -300,26 +319,32 @@ class DataPRReview:
     def _build(self, repository, number, base, head):
         directory = self.cache / hashlib.sha256((repository + base + head).encode()).hexdigest()[:24]
         trees = {rev: set(self._git("ls-tree", "-r", "--name-only", "-z", rev).decode().split("\0")) for rev in (base, head)}
-        paths = [p for p in self._git("diff", "--name-only", "--no-renames", "-z", base, head).decode().split("\0") if p]
+        paths = [
+            relative
+            for path in self._git("diff", "--name-only", "--no-renames", "-z", base, head).decode().split("\0")
+            if path and (relative := self.data_relative(path)) is not None
+        ]
         grids = [p for p in paths if "/" not in p and p.endswith(".grid.npz")]
         if len(grids) > 20:
             raise ValueError("本版最多同时审阅 20 份变化网格，请拆分 PR")
         checks, files, total_cells = [], [], 0
 
         def read_json(revision, path):
-            if path not in trees[revision]:
+            repository_path = self.data_path(path)
+            if repository_path not in trees[revision]:
                 return {}
-            return json.loads(self._read(revision, path, directory / revision).read_text(encoding="utf-8"))
+            return json.loads(self._read(revision, repository_path, directory / revision).read_text(encoding="utf-8"))
 
         manifests = {rev: read_json(rev, "dataset.json") for rev in (base, head)}
         declarations = read_json(head, "levels.json") or read_json(base, "levels.json")
         for path in grids:
             versions = []
             for rev in (base, head):
-                if path not in trees[rev]:
+                repository_path = self.data_path(path)
+                if repository_path not in trees[rev]:
                     versions.append(None)
                     continue
-                target = self._read(rev, path, directory / rev)
+                target = self._read(rev, repository_path, directory / rev)
                 with zipfile.ZipFile(target) as archive:
                     if sum(item.file_size for item in archive.infolist()) > 256 * 1024 * 1024:
                         raise ValueError(f"{path} 解包尺寸过大")

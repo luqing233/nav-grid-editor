@@ -60,7 +60,7 @@ uv run python -m nav_grid_editor.commands.build_presets --output output/new-tile
 | `--data-root` | 数据根目录，默认当前工作目录 |
 | `--tiles-root` | 瓦片目录，默认 `<data-root>/assets/tiles` |
 | `--profile-dir` | Playwright 登录态目录，默认 `<data-root>/browser_profile` |
-| `--grid2d-dir` | 2D 网格输出目录，默认 `<data-root>/assets/nav-grid-data` |
+| `--grid2d-dir` | 导航业务数据目录，默认 `<data-root>/assets/nav-grid-data/navigation` |
 | `--position-source` | 玩家位置源：`capture`（抓包后端，默认）/ `ws`（官方地图 WS 兜底） |
 | `--capture-url` | 显式指定抓包后端地址；不给就从 `127.0.0.1:8765` 升序探到 `8775` |
 
@@ -183,7 +183,8 @@ uv run nav-grid-editor --grid2d-dir D:/nav-data/grids
 ### 分层连接
 
 网格支持类似 PCB via 的跨层连接。每个 grid 仍只保存 `Unknown/Free/Blocked`，
-跨地图/分层连接统一保存在 `assets/nav-grid-data/links.json`：
+跨地图/分层连接统一保存在
+`assets/nav-grid-data/navigation/links.json`：
 
 - 起点和终点可以是大地图、分层地图或独立地图；
 - 端点保存世界坐标区域（外加所属 `zoom`），不依赖易漂移的格子下标；
@@ -387,8 +388,10 @@ v3 主图读取与标定尺寸相符的完整 Q90 预设。楼层优先读取同
 搜索图和精匹配块从同一套解码像素生成。发布清单记录完整搜索尺寸、ROI、瓦片引用和 SHA-256。
 整图格式输出原尺寸 Q90 WebP。两种格式都通过 `dataset.json` 提供导航注册，网格保留原字节。
 
-`tiled-v3` 还会在 `prepared-v1/` 下生成运行端可直接使用的预编译资源：已有分层图合并为
+`tiled-v3` 会在发布包的 `navigation/localization/prepared/` 下生成运行端可直接使用的
+预编译资源：已有分层图合并为
 按地图分组的 Q90 WebP 竞争图集，同时生成楼层索引、覆盖掩码、排序图引用和完整摘要。
+排序图直接引用 `localization/` 原载荷，prepared 不复制第二份图片。
 这些资源直接跟随 nav-grid-data 发布，不另外打包，也不由客户端首次运行时生成。
 
 导出先在独立暂存目录完成冻结、WebP 编码和校验，交付前复核源文件内容；源数据有变化会失败，
@@ -405,8 +408,9 @@ v3 主图读取与标定尺寸相符的完整 Q90 预设。楼层优先读取同
 
 ```text
 assets/
-├── nav-grid-data/       导航网格数据，随仓库发布
-│                        （网格 + links.json + levels.json）
+├── nav-grid-data/       导航数据仓库，随仓库发布
+│   └── navigation/      运行端唯一数据根
+│                        （网格、levels、links、视觉定位与 prepared）
 ├── tiles/
 │   ├── layers/          预设分层 WebP、目录及本地原图
 │   ├── presets/         完整 Q90 预设瓦片和清单，随仓库发布
@@ -418,7 +422,7 @@ assets/
 
 GitHub 仓库只跟踪以下内容：
 
-- `assets/nav-grid-data/`
+- `assets/nav-grid-data/navigation/`
 - `assets/tiles/maps/`
 - `assets/tiles/presets/`、`assets/tiles/layers/` 中的发布清单和 WebP 预设
 
@@ -497,7 +501,7 @@ SSE `coords` 事件会带上判定结果：`gridFloorStatus`（`unique` / `ambig
 ```python
 from src.nav.grid_io import load_grid
 
-g = load_grid("assets/nav-grid-data/map01_4.grid.npz")
+g = load_grid("assets/nav-grid-data/navigation/map01_4.grid.npz")
 print(g.shape, g.counts(), g.extent())
 ```
 

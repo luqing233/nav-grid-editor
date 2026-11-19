@@ -15,6 +15,7 @@ from .links import normalize_link
 from .settings import disk_tier
 from .localization_native_compaction import _build as compact_native, _tile_pixels
 from .prepared_localization import (
+    PACKAGE_MARKER,
     PREPARED_DIRNAME,
     build_prepared_localization,
     verify_prepared_localization,
@@ -77,16 +78,31 @@ def _verify_v3_pixels(before, after):
 
 def verify_tiled_release(root):
     root = Path(root).resolve()
-    verify_localization_tiles(root)
-    dataset = _json(root / "dataset.json")
-    manifest = _json(root / "localization/manifest.json")
+    data_root = root / "navigation"
+    if not data_root.is_dir():
+        raise ValueError("发布包缺少 navigation 数据根")
+    verify_localization_tiles(data_root)
+    dataset = _json(data_root / "dataset.json")
+    manifest = _json(data_root / "localization/manifest.json")
     if manifest["schema_version"] != 3:
         raise ValueError("发布候选须使用定位瓦片 v3")
-    expected = {"dataset.json", "localization/manifest.json", "validation.json", "README.md",
-                ".gitattributes", "schemas/dataset.schema.json"}
+    expected = {
+        "navigation/dataset.json",
+        "navigation/localization/manifest.json",
+        "navigation/validation.json",
+        "navigation/schemas/dataset.schema.json",
+        "README.md",
+        ".gitattributes",
+    }
+    if (data_root / PACKAGE_MARKER).is_file():
+        expected.add(f"navigation/{PACKAGE_MARKER}")
     expected.update(record["path"] for record in dataset["navigation_files"])
-    expected.update(f"localization/{record['path']}" for record in manifest["files"])
-    prepared = root / PREPARED_DIRNAME
+    expected = {
+        item if item.startswith(("navigation/", "README.md", ".gitattributes")) else f"navigation/{item}"
+        for item in expected
+    }
+    expected.update(f"navigation/localization/{record['path']}" for record in manifest["files"])
+    prepared = data_root / "localization" / PREPARED_DIRNAME
     if prepared.is_dir():
         verify_prepared_localization(prepared)
         expected.update(
@@ -97,14 +113,14 @@ def verify_tiled_release(root):
     actual = {
         path.relative_to(root).as_posix()
         for path in root.rglob("*")
-        if path.is_file() and path != root / ".git"
+        if path.is_file() and not path.is_relative_to(root / ".git")
     }
     if expected != actual:
         raise ValueError(f"发布包有缺项或孤立文件: {sorted(expected ^ actual)[:10]}")
     grids = {}
     for record in dataset["navigation_files"]:
         if record["role"] == "grid":
-            meta = _export_grid_meta(_relative(root, record["path"]))
+            meta = _export_grid_meta(_relative(data_root, record["path"]))
             grids[record["path"]] = tuple(str(meta.get(key, "")) for key in ("map_name", "tier", "zoom"))
     bound = set()
     for entry in dataset["registrations"]:
@@ -116,7 +132,7 @@ def verify_tiled_release(root):
     if bound != grids.keys():
         raise ValueError("存在未注册的导航网格")
     link_ids = set()
-    for raw in _json(root / "links.json")["links"]:
+    for raw in _json(data_root / "links.json")["links"]:
         link = normalize_link(raw)
         if link["id"] in link_ids:
             raise ValueError("发布包存在重复连接 ID")
@@ -162,12 +178,37 @@ def build_tiled_export(frozen, inputs, stage, progress):
     _write_json(stage / "validation.json", report)
     (stage / "schemas").mkdir()
     shutil.copyfile(Path(__file__).with_name("dataset.schema.json"), stage / "schemas/dataset.schema.json")
-    (stage / ".gitattributes").write_text(
+    (stage.parent / ".gitattributes").write_text(
         "*.webp filter=lfs diff=lfs merge=lfs -text\n*.grid.npz filter=lfs diff=lfs merge=lfs -text\n"
         "*.json !filter !diff !merge text eol=lf\n", encoding="utf-8", newline="\n")
-    (stage / "README.md").write_text(
-        "# nav-grid-data 定位瓦片 v3\n\n从 dataset.json 读取导航和定位资源，定位清单为 v3。\n"
-        "原生瓦片使用 full、roi 和 zero 三种存储类型。完整验证、来源摘要及缺项见 validation.json。\n"
-        "Git 发布时使用 Git LFS 保存 WebP 和 NPZ。\n", encoding="utf-8", newline="\n")
+    (stage.parent / "README.md").write_text(
+        "# nav-grid-data\n\n"
+        "`navigation/` 是导航业务的唯一运行根，包含网格、层声明、跨层连接、视觉定位载荷、"
+        "预编译竞争资源和根发布标记。请完整下载并解压整个仓库；只复制其中一部分不构成可用数据包。\n\n"
+        "```text\n"
+        "navigation/\n"
+        "├── dataset.json\n"
+        "├── *.grid.npz\n"
+        "├── levels.json\n"
+        "├── links.json\n"
+        "├── validation.json\n"
+        "├── prepared-package.json\n"
+        "├── schemas/\n"
+        "└── localization/\n"
+        "    ├── manifest.json\n"
+        "    ├── maps/\n"
+        "    ├── layers/\n"
+        "    ├── objects/\n"
+        "    └── prepared/\n"
+        "```\n\n"
+        "`dataset.json`、`localization/manifest.json` 和 "
+        "`localization/prepared/manifest.json` 由 `prepared-package.json` 与 `READY` "
+        "互相绑定。prepared 直接复用 localization 中的楼层排序图，不复制第二份图片。"
+        "运行端只读取这些静态资源，不会在首次定位时编译派生图片。\n\n"
+        "完整验证、来源摘要及缺项见 `navigation/validation.json`。"
+        "WebP 和 NPZ 使用 Git LFS；发布或更新数据前必须取得实体文件，不能提交 LFS 指针文本。\n",
+        encoding="utf-8",
+        newline="\n",
+    )
     return {**summary, "format": "tiled-v3", "release_id": report["release_id"],
             "tiles": report["verification"]["tiles_pixel_equal"], "source_sha256": fingerprint}

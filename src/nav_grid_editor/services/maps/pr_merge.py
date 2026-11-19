@@ -67,8 +67,13 @@ class PRMergeSession:
             if len(bases) != 1:
                 raise ValueError("存在多个共同祖先，请先整理分支后再合并")
             base = bases[0]
-            paths = [safe_path(p) for p in review._git(
-                "diff", "--name-only", "--no-renames", "-z", base, head).decode().split("\0") if p]
+            paths = [
+                safe_path(relative)
+                for path in review._git(
+                    "diff", "--name-only", "--no-renames", "-z", base, head
+                ).decode().split("\0")
+                if path and (relative := review.data_relative(path)) is not None
+            ]
             if len(paths) > 100:
                 raise ValueError("单个 PR 超过 100 份文件，请拆分")
             if any(p.endswith(".grid.npz") and "/" in p for p in paths):
@@ -92,14 +97,15 @@ class PRMergeSession:
 
     def read(self, rev, path):
         safe_path(path)
-        entry = self.tree(rev).get(path)
+        repository_path = self.review.data_path(path)
+        entry = self.tree(rev).get(repository_path)
         if entry is None:
             return None
         if entry[0] not in ("100644", "100755") or entry[1] != "blob":
             raise ValueError(f"不支持符号链接或子模块：{path}")
         key = (rev, path)
         if key not in self.blobs:
-            file = self.review._read(rev, path, self.directory / "sources" / rev)
+            file = self.review._read(rev, repository_path, self.directory / "sources" / rev)
             content = file.read_bytes()
             self.bytes_read += len(content)
             if self.bytes_read > 256 * 1024 * 1024:
@@ -293,33 +299,46 @@ class PRMergeSession:
         files_root.mkdir()
         for path, content in self.result.items():
             if content is not None:
-                destination = files_root / safe_path(path)
+                destination = files_root / safe_path(self.review.data_path(path))
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(content)
         # Validate endpoints with the same implementation used by the editor.
         # Only referenced navigation grids are materialized; no local working data.
         links = self.result["links.json"] if "links.json" in self.result else self.read(self.target, "links.json")
         if links:
-            (files_root / "links.json").write_bytes(links)
+            links_path = files_root / self.review.data_path("links.json")
+            links_path.parent.mkdir(parents=True, exist_ok=True)
+            links_path.write_bytes(links)
             from .service import MapService
             from .links import normalize_link
             for link in json.loads(links)["links"]:
                 normalize_link(link, link.get("id", ""))
-            svc = MapService(data_root=output, grid2d_dir=files_root)
+            svc = MapService(
+                data_root=output,
+                grid2d_dir=files_root / self.review.data_prefix.rstrip("/"),
+            )
             for path in self.tree(self.target):
-                if "/" not in path and path.endswith(".grid.npz") and path not in self.result:
+                relative = self.review.data_relative(path)
+                if (
+                    relative is not None
+                    and "/" not in relative
+                    and relative.endswith(".grid.npz")
+                    and relative not in self.result
+                ):
                     # Endpoint lookup needs file names to disambiguate legacy zooms.
-                    (files_root / safe_path(path)).write_bytes(self.read(self.target,path))
+                    (files_root / safe_path(path)).write_bytes(self.read(self.target, relative))
             invalid = [l for l in svc.get_grid_links()["links"] if not l["checks"]["valid"]]
             if invalid:
                 raise ValueError("合并后连接端点无效：" + "；".join(f"{l['id']} {l['checks']['issue']}" for l in invalid[:8]))
         self.result = self.finalize_manifest(self.result)
         if self.result.get("dataset.json") is not None:
-            (files_root / "dataset.json").write_bytes(self.result["dataset.json"])
+            dataset_path = files_root / self.review.data_path("dataset.json")
+            dataset_path.parent.mkdir(parents=True, exist_ok=True)
+            dataset_path.write_bytes(self.result["dataset.json"])
         plan = dict(repository=self.repository, target=self.target, branch=self.branch,
                     prs=self.prs, resolutions=self.choices,
                     deleted=[p for p,v in self.result.items() if v is None],
-                    files=[dict(path=p, size=len(v), sha256=hashlib.sha256(v).hexdigest())
+                    files=[dict(path=self.review.data_path(p), size=len(v), sha256=hashlib.sha256(v).hexdigest())
                            for p,v in self.result.items() if v is not None])
         archive = output / "grid-merge.zip"
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:

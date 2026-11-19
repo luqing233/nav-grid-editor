@@ -22,6 +22,15 @@ def grid(values, origin=(0, 0, 0), size=1):
 
 
 class PRComparisonTest(unittest.TestCase):
+    def test_navigation_business_root_maps_to_repository_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = Path(temp)
+            (repository / "navigation").mkdir()
+            svc = DataPRReview(repository, repository / "cache")
+            self.assertEqual(svc.data_path("dataset.json"), "navigation/dataset.json")
+            self.assertEqual(svc.data_relative("navigation/links.json"), "links.json")
+            self.assertIsNone(svc.data_relative("README.md"))
+
     def test_github_reuses_existing_cli_login(self):
         svc=DataPRReview(Path("unused"),Path("unused"))
         response=subprocess.CompletedProcess([],0,stdout=b'{"number":2,"title":"test"}',stderr=b"")

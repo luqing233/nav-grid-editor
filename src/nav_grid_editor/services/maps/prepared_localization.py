@@ -24,9 +24,12 @@ from .localization_tiles import (
 )
 from .settings import Image
 
-PREPARED_DIRNAME = "prepared-v1"
+PREPARED_DIRNAME = "prepared"
 PREPARED_KIND = "okef-prepared-localization"
 PREPARED_VERSION = 1
+PACKAGE_MARKER = "prepared-package.json"
+PACKAGE_KIND = "okef-prepared-nav-package"
+PACKAGE_VERSION = 1
 INPUT_WIDTH = 1280
 COMPOSITE_DIM = 0.3
 COMPOSITE_PADDING = 320
@@ -358,7 +361,7 @@ def build_prepared_localization(root: Path) -> dict:
     catalog = _json(_relative(local, manifest["layer_catalog"]))
     entries = [entry for entry in catalog["layers"] if entry.get("map_category") == "layered"]
     base_entries = {entry["map_id"]: entry for entry in manifest["base_maps"]}
-    output = root / PREPARED_DIRNAME
+    output = root / "localization" / PREPARED_DIRNAME
     target_sha = _digest(manifest_path)
     if output.exists():
         raise ValueError(f"预编译资源目录已存在: {output}")
@@ -398,12 +401,7 @@ def build_prepared_localization(root: Path) -> dict:
             all_records.append(_record(output, mask_target))
             rank = foreground.index["floor_rank"]
             rank_resource = rank.get("crop", rank)
-            rank_relative = f"rank-images/{map_id}/{entry['id']}.webp"
-            rank_target = _relative(output, rank_relative)
-            rank_target.parent.mkdir(parents=True, exist_ok=True)
-            rank_bytes = _read_verified(local, rank_resource)
-            rank_target.write_bytes(rank_bytes)
-            all_records.append(_record(output, rank_target))
+            rank_relative = (Path("localization") / rank_resource["path"]).as_posix()
             items.append(_AtlasItem(entry["id"], pixels, coverage, rank))
             floors.append(
                 {
@@ -413,6 +411,8 @@ def build_prepared_localization(root: Path) -> dict:
                     "map_category": entry.get("map_category"),
                     "bounds": entry["bounds"],
                     "rank_path": rank_relative,
+                    "rank_size": rank_resource["size"],
+                    "rank_sha256": rank_resource["sha256"],
                     "rank_shape": [rank["height"], rank["width"]],
                     "rank_roi": rank["roi"],
                     "mask_path": mask_relative,
@@ -488,6 +488,18 @@ def build_prepared_localization(root: Path) -> dict:
     validation = verify_prepared_localization(output, allow_missing_metadata=True)
     _write_json(output / "validation.json", validation)
     _write_ready(output / "READY", digest)
+    _write_json(
+        root / PACKAGE_MARKER,
+        {
+            "kind": PACKAGE_KIND,
+            "schema_version": PACKAGE_VERSION,
+            "complete": True,
+            "release_id": _json(root / "dataset.json")["release_id"],
+            "dataset_sha256": _digest(root / "dataset.json"),
+            "localization_manifest_sha256": target_sha,
+            "prepared_manifest_sha256": digest,
+        },
+    )
     verify_prepared_localization(output)
     return validation
 
@@ -503,6 +515,23 @@ def verify_prepared_localization(root: Path, *, allow_missing_metadata: bool = F
     ):
         raise ValueError("预编译定位清单身份或版本不符")
     files = {item["path"]: item for item in manifest["files"]}
+    package_root = root.parent.parent
+    package_path = package_root / PACKAGE_MARKER
+    if not allow_missing_metadata:
+        if not package_path.is_file():
+            raise ValueError("预编译定位资源必须随完整 nav-grid-data 根目录发布")
+        package = _json(package_path)
+        if (
+            package.get("kind") != PACKAGE_KIND
+            or package.get("schema_version") != PACKAGE_VERSION
+            or package.get("complete") is not True
+            or package.get("release_id") != manifest["source"]["release_id"]
+            or package.get("dataset_sha256") != _digest(package_root / "dataset.json")
+            or package.get("localization_manifest_sha256")
+            != _digest(root.parent / "manifest.json")
+            or package.get("prepared_manifest_sha256") != _digest(manifest_path)
+        ):
+            raise ValueError("预编译定位资源包根标记与载荷摘要不一致")
     actual = {
         path.relative_to(root).as_posix()
         for path in root.rglob("*")
@@ -539,7 +568,9 @@ def verify_prepared_localization(root: Path, *, allow_missing_metadata: bool = F
     if floor_index.get("maps") != expected_floor_index:
         raise ValueError("floor-index.json 与预编译 manifest 不一致")
     for floor in floors:
-        rank = _read_image(_relative(root, floor["rank_path"]), cv2.IMREAD_COLOR)
+        if not floor["rank_path"].startswith("localization/"):
+            raise ValueError(f"楼层排序图必须引用 localization 载荷: {floor['tier_id']}")
+        rank = _read_image(_relative(package_root, floor["rank_path"]), cv2.IMREAD_COLOR)
         expected_rank_shape = tuple(floor["rank_roi"])
         left, top, right, bottom = expected_rank_shape
         if rank.shape != (bottom - top, right - left, 3):

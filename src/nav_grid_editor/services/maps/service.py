@@ -87,6 +87,7 @@ from .settings import (
     Image,
     default_assets_dir,
     default_data_root,
+    default_navigation_dir,
     default_profile_dir,
     default_tiles_root,
     tile_pattern,
@@ -222,14 +223,18 @@ class MapService:
         self.bus = EventBus()
         self.store = TileStore(tiles_root or default_tiles_root(self.data_root))
         self.profile_dir = profile_dir or default_profile_dir(self.data_root)
-        # 2D 网格（无高度）输出目录：可自定义（CLI --grid2d-dir / 环境变量 NAV_GRID2D_DIR）
+        # 运行端导航数据根：网格、层声明、跨层连接和视觉资源都在 navigation/。
+        # 可自定义（CLI --grid2d-dir / 环境变量 NAV_GRID2D_DIR）。
         env_dir = os.environ.get("NAV_GRID2D_DIR", "")
         self.grid2d_dir = (grid2d_dir
                            or (Path(env_dir) if env_dir else None)
-                           or default_assets_dir(self.data_root) / "nav-grid-data")
+                           or default_navigation_dir(self.data_root))
+        self.data_repository_dir = (
+            self.grid2d_dir.parent if self.grid2d_dir.name == "navigation" else self.grid2d_dir
+        )
         self.dataset_export = DatasetExport(self.data_root, self.store.tiles_root, self.grid2d_dir)
-        self.data_sync = DataRepositorySync(self.grid2d_dir)
-        self.pr_review = DataPRReview(self.grid2d_dir, self.data_root / "output" / "pr-review")
+        self.data_sync = DataRepositorySync(self.data_repository_dir)
+        self.pr_review = DataPRReview(self.data_repository_dir, self.data_root / "output" / "pr-review")
         self.local_pr = LocalPRService(self.pr_review)
         self._lock = threading.Lock()
         self._fetch: FetchState | None = None
@@ -2460,7 +2465,7 @@ class MapService:
         else:
             return {"ok": False,
                     "error": "网格是空的：既没有已涂格子也没有原范围（shape），无法确定写多大"
-                             "（要清空请直接删掉 nav-grid-data/ 下的文件）"}
+                             "（要清空请直接删掉 nav-grid-data/navigation/ 下的文件）"}
         width = max_ix - min_ix + 1   # 列数 = x 方向
         height = max_iz - min_iz + 1  # 行数 = z 方向
         if width * height > DENSE_CELL_LIMIT:
