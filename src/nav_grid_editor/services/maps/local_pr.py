@@ -19,7 +19,9 @@ from .grid_merge import merge_grid, merge_records, merge_dataset
 
 
 def navigation_path(path):
-    return "/" not in path and "\\" not in path and (path.endswith(".grid.npz") or path in ("links.json", "levels.json", "dataset.json"))
+    return "/" not in path and "\\" not in path and (
+        path.endswith(".grid.npz") or path in ("links.json", "levels.json", "dataset.json")
+    )
 
 
 def digest(value):
@@ -51,9 +53,16 @@ class LocalSnapshot(PRMergeSession):
         self.bytes_read = 0
         self.prs, self.result, self.fingerprints = [], {}, {}
         self.response = {"ready": True}
-        candidates = set(review._git("diff", "--name-only", "--no-renames", "-z", self.target).decode().split("\0"))
-        candidates.update(review._git("ls-files", "--others", "--exclude-standard", "-z").decode().split("\0"))
-        candidates.discard("")
+        raw_candidates = set(
+            review._git("diff", "--name-only", "--no-renames", "-z", self.target).decode().split("\0")
+        )
+        raw_candidates.update(review._git("ls-files", "--others", "--exclude-standard", "-z").decode().split("\0"))
+        raw_candidates.discard("")
+        candidates = {
+            relative
+            for path in raw_candidates
+            if (relative := review.data_relative(path)) is not None
+        }
         allowed = sorted(p for p in candidates if navigation_path(p))
         if paths is not None:
             if not isinstance(paths, list) or not paths or any(not isinstance(p, str) or p not in allowed for p in paths):
@@ -102,8 +111,10 @@ class LocalSnapshot(PRMergeSession):
     def saved(self, path):
         safe_path(path)
         root = self.review.repository.resolve()
-        file = root / path
-        if file.is_symlink() or file.resolve().parent != root:
+        repository_path = self.review.data_path(path)
+        file = root / repository_path
+        expected_parent = (root / self.review.data_prefix.rstrip("/")).resolve()
+        if file.is_symlink() or file.resolve().parent != expected_parent:
             raise ValueError("不支持符号链接或仓库外文件：" + path)
         if not file.exists():
             return None

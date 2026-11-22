@@ -17,6 +17,7 @@ from nav_grid_editor.services.maps.localization_search_compaction import _compac
 from nav_grid_editor.services.maps import MapService
 from nav_grid_editor.services.maps.dataset_export import _build, _json, _plan, _record, _write_json
 from nav_grid_editor.services.maps.dataset_tiled_export import verify_tiled_release
+from nav_grid_editor.services.maps.prepared_localization import verify_prepared_localization
 
 
 class LocalizationTilesTest(unittest.TestCase):
@@ -125,7 +126,8 @@ class LocalizationTilesTest(unittest.TestCase):
         self.assertFalse(job.status()["running"], job.status())
         self.assertIsNone(job.status()["error"], job.status())
         verify_tiled_release(self.output)
-        local = self.output / "localization"
+        data_root = self.output / "navigation"
+        local = data_root / "localization"
         floor = _json(local / "layers/floor/tiles.json")
         self.assertEqual(floor["source"]["kind"], "existing-floor-webp-lossless-tiles")
         actual = np.zeros((floor["height"], floor["width"], 3), np.uint8)
@@ -146,18 +148,46 @@ class LocalizationTilesTest(unittest.TestCase):
         expected[expected[:, :, 3] == 0, :3] = 0
         np.testing.assert_array_equal(actual, expected[:, :, :3])
         self.assertFalse((local / "maps/m/4/m_4.webp").exists())
-        report = _json(self.output / "validation.json")
-        self.assertEqual((self.output / "levels.json").read_bytes(), saved_levels)
+        report = _json(data_root / "validation.json")
+        self.assertEqual((data_root / "levels.json").read_bytes(), saved_levels)
         self.assertEqual(report["missing_layers"][0]["id"], "unavailable")
         self.assertEqual(report["verification"]["tiles_pixel_equal"], 4)
-        dataset = _json(self.output / "dataset.json")
+        prepared = local / "prepared"
+        prepared_manifest = _json(prepared / "manifest.json")
+        self.assertEqual(prepared_manifest["kind"], "okef-prepared-localization")
+        self.assertEqual(prepared_manifest["source"]["webp_quality"], 90)
+        self.assertEqual(prepared_manifest["coverage"]["layered_floors"], 1)
+        self.assertTrue((prepared / "READY").is_file())
+        self.assertEqual(verify_prepared_localization(prepared)["maps"], {"m": 1})
+        atlas_raw = (prepared / prepared_manifest["atlases"]["m"]["path"]).read_bytes()
+        self.assertEqual(atlas_raw[8:12], b"WEBP")
+        self.assertEqual(report["prepared_localization"]["layered_floors"], 1)
+        dataset = _json(data_root / "dataset.json")
         manifest = _json(local / "manifest.json")
-        managed_bytes = (self.output / "dataset.json").stat().st_size + dataset["localization_manifest"]["size"]
+        managed_bytes = (data_root / "dataset.json").stat().st_size + dataset["localization_manifest"]["size"]
         managed_bytes += sum(row["size"] for row in (*dataset["navigation_files"], *manifest["files"]))
         self.assertEqual(report["package_bytes_after"], managed_bytes)
+        self.assertFalse(any("rank-images" in row["path"] for row in prepared_manifest["files"]))
+        self.assertTrue(all(row["rank_path"].startswith("localization/") for row in prepared_manifest["floors"]))
+        self.assertFalse((prepared / "rank-images").exists())
+        self.assertTrue((data_root / "prepared-package.json").is_file())
+        self.assertTrue((self.output / "README.md").is_file())
         (local / "orphan.webp").write_bytes(raw)
         with self.assertRaisesRegex(ValueError, "孤立"):
             verify_tiled_release(self.output)
+
+    def test_prepared_localization_rejects_corrupt_index(self):
+        self.assertTrue(self.svc.dataset_export.start(str(self.output), export_format="tiled-v3")["ok"])
+        deadline = time.monotonic() + 20
+        while self.svc.dataset_export.status()["running"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIsNone(self.svc.dataset_export.status()["error"])
+        prepared = self.output / "navigation/localization/prepared"
+        manifest = _json(prepared / "manifest.json")
+        atlas = prepared / manifest["atlases"]["m"]["path"]
+        atlas.write_bytes(atlas.read_bytes() + b"corrupt")
+        with self.assertRaisesRegex(ValueError, "摘要不符|竞争图集"):
+            verify_prepared_localization(prepared)
 
     def test_v2_keeps_tiles_navigation_and_calibration_bytes(self):
         self.build()

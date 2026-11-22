@@ -491,7 +491,9 @@ class DatasetExport:
             if tiled:
                 from .dataset_tiled_export import build_tiled_export, verify_tiled_release
 
-                summary = build_tiled_export(frozen, inputs, stage, self._progress)
+                navigation_root = stage / "navigation"
+                navigation_root.mkdir()
+                summary = build_tiled_export(frozen, inputs, navigation_root, self._progress)
             else:
                 summary = _build(frozen, stage, self._progress)
             self._progress("校验源文件一致性")

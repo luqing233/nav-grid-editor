@@ -215,23 +215,25 @@ class IntegrationPublisher:
             paths=sorted(changes,key=lambda p:(not p.endswith(".gitattributes"),p))
             for path in paths:
                 safe_path(path)
+                repository_path=self.session.review.data_path(path)
                 content=changes[path]
                 if content is None:
-                    self.git("update-index","--force-remove","--",path)
+                    self.git("update-index","--force-remove","--",repository_path)
                     continue
-                attributes=self.git("check-attr","--cached","-z","filter","--",path).split(b"\0")
+                attributes=self.git("check-attr","--cached","-z","filter","--",repository_path).split(b"\0")
                 filter_name=attributes[2].decode()
                 if filter_name=="lfs":
-                    content=self.git("lfs","clean","--",path,data=content)
+                    content=self.git("lfs","clean","--",repository_path,data=content)
                     if not content.startswith(b"version https://git-lfs.github.com/spec/v1\n"):
                         raise ValueError("Git LFS 未生成有效指针："+path)
                 elif filter_name not in ("unspecified","unset"):
                     raise ValueError("不支持自动执行文件过滤器："+filter_name)
                 oid=self.git("hash-object","-w","--stdin",data=content).decode().strip()
-                old=self.session.tree(pr["head"]).get(path) or self.session.tree(self.state["target"]).get(path)
+                old=(self.session.tree(pr["head"]).get(repository_path)
+                     or self.session.tree(self.state["target"]).get(repository_path))
                 mode=old[0] if old else "100644"
                 if mode not in ("100644","100755"):raise ValueError("不支持该文件模式："+path)
-                self.git("update-index","--add","--cacheinfo",mode,oid,path)
+                self.git("update-index","--add","--cacheinfo",mode,oid,repository_path)
             tree=self.git("write-tree").decode().strip()
             message=f"feat(data): 集成网格 PR #{pr['number']}\n\nSource-PR: {pr['number']}\nSource-Head: {pr['head']}\n"
             parent=self.git("commit-tree",tree,"-p",parent,"-p",pr["head"],data=message.encode()).decode().strip()

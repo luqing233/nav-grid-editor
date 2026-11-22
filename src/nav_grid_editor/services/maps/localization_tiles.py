@@ -380,7 +380,11 @@ def verify_localization_tiles(root):
             or coverage["layer_count"] != len(layer_ids)
             or coverage["independent_layer_count"] != sum(e["map_category"] == "independent" for e in catalog["layers"])):
         raise ValueError("定位目录的身份或覆盖声明不一致")
-    present = {path.relative_to(local).as_posix() for path in local.rglob("*") if path.is_file()}
+    present = {
+        relative
+        for path in local.rglob("*")
+        if path.is_file() and (relative := path.relative_to(local).as_posix()).split("/", 1)[0] != "prepared"
+    }
     if present != files.keys() | {"manifest.json"}:
         raise ValueError("定位目录存在孤立文件或缺少清单文件")
     used = {manifest["layer_catalog"]}

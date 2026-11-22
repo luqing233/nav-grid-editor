@@ -61,7 +61,7 @@ GRID_STATES = frozenset((CELL_UNKNOWN, CELL_FREE, CELL_BLOCKED))
 #
 # 采集/编辑**产物**统一收在 assets/ 下，根目录只留源码与"凭证类"目录：
 #   assets/tiles/              瓦片数据（latest / run_* 会话 / maps 总图）
-#   assets/nav-grid-data/      2D 导航网格 npz
+#   assets/nav-grid-data/      导航数据仓库（运行端数据在 navigation/）
 #   assets/items/map_auth/     地图标记数据（只此一份，公开口径已退场）
 #   browser_profile/           Playwright 持久化登录配置（是登录态，不是产物）
 #   configs/                   数美 dId 缓存（是设备标识，不是产物）
@@ -87,6 +87,11 @@ def default_assets_dir(root: Path | None = None) -> Path:
     if env:
         return Path(env)
     return (Path(root) if root else default_data_root()) / "assets"
+
+
+def default_navigation_dir(root: Path | None = None) -> Path:
+    """Runtime navigation root published inside the data repository."""
+    return default_assets_dir(root) / "nav-grid-data" / "navigation"
 
 
 # 瓦片根目录（可用环境变量 NAV_TILES_ROOT 覆盖）
